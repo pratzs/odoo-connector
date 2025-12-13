@@ -268,6 +268,27 @@ class OdooClient:
             if data: total_qty += data[0].get(field_name, 0)
         return total_qty
 
+    def search_partner_by_email(self, email):
+    # Search for Active AND Inactive
+    # The '|' operator means OR in Odoo Polish Notation
+    domain = ['|', ['active', '=', True], ['active', '=', False]]
+    domain.append(['email', '=', email])
+    
+    ids = self.models.execute_kw(self.db, self.uid, self.password,
+        'res.partner', 'search', [domain])
+    if ids:
+        # Fetch status to see if we need to reactivate
+        partners = self.models.execute_kw(self.db, self.uid, self.password,
+            'res.partner', 'read', [ids], {'fields': ['id', 'name', 'active', 'parent_id', 'user_id', 'category_id']})
+        
+        # If the found partner is inactive, reactivate them (Optional, depending on your preference)
+        if not partners[0].get('active'):
+            self.models.execute_kw(self.db, self.uid, self.password,
+                'res.partner', 'write', [[partners[0]['id']], {'active': True}])
+            
+        return partners[0]
+    return None
+
     def create_sale_order(self, order_vals, context=None):
         kwargs = {}
         if context:
