@@ -1234,23 +1234,8 @@ def api_save_settings():
         return jsonify({"message": str(e)}), 500
 
 
-def run_schedule():
-    # --- UPDATED: Run tasks in Threads so they don't block each other ---
-    schedule.every(1).days.do(lambda: threading.Thread(target=sync_products_master).start())
-    schedule.every(1).days.do(lambda: threading.Thread(target=sync_customers_master).start())
-    schedule.every(30).days.do(lambda: threading.Thread(target=archive_shopify_duplicates).start())
-    
-    # 30 Minute Inventory Sync
-    schedule.every(30).minutes.do(lambda: threading.Thread(target=scheduled_inventory_sync).start())
-    
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
 
-# --- START SCHEDULER (Threaded, outside main so Gunicorn sees it) ---
-t = threading.Thread(target=run_schedule, daemon=True)
-t.start()
-
+# 1. Define Cleanup Function FIRST
 def cleanup_old_logs():
     """Deletes logs older than 14 days to keep DB light."""
     with app.app_context():
@@ -1263,8 +1248,27 @@ def cleanup_old_logs():
             db.session.rollback()
             print(f"Maintenance Error: {e}")
 
-# In run_schedule():
-schedule.every(1).days.at("03:00").do(lambda: threading.Thread(target=cleanup_old_logs).start())
+# 2. Define Scheduler SECOND (referencing the cleanup function)
+def run_schedule():
+    # Sync Jobs
+    schedule.every(1).days.do(lambda: threading.Thread(target=sync_products_master).start())
+    schedule.every(1).days.do(lambda: threading.Thread(target=sync_customers_master).start())
+    schedule.every(30).days.do(lambda: threading.Thread(target=archive_shopify_duplicates).start())
+    
+    # Inventory Sync
+    schedule.every(30).minutes.do(lambda: threading.Thread(target=scheduled_inventory_sync).start())
+    
+    # Maintenance Job (Now correctly placed inside the loop definition)
+    schedule.every(1).days.at("03:00").do(lambda: threading.Thread(target=cleanup_old_logs).start())
+    
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
+
+# 3. Start Scheduler LAST
+# This ensures all functions are defined before the thread starts using them
+t = threading.Thread(target=run_schedule, daemon=True)
+t.start()
 
 if __name__ == '__main__':
     # Flask Dev Server
