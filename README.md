@@ -1,0 +1,1 @@
+# odoo-shopify-connector

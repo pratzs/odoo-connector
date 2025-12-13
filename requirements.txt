@@ -1,0 +1,9 @@
+Flask==3.0.0
+requests==2.31.0
+pg8000==1.30.3
+scramp==1.4.4
+Flask-SQLAlchemy==3.1.1
+gunicorn==21.2.0
+python-dotenv==1.0.0
+ShopifyAPI==12.5.0
+schedule==1.2.1
