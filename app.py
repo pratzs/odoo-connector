@@ -1251,6 +1251,21 @@ def run_schedule():
 t = threading.Thread(target=run_schedule, daemon=True)
 t.start()
 
+def cleanup_old_logs():
+    """Deletes logs older than 14 days to keep DB light."""
+    with app.app_context():
+        cutoff = datetime.utcnow() - timedelta(days=14)
+        try:
+            deleted = SyncLog.query.filter(SyncLog.timestamp < cutoff).delete()
+            db.session.commit()
+            print(f"Maintenance: Cleaned up {deleted} old log entries.")
+        except Exception as e:
+            db.session.rollback()
+            print(f"Maintenance Error: {e}")
+
+# In run_schedule():
+schedule.every(1).days.at("03:00").do(lambda: threading.Thread(target=cleanup_old_logs).start())
+
 if __name__ == '__main__':
     # Flask Dev Server
     app.run(debug=True)
