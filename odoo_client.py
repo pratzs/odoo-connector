@@ -12,9 +12,6 @@ class OdooClient:
         # Enable allow_none to handle empty Shopify fields without crashing
         self.common = xmlrpc.client.ServerProxy(f'{self.url}/xmlrpc/2/common', context=self.context, allow_none=True)
         self.uid = self.common.authenticate(self.db, self.username, self.password, {})
-        
-        # IMPORTANT: self.models is NOT assigned here anymore because it is a @property below.
-        # This prevents the "property 'models' has no setter" error.
 
     @property
     def models(self):
@@ -25,12 +22,22 @@ class OdooClient:
         return xmlrpc.client.ServerProxy(f'{self.url}/xmlrpc/2/object', context=self.context, allow_none=True)
 
     def search_partner_by_email(self, email):
-        # Strictly Active
+        # Strictly Active OR Inactive (to prevent duplicates)
+        domain = ['|', ['active', '=', True], ['active', '=', False]]
+        domain.append(['email', '=', email])
+        
         ids = self.models.execute_kw(self.db, self.uid, self.password,
-            'res.partner', 'search', [[['email', '=', email], ['active', '=', True]]])
+            'res.partner', 'search', [domain])
+        
         if ids:
             partners = self.models.execute_kw(self.db, self.uid, self.password,
-                'res.partner', 'read', [ids], {'fields': ['id', 'name', 'parent_id', 'user_id', 'category_id']})
+                'res.partner', 'read', [ids], {'fields': ['id', 'name', 'active', 'parent_id', 'user_id', 'category_id']})
+            
+            # If found but inactive, reactivate them
+            if not partners[0].get('active'):
+                self.models.execute_kw(self.db, self.uid, self.password,
+                    'res.partner', 'write', [[partners[0]['id']], {'active': True}])
+            
             return partners[0]
         return None
 
@@ -222,8 +229,6 @@ class OdooClient:
         fields = ['id', 'name', 'email', 'phone', 'street', 'city', 'zip', 'country_id', 'vat', 'category_id', 'user_id']
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search_read', [domain], {'fields': fields})
 
-
-
     def get_product_ids_with_recent_stock_moves(self, time_limit_str, company_id=None):
         """
         Finds products that have moved (Sold, Purchased, Adjusted) recently.
@@ -249,7 +254,6 @@ class OdooClient:
                 
         return list(product_ids)
 
-
     def get_companies(self):
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.company', 'search_read', [[]], {'fields': ['id', 'name']})
 
@@ -267,27 +271,6 @@ class OdooClient:
                 {'fields': [field_name], 'context': context})
             if data: total_qty += data[0].get(field_name, 0)
         return total_qty
-
-    def search_partner_by_email(self, email):
-    # Search for Active AND Inactive
-    # The '|' operator means OR in Odoo Polish Notation
-    domain = ['|', ['active', '=', True], ['active', '=', False]]
-    domain.append(['email', '=', email])
-    
-    ids = self.models.execute_kw(self.db, self.uid, self.password,
-        'res.partner', 'search', [domain])
-    if ids:
-        # Fetch status to see if we need to reactivate
-        partners = self.models.execute_kw(self.db, self.uid, self.password,
-            'res.partner', 'read', [ids], {'fields': ['id', 'name', 'active', 'parent_id', 'user_id', 'category_id']})
-        
-        # If the found partner is inactive, reactivate them (Optional, depending on your preference)
-        if not partners[0].get('active'):
-            self.models.execute_kw(self.db, self.uid, self.password,
-                'res.partner', 'write', [[partners[0]['id']], {'active': True}])
-            
-        return partners[0]
-    return None
 
     def create_sale_order(self, order_vals, context=None):
         kwargs = {}
