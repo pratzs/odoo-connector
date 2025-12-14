@@ -256,7 +256,7 @@ def process_order_data(data):
                 if user_info: company_id = user_info[0]['company_id'][0]
             except: pass
 
-        # Check for Existing Order
+        # Check for Existing Order (Early Check)
         existing_order_id = None
         try:
             existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
@@ -274,7 +274,6 @@ def process_order_data(data):
             def_address = data.get('billing_address') or data.get('shipping_address') or {}
             
             # Name Logic: Use Company Name if available, otherwise Person Name
-            # (But effectively treat Person Name as a "Company" name in Odoo)
             company_name = def_address.get('company')
             person_name = f"{cust_data.get('first_name', '')} {cust_data.get('last_name', '')}".strip()
             final_name = company_name if company_name else (person_name or email)
@@ -320,15 +319,12 @@ def process_order_data(data):
         partner_id = extract_id(partner['parent_id'][0] if partner.get('parent_id') else partner['id'])
 
         # B) Handle Child Addresses (Invoice & Delivery)
-        # We always check/create these to ensure the order has distinct addresses linked
         bill_addr = data.get('billing_address') or {}
         ship_addr = data.get('shipping_address') or {}
         
         # Helper to map Shopify address to Odoo Child Data
         def prep_child_addr(addr_data, label):
             display_name = addr_data.get('name') or partner['name']
-            # If the name is just the company name, append the label to distinguish contacts
-            # e.g. "Worthy Products (Invoice)"
             if display_name == partner['name']:
                 display_name = f"{display_name} ({label})"
             
@@ -339,7 +335,7 @@ def process_order_data(data):
                 'zip': addr_data.get('zip'),
                 'country_code': addr_data.get('country_code'),
                 'phone': addr_data.get('phone'),
-                'email': email # Inherit email from main
+                'email': email 
             }
 
         # Resolve Invoice Contact
@@ -347,14 +343,14 @@ def process_order_data(data):
             inv_data = prep_child_addr(bill_addr, "Invoice")
             invoice_id = odoo.find_or_create_child_address(partner_id, inv_data, type='invoice')
         else:
-            invoice_id = partner_id # Fallback to main
+            invoice_id = partner_id 
 
         # Resolve Delivery Contact
         if ship_addr:
             ship_data = prep_child_addr(ship_addr, "Delivery")
             shipping_id = odoo.find_or_create_child_address(partner_id, ship_data, type='delivery')
         else:
-            shipping_id = partner_id # Fallback to main
+            shipping_id = partner_id 
         
         # Sales Rep Resolution
         sales_rep_id = odoo.get_partner_salesperson(partner_id)
@@ -443,6 +439,15 @@ def process_order_data(data):
         gateway = data.get('gateway') or (data.get('payment_gateway_names')[0] if data.get('payment_gateway_names') else 'Shopify')
         note_text = f"Payment Gateway: {gateway}"
 
+        # --- RE-CHECK FOR EXISTING ORDER (Race Condition Fix) ---
+        # If another thread created the order while we were preparing lines, we must find it now.
+        try:
+            existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
+            if existing_ids:
+                existing_order_id = existing_ids[0]
+        except: pass
+
         if existing_order_id:
             # --- UPDATE PATH ---
             order_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'read', [[existing_order_id]], {'fields': ['state', 'note', 'order_line']})
@@ -479,7 +484,6 @@ def process_order_data(data):
                         new_set.append((d['product_id'], float(d['product_uom_qty']), float(d['price_unit']), float(d['discount'])))
                     new_set.sort()
                     
-                    # Fuzzy float comparison
                     if len(curr_set) != len(new_set): has_changes = True
                     else:
                         for c, n in zip(curr_set, new_set):
@@ -493,8 +497,8 @@ def process_order_data(data):
 
             update_vals = {
                 'order_line': [(5, 0, 0)] + lines,
-                'partner_shipping_id': shipping_id, # Updated to use Delivery Contact
-                'partner_invoice_id': invoice_id,   # Updated to use Invoice Contact
+                'partner_shipping_id': shipping_id, 
+                'partner_invoice_id': invoice_id,  
                 'note': note_text 
             }
             try:
@@ -510,9 +514,9 @@ def process_order_data(data):
             vals = {
                 'name': client_ref, 
                 'client_order_ref': client_ref, 
-                'partner_id': partner_id,           # Main Company
-                'partner_invoice_id': invoice_id,   # Child Contact
-                'partner_shipping_id': shipping_id, # Child Contact
+                'partner_id': partner_id,           
+                'partner_invoice_id': invoice_id,   
+                'partner_shipping_id': shipping_id, 
                 'order_line': lines, 
                 'user_id': sales_rep_id, 
                 'state': 'draft',
