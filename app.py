@@ -955,31 +955,55 @@ def sync_categories_only():
         log_event('System', 'Success', f"Category Sync Finished. Updated {updated_count} products.")
 
 def cleanup_shopify_products(odoo_active_skus):
+    """
+    Safely cleans up Shopify:
+    1. Archives ACTUAL duplicates (if 2 products have same SKU, keeps one, archives others).
+    2. DOES NOT archive products just because they are missing in Odoo (Safety Fix).
+    """
     if not setup_shopify_session(): return
     seen_skus = set()
-    products = shopify.Product.find(limit=250)
-    page = products
+    
+    # Iterate through all Shopify products
+    page = shopify.Product.find(limit=250)
     archived_count = 0
+    
     try:
         while page:
             for sp in page:
                 variant = sp.variants[0] if sp.variants else None
                 if not variant or not variant.sku: continue
+                
                 sku = variant.sku
                 needs_archive = False
-                if sku not in odoo_active_skus: needs_archive = True
-                elif sku in seen_skus: needs_archive = True
+                
+                # --- SAFETY UPDATE ---
+                # REMOVED: "if sku not in odoo_active_skus" check.
+                # We do NOT want to archive products just because they seem missing in Odoo.
+                
+                # ONLY archive if we have already seen this SKU in this loop (Duplicate in Shopify)
+                if sku in seen_skus: 
+                    needs_archive = True
                 
                 if needs_archive:
                     if sp.status != 'archived':
                         sp.status = 'archived'
                         sp.save()
                         archived_count += 1
-                else: seen_skus.add(sku)
-            if page.has_next_page(): page = page.next_page()
-            else: break
-    except: pass
-    if archived_count > 0: log_event('System', 'Success', f"Cleanup Complete. Archived {archived_count} products.")
+                        log_event('System', 'Warning', f"Archived Duplicate in Shopify: {sku}")
+                else: 
+                    # Mark SKU as seen so next time we encounter it (duplicate), we archive the second one
+                    seen_skus.add(sku)
+            
+            if page.has_next_page(): 
+                page = page.next_page()
+            else: 
+                break
+    except Exception as e:
+        print(f"Cleanup Error: {e}")
+        
+    if archived_count > 0: 
+        log_event('System', 'Success', f"Cleanup Complete. Archived {archived_count} duplicates.")
+        
 def perform_inventory_sync(lookback_minutes):
     """Checks Odoo for recent stock moves and updates Shopify."""
     if not odoo or not setup_shopify_session(): return 0, 0
