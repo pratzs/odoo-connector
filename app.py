@@ -315,11 +315,8 @@ def process_order_data(data):
             except Exception as e:
                 return False, f"Customer Creation Error: {e}"
         
-        # --- FIXED: STRICT BRANCH MATCHING ---
-        # OLD BAD LINE (Removed): partner_id = extract_id(partner['parent_id'][0] if partner.get('parent_id') else partner['id'])
-        # NEW LINE: Always use the exact partner found by email. Never roll up to parent automatically.
+        # Initial Partner ID (Likely Parent if email matched Parent)
         partner_id = partner['id']
-        # -------------------------------------
 
         # B) Handle Child Addresses (Invoice & Delivery)
         bill_addr = data.get('billing_address') or {}
@@ -355,6 +352,13 @@ def process_order_data(data):
         else:
             shipping_id = partner_id 
         
+        # --- BRANCH FIX: Override Main Customer with Invoice Contact ---
+        # If we found a specific branch/child for the Invoice Address, 
+        # use THAT as the Main Customer on the order (e.g. "Caltex Orewa")
+        if invoice_id and invoice_id != partner_id:
+            partner_id = invoice_id
+        # -------------------------------------------------------------
+
         # Sales Rep Resolution
         sales_rep_id = odoo.get_partner_salesperson(partner_id)
         if not sales_rep_id: sales_rep_id = odoo.uid
