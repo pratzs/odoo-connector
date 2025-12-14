@@ -55,6 +55,11 @@ with app.app_context():
 order_processing_lock = threading.Lock()
 active_processing_ids = set()
 
+# --- GLOBAL LOCKS & CACHE ---
+order_processing_lock = threading.Lock()
+active_processing_ids = set()
+recent_processed_cache = {} # Stores {shopify_id: timestamp} <--- ADD THIS LINE
+
 # --- HELPERS ---
 def get_config(key, default=None):
     """Safely retrieve config with session management"""
@@ -233,21 +238,29 @@ def process_product_data(data):
     return processed_count
 
 def process_order_data(data):
-    """Syncs order. Forces B2B Structure. Fixes Parent/Child Assignment."""
+    """Syncs order. Includes Cache Cooldown to prevent 3x Duplicates."""
     shopify_id = str(data.get('id', ''))
     shopify_name = data.get('name')
     
+    # --- 1. MEMORY LOCK (Concurrent) ---
     with order_processing_lock:
         if shopify_id in active_processing_ids:
-            return False, "Skipped"
+            return False, "Skipped (Concurrent)"
         active_processing_ids.add(shopify_id)
 
     try:
+        # --- 2. CACHE LOCK (Debounce Retries) ---
+        # If we successfully processed this ID less than 60 seconds ago, STOP.
+        if shopify_id in recent_processed_cache:
+            last_run = recent_processed_cache[shopify_id]
+            if (datetime.utcnow() - last_run).total_seconds() < 60:
+                log_event('Order', 'Info', f"Debounced duplicate webhook for {shopify_name}")
+                return False, "Skipped (Debounce)"
+
         email = data.get('email') or data.get('contact_email')
         client_ref = f"ONLINE_{shopify_name}"
         company_id = get_config('odoo_company_id')
         
-        # Resolve Company Context
         if not company_id and odoo:
             try:
                 user_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
@@ -260,23 +273,18 @@ def process_order_data(data):
         try:
             existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                 'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
-            if existing_ids:
-                existing_order_id = existing_ids[0]
+            if existing_ids: existing_order_id = existing_ids[0]
         except Exception as e: return False, f"Odoo Error: {str(e)}"
 
-        # --- PARTNER LOGIC START ---
-        # 1. Search by Email
+        # --- PARTNER LOGIC ---
         partner = odoo.search_partner_by_email(email)
-        
         cust_data = data.get('customer', {})
         def_address = data.get('billing_address') or data.get('shipping_address') or {}
         
-        # 2. If Not Found, Create New Company
         if not partner:
             company_name = def_address.get('company')
             person_name = f"{cust_data.get('first_name', '')} {cust_data.get('last_name', '')}".strip()
             final_name = company_name if company_name else (person_name or email)
-
             vat_number = None
             for attr in data.get('note_attributes', []):
                 if attr.get('name', '').lower() in ['vat', 'vat_number', 'tax_id']:
@@ -286,75 +294,53 @@ def process_order_data(data):
                 'name': final_name, 'email': email, 'phone': cust_data.get('phone'),
                 'street': def_address.get('address1'), 'city': def_address.get('city'),
                 'zip': def_address.get('zip'), 'country_code': def_address.get('country_code'),
-                'vat': vat_number,
-                'is_company': True, 'company_type': 'company' # Force Company
+                'vat': vat_number, 'is_company': True, 'company_type': 'company'
             }
             if company_id: vals['company_id'] = int(company_id)
-            
             try:
                 partner_id = odoo.create_partner(vals)
                 partner = {'id': partner_id, 'name': final_name, 'street': vals['street'], 'zip': vals['zip']}
                 log_event('Customer', 'Success', f"Created Company Partner: {final_name}")
-                
-                if shopify_id:
-                    c_id = str(data.get('customer', {}).get('id'))
-                    if c_id:
-                        db.session.add(CustomerMap(shopify_customer_id=c_id, odoo_partner_id=partner_id, email=email))
-                        db.session.commit()
+                if shopify_id and data.get('customer', {}).get('id'):
+                    db.session.add(CustomerMap(shopify_customer_id=str(data['customer']['id']), odoo_partner_id=partner_id, email=email))
+                    db.session.commit()
             except Exception as e: return False, f"Customer Creation Error: {e}"
         
-        # 3. Determine IDs
-        # STRICT RULE: The partner found by email IS the partner we use. No rolling up to parents.
+        # STRICT BRANCH MATCHING (Caltex Fix)
         main_partner_id = partner['id']
         
-        # Helper to check if address matches the main partner to avoid creating redundant children
         def is_same_address(addr_data, partner_rec):
-            # Simple check: if street and zip match, it's the same place.
             p_street = (partner_rec.get('street') or '').lower().strip()
             p_zip = (partner_rec.get('zip') or '').lower().strip()
             a_street = (addr_data.get('address1') or '').lower().strip()
             a_zip = (addr_data.get('zip') or '').lower().strip()
             return p_street == a_street and p_zip == a_zip
 
-        # B) Handle Child Addresses
         bill_addr = data.get('billing_address') or {}
         ship_addr = data.get('shipping_address') or {}
 
-        # Resolve Invoice ID
         if bill_addr:
-            if is_same_address(bill_addr, partner):
-                invoice_id = main_partner_id # Use main partner directly
+            if is_same_address(bill_addr, partner): invoice_id = main_partner_id 
             else:
                 inv_data = {
-                    'name': f"{partner['name']} (Invoice)",
-                    'street': bill_addr.get('address1'), 'city': bill_addr.get('city'),
-                    'zip': bill_addr.get('zip'), 'country_code': bill_addr.get('country_code'),
-                    'phone': bill_addr.get('phone'), 'email': email
+                    'name': f"{partner['name']} (Invoice)", 'street': bill_addr.get('address1'), 'city': bill_addr.get('city'),
+                    'zip': bill_addr.get('zip'), 'country_code': bill_addr.get('country_code'), 'phone': bill_addr.get('phone'), 'email': email
                 }
                 invoice_id = odoo.find_or_create_child_address(main_partner_id, inv_data, type='invoice')
-        else:
-            invoice_id = main_partner_id
+        else: invoice_id = main_partner_id
 
-        # Resolve Shipping ID
         if ship_addr:
-            if is_same_address(ship_addr, partner):
-                shipping_id = main_partner_id # Use main partner directly
+            if is_same_address(ship_addr, partner): shipping_id = main_partner_id
             else:
                 ship_data = {
-                    'name': f"{partner['name']} (Delivery)",
-                    'street': ship_addr.get('address1'), 'city': ship_addr.get('city'),
-                    'zip': ship_addr.get('zip'), 'country_code': ship_addr.get('country_code'),
-                    'phone': ship_addr.get('phone'), 'email': email
+                    'name': f"{partner['name']} (Delivery)", 'street': ship_addr.get('address1'), 'city': ship_addr.get('city'),
+                    'zip': ship_addr.get('zip'), 'country_code': ship_addr.get('country_code'), 'phone': ship_addr.get('phone'), 'email': email
                 }
                 shipping_id = odoo.find_or_create_child_address(main_partner_id, ship_data, type='delivery')
-        else:
-            shipping_id = main_partner_id
+        else: shipping_id = main_partner_id
         
-        # Sales Rep
         sales_rep_id = odoo.get_partner_salesperson(main_partner_id) or odoo.uid
-        # --- PARTNER LOGIC END ---
 
-        # --- LINE ITEMS ---
         lines = []
         for item in data.get('line_items', []):
             sku = item.get('sku')
@@ -378,7 +364,6 @@ def process_order_data(data):
                 pct = (disc / (price * qty)) * 100 if price > 0 else 0.0
                 lines.append((0, 0, {'product_id': product_id, 'product_uom_qty': qty, 'price_unit': price, 'name': item['name'], 'discount': pct}))
 
-        # --- SHIPPING ---
         for ship_line in data.get('shipping_lines', []):
             cost = float(ship_line.get('price', 0.0))
             if cost >= 0:
@@ -386,7 +371,6 @@ def process_order_data(data):
                 sp_id = odoo.search_product_by_name(s_title, company_id) or \
                         odoo.search_product_by_sku("SHIP_FEE", company_id) or \
                         odoo.search_product_by_name("Shopify Shipping", company_id)
-                
                 if not sp_id:
                     try:
                         sv = {'name': s_title, 'type': 'service', 'list_price': 0.0, 'default_code': 'SHIP_FEE'}
@@ -394,63 +378,59 @@ def process_order_data(data):
                         odoo.create_product(sv)
                         sp_id = odoo.search_product_by_sku("SHIP_FEE", company_id)
                     except: pass
-                
-                if sp_id:
-                    lines.append((0, 0, {'product_id': sp_id, 'product_uom_qty': 1, 'price_unit': cost, 'name': s_title, 'discount': 0.0}))
+                if sp_id: lines.append((0, 0, {'product_id': sp_id, 'product_uom_qty': 1, 'price_unit': cost, 'name': s_title, 'discount': 0.0}))
 
         if not lines: return False, "No valid lines"
-        
         gateway = data.get('gateway') or (data.get('payment_gateway_names')[0] if data.get('payment_gateway_names') else 'Shopify')
         note_text = f"Payment Gateway: {gateway}"
 
-        # --- UPDATE OR CREATE ---
-        # Race Condition Check
+        # Double Check existing ID again before action
         if not existing_order_id:
             try:
                 e_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
                 if e_ids: existing_order_id = e_ids[0]
             except: pass
 
+        success_flag = False
         if existing_order_id:
-            # UPDATE PATH
-            curr = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'read', [[existing_order_id]], {'fields': ['state', 'partner_id']})
+            curr = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'read', [[existing_order_id]], {'fields': ['state', 'partner_id', 'note', 'order_line']})
             if not curr: return False, "Order Missing"
-            
-            if curr[0]['state'] in ['done', 'cancel']: return True, "Skipped"
-
-            # Force Update of Partner ID (Fixes the CSB Group issue)
-            update_vals = {
-                'partner_id': main_partner_id, # FIX: Force correct owner
-                'partner_invoice_id': invoice_id,
-                'partner_shipping_id': shipping_id,
-                'note': note_text,
-                'order_line': [(5, 0, 0)] + lines
-            }
-            try:
+            if curr[0]['state'] in ['done', 'cancel']:
+                success_flag = True # Mark as handled (skipped)
+            else:
+                # Update Logic
+                update_vals = {
+                    'partner_id': main_partner_id, 'partner_invoice_id': invoice_id,
+                    'partner_shipping_id': shipping_id, 'note': note_text, 'order_line': [(5, 0, 0)] + lines
+                }
                 odoo.update_sale_order(existing_order_id, update_vals)
                 odoo.post_message(existing_order_id, f"Order Updated via Shopify Sync. {note_text}")
                 log_event('Order', 'Success', f"Updated {client_ref}")
-                return True, "Updated"
-            except Exception as e:
-                log_event('Order', 'Error', f"Update Failed: {e}")
-                return False, str(e)
+                success_flag = True
         else:
-            # CREATE PATH
             vals = {
-                'name': client_ref, 'client_order_ref': client_ref, 
-                'partner_id': main_partner_id, 
+                'name': client_ref, 'client_order_ref': client_ref, 'partner_id': main_partner_id, 
                 'partner_invoice_id': invoice_id, 'partner_shipping_id': shipping_id, 
-                'order_line': lines, 'user_id': sales_rep_id, 
-                'state': 'draft', 'note': note_text
+                'order_line': lines, 'user_id': sales_rep_id, 'state': 'draft', 'note': note_text
             }
             if company_id: vals['company_id'] = int(company_id)
-            try:
-                odoo.create_sale_order(vals, context={'manual_price': True})
-                log_event('Order', 'Success', f"Synced {client_ref}")
-                return True, "Synced"
-            except Exception as e:
-                log_event('Order', 'Error', str(e))
-                return False, str(e)
+            odoo.create_sale_order(vals, context={'manual_price': True})
+            log_event('Order', 'Success', f"Synced {client_ref}")
+            success_flag = True
+
+        # --- UPDATE CACHE ON SUCCESS ---
+        if success_flag:
+            recent_processed_cache[shopify_id] = datetime.utcnow()
+            
+            # Cleanup old cache
+            keys_to_del = [k for k, v in recent_processed_cache.items() if (datetime.utcnow() - v).total_seconds() > 300]
+            for k in keys_to_del: del recent_processed_cache[k]
+            
+        return True, "Synced"
+
+    except Exception as e:
+        log_event('Order', 'Error', f"Error {shopify_name}: {e}")
+        return False, str(e)
     finally:
         with order_processing_lock:
             if shopify_id in active_processing_ids:
