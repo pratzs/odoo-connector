@@ -1250,16 +1250,25 @@ def cleanup_old_logs():
 
 # 2. Define Scheduler SECOND (referencing the cleanup function)
 def run_schedule():
-    # Sync Jobs
-    schedule.every(1).days.do(lambda: threading.Thread(target=sync_products_master).start())
-    schedule.every(1).days.do(lambda: threading.Thread(target=sync_customers_master).start())
-    schedule.every(30).days.do(lambda: threading.Thread(target=archive_shopify_duplicates).start())
+    # --- Sync Jobs (Using specific UTC times for NZDT) ---
     
-    # Inventory Sync
+    # Customer Master Sync: 4:00 PM NZDT = 03:00 UTC
+    schedule.every().day.at("03:00").do(lambda: threading.Thread(target=sync_customers_master).start())
+
+    # Product Master Sync: 5:00 PM NZDT = 04:00 UTC
+    # (Running 1 hour later to prevent database conflicts)
+    schedule.every().day.at("04:00").do(lambda: threading.Thread(target=sync_products_master).start())
+
+    # Duplicate Archive: 6:00 PM NZDT = 05:00 UTC (Runs every 3 days)
+    schedule.every(3).days.at("05:00").do(lambda: threading.Thread(target=archive_shopify_duplicates).start())
+    
+    # --- High Frequency Jobs ---
+    # Inventory Sync (Every 30 mins) - Timezone irrelevant
     schedule.every(30).minutes.do(lambda: threading.Thread(target=scheduled_inventory_sync).start())
     
-    # Maintenance Job (Now correctly placed inside the loop definition)
-    schedule.every(1).days.at("03:00").do(lambda: threading.Thread(target=cleanup_old_logs).start())
+    # --- Maintenance Job ---
+    # Log Cleanup: 7:00 PM NZDT = 06:00 UTC
+    schedule.every().day.at("06:00").do(lambda: threading.Thread(target=cleanup_old_logs).start())
     
     while True:
         schedule.run_pending()
