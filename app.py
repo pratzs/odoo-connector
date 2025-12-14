@@ -315,8 +315,11 @@ def process_order_data(data):
             except Exception as e:
                 return False, f"Customer Creation Error: {e}"
         
-        # Ensure we have the Main Company ID (if search found a child contact, resolve to parent)
+        # --- FIXED: STRICT BRANCH MATCHING ---
+        # OLD BAD LINE (Removed): partner_id = extract_id(partner['parent_id'][0] if partner.get('parent_id') else partner['id'])
+        # NEW LINE: Always use the exact partner found by email. Never roll up to parent automatically.
         partner_id = partner['id']
+        # -------------------------------------
 
         # B) Handle Child Addresses (Invoice & Delivery)
         bill_addr = data.get('billing_address') or {}
