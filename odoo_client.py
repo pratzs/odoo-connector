@@ -213,13 +213,14 @@ class OdooClient:
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search', [domain])
 
     def get_changed_customers(self, time_limit_str, company_id=None):
-        domain = [('write_date', '>', time_limit_str), ('is_company', '=', True), ('customer', '=', True), ('active', '=', True)]
+        # UPDATED: Replaced 'customer=True' with 'customer_rank > 0' for Odoo 16+ compatibility
+        domain = [('write_date', '>', time_limit_str), ('is_company', '=', True), ('customer_rank', '>', 0), ('active', '=', True)]
         if company_id:
             domain = [
                 '&', '&', '&',
                 ('write_date', '>', time_limit_str), 
                 ('is_company', '=', True),
-                ('customer', '=', True),
+                ('customer_rank', '>', 0),
                 '|', 
                 ('company_id', '=', int(company_id)), 
                 ('company_id', '=', False)
