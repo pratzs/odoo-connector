@@ -316,7 +316,7 @@ def process_order_data(data):
                 return False, f"Customer Creation Error: {e}"
         
         # Ensure we have the Main Company ID (if search found a child contact, resolve to parent)
-        partner_id = extract_id(partner['parent_id'][0] if partner.get('parent_id') else partner['id'])
+        partner_id = partner['id']
 
         # B) Handle Child Addresses (Invoice & Delivery)
         bill_addr = data.get('billing_address') or {}
