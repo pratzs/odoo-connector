@@ -230,18 +230,16 @@ def process_order_data(data):
     shopify_name = data.get('name')
     
     # --- 0. ANTI-RACE JITTER (CRITICAL FIX) ---
-    # Sleep 0.5s to 2.0s. If duplicate webhooks hit different workers simultaneously,
-    # this desynchronizes them so the second one finds the order created by the first.
     time.sleep(random.uniform(0.5, 2.0))
 
-    # --- 1. MEMORY LOCK (Concurrent within same worker) ---
+    # --- 1. MEMORY LOCK ---
     with order_processing_lock:
         if shopify_id in active_processing_ids:
             return False, "Skipped (Concurrent)"
         active_processing_ids.add(shopify_id)
 
     try:
-        # --- 2. CACHE LOCK (Debounce Retries) ---
+        # --- 2. CACHE LOCK ---
         if shopify_id in recent_processed_cache:
             last_run = recent_processed_cache[shopify_id]
             if (datetime.utcnow() - last_run).total_seconds() < 60:
@@ -258,7 +256,7 @@ def process_order_data(data):
                 if user_info: company_id = user_info[0]['company_id'][0]
             except: pass
 
-        # Check for Existing Order (CRITICAL: Search strictly by Client Ref)
+        # Check for Existing Order
         existing_order_id = None
         try:
             existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
@@ -296,41 +294,40 @@ def process_order_data(data):
                     db.session.commit()
             except Exception as e: return False, f"Customer Creation Error: {e}"
         
+        # --- CRITICAL FIX: FORCE BRANCH RESOLUTION ---
+        # Even if the email finds the Parent (CSB), we must dig deeper to find the Branch (Caltex).
+        # We do this by forcing the system to look for a Child Address (invoice_id) every time.
         main_partner_id = partner['id']
         
-        def is_same_address(addr_data, partner_rec):
-            p_street = (partner_rec.get('street') or '').lower().strip()
-            p_zip = (partner_rec.get('zip') or '').lower().strip()
-            a_street = (addr_data.get('address1') or '').lower().strip()
-            a_zip = (addr_data.get('zip') or '').lower().strip()
-            return p_street == a_street and p_zip == a_zip
-
         bill_addr = data.get('billing_address') or {}
         ship_addr = data.get('shipping_address') or {}
 
         if bill_addr:
-            if is_same_address(bill_addr, partner): invoice_id = main_partner_id 
-            else:
-                inv_data = {
-                    'name': f"{partner['name']} (Invoice)", 'street': bill_addr.get('address1'), 'city': bill_addr.get('city'),
-                    'zip': bill_addr.get('zip'), 'country_code': bill_addr.get('country_code'), 'phone': bill_addr.get('phone'), 'email': email
-                }
-                invoice_id = odoo.find_or_create_child_address(main_partner_id, inv_data, type='invoice')
-        else: invoice_id = main_partner_id
+            # FIX: Always find/create the specific child branch, even if address looks similar to parent.
+            inv_data = {
+                'name': f"{bill_addr.get('company') or partner['name']} (Invoice)", 
+                'street': bill_addr.get('address1'), 'city': bill_addr.get('city'),
+                'zip': bill_addr.get('zip'), 'country_code': bill_addr.get('country_code'), 
+                'phone': bill_addr.get('phone'), 'email': email
+            }
+            invoice_id = odoo.find_or_create_child_address(main_partner_id, inv_data, type='invoice')
+        else: 
+            invoice_id = main_partner_id
 
         if ship_addr:
-            if is_same_address(ship_addr, partner): shipping_id = main_partner_id
-            else:
-                ship_data = {
-                    'name': f"{partner['name']} (Delivery)", 'street': ship_addr.get('address1'), 'city': ship_addr.get('city'),
-                    'zip': ship_addr.get('zip'), 'country_code': ship_addr.get('country_code'), 'phone': ship_addr.get('phone'), 'email': email
-                }
-                shipping_id = odoo.find_or_create_child_address(main_partner_id, ship_data, type='delivery')
-        else: shipping_id = main_partner_id
+            ship_data = {
+                'name': f"{ship_addr.get('company') or partner['name']} (Delivery)", 
+                'street': ship_addr.get('address1'), 'city': ship_addr.get('city'),
+                'zip': ship_addr.get('zip'), 'country_code': ship_addr.get('country_code'), 
+                'phone': ship_addr.get('phone'), 'email': email
+            }
+            shipping_id = odoo.find_or_create_child_address(main_partner_id, ship_data, type='delivery')
+        else: 
+            shipping_id = main_partner_id
         
-        # --- BRANCH FIX: OVERRIDE MAIN CUSTOMER WITH INVOICE BRANCH ---
-        # Ensures the order belongs to "Caltex Orewa" (invoice_id), not "CSB Group" (main_partner_id)
-        if invoice_id and invoice_id != main_partner_id:
+        # --- OVERRIDE MAIN PARTNER WITH BRANCH ---
+        # If we found a specific Invoice Address ID (the Branch), USE IT as the main customer.
+        if invoice_id:
             main_partner_id = invoice_id
         
         sales_rep_id = odoo.get_partner_salesperson(main_partner_id) or odoo.uid
@@ -378,7 +375,7 @@ def process_order_data(data):
         gateway = data.get('gateway') or (data.get('payment_gateway_names')[0] if data.get('payment_gateway_names') else 'Shopify')
         note_text = f"Payment Gateway: {gateway}"
 
-        # Double Check existing ID again (Post-Jitter check)
+        # Double Check existing ID again (Post-Jitter)
         if not existing_order_id:
             try:
                 e_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
@@ -398,7 +395,7 @@ def process_order_data(data):
                 has_changes = False
                 if note_text != (curr[0].get('note') or ''): has_changes = True
                 
-                # Check if Partner matches our Force-Fixed ID
+                # Check if Partner matches our Branch ID (Force Update if Odoo has Parent ID)
                 if curr[0]['partner_id'][0] != main_partner_id: has_changes = True
                 
                 if not has_changes:
