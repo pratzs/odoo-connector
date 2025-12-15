@@ -125,64 +125,48 @@ def setup_shopify_session():
     shopify.ShopifyResource.activate_session(session)
     return True
 
-# --- GRAPHQL HELPERS ---
+# --- GRAPHQL HELPERS (FIXED SKU MATCHING) ---
 def find_shopify_product_by_sku(sku):
+    """
+    Finds a Shopify Product ID by SKU.
+    FIX: Now requests the SKU field back and performs an EXACT MATCH check.
+    This prevents '100' from matching '100-A' and overwriting the wrong product.
+    """
     if not setup_shopify_session(): return None
-    query = """
-    {
-      productVariants(first: 1, query: "sku:%s") {
-        edges {
-          node {
-            product {
-              legacyResourceId
-            }
-          }
-        }
-      }
-    }
-    """ % sku
+    # Request SKU field in response to verify match
+    query = """{ productVariants(first: 5, query: "sku:%s") { edges { node { sku product { legacyResourceId } } } } }""" % sku
     try:
         client = shopify.GraphQL()
         result = client.execute(query)
         data = json.loads(result)
         edges = data.get('data', {}).get('productVariants', {}).get('edges', [])
-        if edges:
-            return edges[0]['node']['product']['legacyResourceId']
-    except Exception as e:
-        print(f"GraphQL Error: {e}")
+        
+        for edge in edges:
+            node = edge['node']
+            # STRICT CHECK: Only return if SKU matches exactly
+            if node.get('sku') == sku:
+                return node['product']['legacyResourceId']
+    except Exception as e: print(f"GraphQL Error: {e}")
     return None
 
 def get_shopify_variant_inv_by_sku(sku):
     if not setup_shopify_session(): return None
-    query = """
-    {
-      productVariants(first: 1, query: "sku:%s") {
-        edges {
-          node {
-            legacyResourceId
-            inventoryItem {
-              legacyResourceId
-            }
-            inventoryQuantity
-          }
-        }
-      }
-    }
-    """ % sku
+    # Added SKU to query here too for safety
+    query = """{ productVariants(first: 5, query: "sku:%s") { edges { node { sku legacyResourceId inventoryItem { legacyResourceId } inventoryQuantity } } } }""" % sku
     try:
         client = shopify.GraphQL()
         result = client.execute(query)
         data = json.loads(result)
         edges = data.get('data', {}).get('productVariants', {}).get('edges', [])
-        if edges:
-            node = edges[0]['node']
-            return {
-                'variant_id': node['legacyResourceId'],
-                'inventory_item_id': node['inventoryItem']['legacyResourceId'],
-                'qty': node['inventoryQuantity']
-            }
-    except Exception as e:
-        print(f"GraphQL Inv Error: {e}")
+        for edge in edges:
+            node = edge['node']
+            if node.get('sku') == sku: # Strict Match
+                return {
+                    'variant_id': node['legacyResourceId'],
+                    'inventory_item_id': node['inventoryItem']['legacyResourceId'],
+                    'qty': node['inventoryQuantity']
+                }
+    except Exception as e: print(f"GraphQL Inv Error: {e}")
     return None
 
 # --- CORE LOGIC ---
@@ -462,7 +446,7 @@ def process_order_data(data):
                 active_processing_ids.remove(shopify_id)
                 
 def sync_products_master():
-    """Odoo -> Shopify Product Sync"""
+    """Odoo -> Shopify Product Sync (Fixed: Strict SKU, Price Safety, No Image Leaks)"""
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
             log_event('System', 'Error', "Product Sync Failed: Connection Error")
@@ -485,6 +469,9 @@ def sync_products_master():
         for p in odoo_products:
             sku = p.get('default_code')
             if not sku: continue
+            
+            # --- FIX: Reset Image Data to prevent leaks ---
+            img_data = None 
 
             if not p.get('active', True):
                 shopify_id = find_shopify_product_by_sku(sku)
@@ -517,7 +504,7 @@ def sync_products_master():
                         sp.body_html = odoo_desc
                         product_changed = True
                 
-                # Category Mapping
+                # Category Mapping (YOUR ORIGINAL LOGIC PRESERVED)
                 odoo_categ_ids = p.get('public_categ_ids', [])
                 if not odoo_categ_ids and sp.product_type:
                     # Init logic (Shopify -> Odoo) always runs to fill gaps
@@ -530,10 +517,7 @@ def sync_products_master():
                         odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'write', [[p['id']], {'public_categ_ids': [(4, cat_id)]}])
                         log_event('Product Sync', 'Info', f"Initialized Odoo Category for {sku}: {cat_name}")
                     except Exception as e:
-                        err_msg = str(e)
-                        if "pos.category" in err_msg or "CacheMiss" in err_msg or "KeyError" in err_msg:
-                             pass
-                        else:
+                        if "pos.category" not in str(e) and "CacheMiss" not in str(e):
                              print(f"Category Import Error: {e}")
 
                 elif odoo_categ_ids and sync_type:
@@ -570,10 +554,19 @@ def sync_products_master():
                     variant_changed = True
                 
                 if sync_price:
-                    target_price = str(p['list_price'])
-                    if variant.price != target_price:
-                        variant.price = target_price
-                        variant_changed = True
+                    # --- FIX: PRICE SAFETY CHECK (0.00 PROTECTION) ---
+                    # Only update price if Odoo has a valid positive price.
+                    # This prevents 0.00 from overwriting a valid Shopify price.
+                    try:
+                        odoo_price_val = float(p.get('list_price', 0.0))
+                    except: odoo_price_val = 0.0
+                    
+                    if odoo_price_val > 0.001:
+                        target_price = str(odoo_price_val)
+                        if float(variant.price or 0) != odoo_price_val:
+                            variant.price = target_price
+                            variant_changed = True
+                    # -------------------------------------------------
 
                 target_barcode = p.get('barcode', 0) or ''
                 if str(variant.barcode or '') != str(target_barcode):
@@ -605,6 +598,7 @@ def sync_products_master():
                 if SHOPIFY_LOCATION_ID and variant.inventory_item_id:
                     qty = int(p.get('qty_available', 0))
                     try:
+                         # Use helper to check quantity before call to save API limits
                          current_inv = get_shopify_variant_inv_by_sku(sku)
                          if current_inv and int(current_inv['qty']) != qty:
                              shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=variant.inventory_item_id, available=qty)
