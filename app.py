@@ -285,6 +285,11 @@ def process_order_data(data):
             if existing_ids: existing_order_id = existing_ids[0]
         except Exception as e: return False, f"Odoo Error: {str(e)}"
 
+        # If it exists, STOP. (We disabled auto-updates to prevent overwriting your manual fixes)
+        if existing_order_id:
+             recent_processed_cache[shopify_id] = datetime.utcnow()
+             return True, "Skipped: Order already exists (Auto-Update Disabled)."
+
         # --- PARTNER LOGIC ---
         partner = odoo.search_partner_by_email(email)
         cust_data = data.get('customer', {})
@@ -394,60 +399,21 @@ def process_order_data(data):
         gateway = data.get('gateway') or (data.get('payment_gateway_names')[0] if data.get('payment_gateway_names') else 'Shopify')
         note_text = f"Payment Gateway: {gateway}"
 
-        success_flag = False
+        # --- CREATE PATH (No Updates allowed here) ---
+        vals = {
+            'name': client_ref, 'client_order_ref': client_ref, 'partner_id': main_partner_id, 
+            'partner_invoice_id': invoice_id, 'partner_shipping_id': shipping_id, 
+            'order_line': lines, 'user_id': sales_rep_id, 'state': 'draft', 'note': note_text
+        }
+        if company_id: vals['company_id'] = int(company_id)
+        odoo.create_sale_order(vals, context={'manual_price': True})
+        log_event('Order', 'Success', f"Synced {client_ref}")
+
+        # Update Cache
+        recent_processed_cache[shopify_id] = datetime.utcnow()
+        keys_to_del = [k for k, v in recent_processed_cache.items() if (datetime.utcnow() - v).total_seconds() > 300]
+        for k in keys_to_del: del recent_processed_cache[k]
         
-        if existing_order_id:
-            # --- UPDATE PATH ---
-            curr = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'read', [[existing_order_id]], {'fields': ['state', 'partner_id', 'note', 'order_line']})
-            if not curr: return False, "Order Missing"
-            
-            if curr[0]['state'] in ['done', 'cancel']:
-                success_flag = True
-            else:
-                has_changes = False
-                if note_text != (curr[0].get('note') or ''): has_changes = True
-                
-                # STRICT PARENT CHECK (Force Caltex)
-                current_odoo_partner_id = curr[0]['partner_id'][0]
-                if current_odoo_partner_id != main_partner_id:
-                    has_changes = True 
-                
-                if not has_changes:
-                    curr_line_ids = curr[0].get('order_line', [])
-                    if len(curr_line_ids) != len(lines): has_changes = True
-                    else:
-                        curr_lines = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order.line', 'read', [curr_line_ids], {'fields': ['product_id', 'product_uom_qty', 'price_unit']})
-                        c_set = sorted([(l['product_id'][0], float(l['product_uom_qty']), float(l['price_unit'])) for l in curr_lines])
-                        n_set = sorted([(l[2]['product_id'], float(l[2]['product_uom_qty']), float(l[2]['price_unit'])) for l in lines])
-                        if c_set != n_set: has_changes = True
-
-                if has_changes:
-                    update_vals = {
-                        'partner_id': main_partner_id, 'partner_invoice_id': invoice_id,
-                        'partner_shipping_id': shipping_id, 'note': note_text, 'order_line': [(5, 0, 0)] + lines
-                    }
-                    odoo.update_sale_order(existing_order_id, update_vals)
-                    odoo.post_message(existing_order_id, f"Order Updated via Shopify Sync. {note_text}")
-                    log_event('Order', 'Success', f"Updated {client_ref}")
-                success_flag = True
-        else:
-            # --- CREATE PATH ---
-            vals = {
-                'name': client_ref, 'client_order_ref': client_ref, 'partner_id': main_partner_id, 
-                'partner_invoice_id': invoice_id, 'partner_shipping_id': shipping_id, 
-                'order_line': lines, 'user_id': sales_rep_id, 'state': 'draft', 'note': note_text
-            }
-            if company_id: vals['company_id'] = int(company_id)
-            odoo.create_sale_order(vals, context={'manual_price': True})
-            log_event('Order', 'Success', f"Synced {client_ref}")
-            success_flag = True
-
-        # --- UPDATE CACHE ---
-        if success_flag:
-            recent_processed_cache[shopify_id] = datetime.utcnow()
-            keys_to_del = [k for k, v in recent_processed_cache.items() if (datetime.utcnow() - v).total_seconds() > 300]
-            for k in keys_to_del: del recent_processed_cache[k]
-            
         return True, "Synced"
 
     except Exception as e:
