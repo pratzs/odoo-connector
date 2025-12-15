@@ -229,7 +229,8 @@ def process_order_data(data):
     shopify_id = str(data.get('id', ''))
     shopify_name = data.get('name')
     
-    # --- GUARD 1: STOP CANCELLED ORDERS ---
+    # --- GUARD 1: STOP CANCELLED ORDERS (Fixes your issue) ---
+    # If the order is cancelled (like your chargeback #2967), we drop it instantly.
     if data.get('cancelled_at'):
         return False, "Skipped: Order is Cancelled."
 
@@ -238,10 +239,12 @@ def process_order_data(data):
     created_at_str = data.get('created_at', '')
     if created_at_str:
         try:
+            # Parse ISO8601 date from Shopify
             created_dt = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
             if created_dt.tzinfo:
                 created_dt = created_dt.astimezone(datetime.utcnow().astimezone().tzinfo).replace(tzinfo=None)
             
+            # Check age
             age_in_minutes = (datetime.utcnow() - created_dt).total_seconds() / 60
             if age_in_minutes > 60:
                 return False, f"Skipped: Order is too old ({int(age_in_minutes)} mins)."
@@ -249,7 +252,7 @@ def process_order_data(data):
             print(f"Date Parse Warning: {e}") 
 
     # --- GUARD 3: MEMORY LOCK (Concurrent Check) ---
-    time.sleep(random.uniform(0.5, 1.5)) # Slight jitter to separate threads
+    time.sleep(random.uniform(0.5, 1.5)) # Slight jitter
     
     with order_processing_lock:
         if shopify_id in active_processing_ids:
@@ -312,8 +315,7 @@ def process_order_data(data):
                     db.session.commit()
             except Exception as e: return False, f"Customer Creation Error: {e}"
         
-        # --- CRITICAL FIX: FORCE BRANCH ID ---
-        # Always use the partner ID found (Caltex Orewa), never the parent (CSB).
+        # --- FORCE BRANCH ID ---
         main_partner_id = partner['id']
         
         def is_same_address(addr_data, partner_rec):
@@ -346,7 +348,7 @@ def process_order_data(data):
             shipping_id = odoo.find_or_create_child_address(main_partner_id, ship_data, type='delivery')
         else: shipping_id = main_partner_id
         
-        # Override Main Partner with Branch (Invoice Address)
+        # Override Main Partner with Branch
         if invoice_id: main_partner_id = invoice_id
         
         sales_rep_id = odoo.get_partner_salesperson(main_partner_id) or odoo.uid
@@ -405,10 +407,7 @@ def process_order_data(data):
                 has_changes = False
                 if note_text != (curr[0].get('note') or ''): has_changes = True
                 
-                # --- FIX: STRICT PARENT CHECK (PREVENTS REVERT TO CSB) ---
-                # Odoo often returns the Parent ID (CSB) when reading 'partner_id'.
-                # We check if the current partner in Odoo matches our Target (Caltex).
-                # If they differ, FORCE an update to Caltex.
+                # STRICT PARENT CHECK (Force Caltex)
                 current_odoo_partner_id = curr[0]['partner_id'][0]
                 if current_odoo_partner_id != main_partner_id:
                     has_changes = True 
