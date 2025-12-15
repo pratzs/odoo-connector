@@ -220,30 +220,48 @@ def process_product_data(data):
 
 def process_order_data(data):
     """
-    Syncs order. 
-    1. JITTER: Random delay to prevent race conditions on multi-worker servers.
-    2. DEBOUNCE: Caches IDs for 60s to stop 3x Duplicates.
-    3. STRICT B2B: Forces Branch Ownership (Caltex Fix).
-    4. SILENT: Checks line items to avoid spamming logs.
+    Syncs order with Strict Guards & Branch Fix.
+    1. GUARD: Drops Cancelled orders immediately.
+    2. GUARD: Drops Old orders (>60 mins) to stop historical duplicates.
+    3. GUARD: Uses Memory Lock to prevent race conditions.
+    4. LOGIC: Forces Branch Ownership (Caltex Fix) even during updates.
     """
     shopify_id = str(data.get('id', ''))
     shopify_name = data.get('name')
     
-    # --- 0. ANTI-RACE JITTER (CRITICAL FIX) ---
-    time.sleep(random.uniform(0.5, 2.0))
+    # --- GUARD 1: STOP CANCELLED ORDERS ---
+    if data.get('cancelled_at'):
+        return False, "Skipped: Order is Cancelled."
 
-    # --- 1. MEMORY LOCK ---
+    # --- GUARD 2: STOP OLD ORDERS (The 'Zombie' Fix) ---
+    # If the order is >60 mins old, ignore it. Stops 2-week old duplicates.
+    created_at_str = data.get('created_at', '')
+    if created_at_str:
+        try:
+            created_dt = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+            if created_dt.tzinfo:
+                created_dt = created_dt.astimezone(datetime.utcnow().astimezone().tzinfo).replace(tzinfo=None)
+            
+            age_in_minutes = (datetime.utcnow() - created_dt).total_seconds() / 60
+            if age_in_minutes > 60:
+                return False, f"Skipped: Order is too old ({int(age_in_minutes)} mins)."
+        except Exception as e:
+            print(f"Date Parse Warning: {e}") 
+
+    # --- GUARD 3: MEMORY LOCK (Concurrent Check) ---
+    time.sleep(random.uniform(0.5, 1.5)) # Slight jitter to separate threads
+    
     with order_processing_lock:
         if shopify_id in active_processing_ids:
-            return False, "Skipped (Concurrent)"
+            return False, "Skipped: Already processing this ID."
         active_processing_ids.add(shopify_id)
 
     try:
-        # --- 2. CACHE LOCK ---
+        # --- GUARD 4: RECENT CACHE (Debounce) ---
         if shopify_id in recent_processed_cache:
             last_run = recent_processed_cache[shopify_id]
-            if (datetime.utcnow() - last_run).total_seconds() < 60:
-                return False, "Skipped (Debounce)"
+            if (datetime.utcnow() - last_run).total_seconds() < 300:
+                return False, "Skipped: Recently Synced."
 
         email = data.get('email') or data.get('contact_email')
         client_ref = f"ONLINE_{shopify_name}"
@@ -256,7 +274,7 @@ def process_order_data(data):
                 if user_info: company_id = user_info[0]['company_id'][0]
             except: pass
 
-        # Check for Existing Order
+        # Check Odoo for Existing Order
         existing_order_id = None
         try:
             existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
@@ -294,16 +312,21 @@ def process_order_data(data):
                     db.session.commit()
             except Exception as e: return False, f"Customer Creation Error: {e}"
         
-        # --- CRITICAL FIX: FORCE BRANCH RESOLUTION ---
-        # Even if the email finds the Parent (CSB), we must dig deeper to find the Branch (Caltex).
-        # We do this by forcing the system to look for a Child Address (invoice_id) every time.
+        # --- CRITICAL FIX: FORCE BRANCH ID ---
+        # Always use the partner ID found (Caltex Orewa), never the parent (CSB).
         main_partner_id = partner['id']
         
+        def is_same_address(addr_data, partner_rec):
+            p_street = (partner_rec.get('street') or '').lower().strip()
+            p_zip = (partner_rec.get('zip') or '').lower().strip()
+            a_street = (addr_data.get('address1') or '').lower().strip()
+            a_zip = (addr_data.get('zip') or '').lower().strip()
+            return p_street == a_street and p_zip == a_zip
+
         bill_addr = data.get('billing_address') or {}
         ship_addr = data.get('shipping_address') or {}
 
         if bill_addr:
-            # FIX: Always find/create the specific child branch, even if address looks similar to parent.
             inv_data = {
                 'name': f"{bill_addr.get('company') or partner['name']} (Invoice)", 
                 'street': bill_addr.get('address1'), 'city': bill_addr.get('city'),
@@ -311,8 +334,7 @@ def process_order_data(data):
                 'phone': bill_addr.get('phone'), 'email': email
             }
             invoice_id = odoo.find_or_create_child_address(main_partner_id, inv_data, type='invoice')
-        else: 
-            invoice_id = main_partner_id
+        else: invoice_id = main_partner_id
 
         if ship_addr:
             ship_data = {
@@ -322,13 +344,10 @@ def process_order_data(data):
                 'phone': ship_addr.get('phone'), 'email': email
             }
             shipping_id = odoo.find_or_create_child_address(main_partner_id, ship_data, type='delivery')
-        else: 
-            shipping_id = main_partner_id
+        else: shipping_id = main_partner_id
         
-        # --- OVERRIDE MAIN PARTNER WITH BRANCH ---
-        # If we found a specific Invoice Address ID (the Branch), USE IT as the main customer.
-        if invoice_id:
-            main_partner_id = invoice_id
+        # Override Main Partner with Branch (Invoice Address)
+        if invoice_id: main_partner_id = invoice_id
         
         sales_rep_id = odoo.get_partner_salesperson(main_partner_id) or odoo.uid
 
@@ -338,9 +357,7 @@ def process_order_data(data):
             if not sku: continue
             product_id = odoo.search_product_by_sku(sku, company_id)
             if not product_id:
-                if odoo.check_product_exists_by_sku(sku, company_id):
-                    log_event('Order', 'Warning', f"Skipped SKU {sku}: Product is Archived.")
-                    continue 
+                if odoo.check_product_exists_by_sku(sku, company_id): continue 
                 try:
                     new_p = {'name': item['name'], 'default_code': sku, 'list_price': float(item.get('price', 0)), 'type': 'product'}
                     if company_id: new_p['company_id'] = int(company_id)
@@ -375,13 +392,6 @@ def process_order_data(data):
         gateway = data.get('gateway') or (data.get('payment_gateway_names')[0] if data.get('payment_gateway_names') else 'Shopify')
         note_text = f"Payment Gateway: {gateway}"
 
-        # Double Check existing ID again (Post-Jitter)
-        if not existing_order_id:
-            try:
-                e_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
-                if e_ids: existing_order_id = e_ids[0]
-            except: pass
-
         success_flag = False
         
         if existing_order_id:
@@ -395,8 +405,13 @@ def process_order_data(data):
                 has_changes = False
                 if note_text != (curr[0].get('note') or ''): has_changes = True
                 
-                # Check if Partner matches our Branch ID (Force Update if Odoo has Parent ID)
-                if curr[0]['partner_id'][0] != main_partner_id: has_changes = True
+                # --- FIX: STRICT PARENT CHECK (PREVENTS REVERT TO CSB) ---
+                # Odoo often returns the Parent ID (CSB) when reading 'partner_id'.
+                # We check if the current partner in Odoo matches our Target (Caltex).
+                # If they differ, FORCE an update to Caltex.
+                current_odoo_partner_id = curr[0]['partner_id'][0]
+                if current_odoo_partner_id != main_partner_id:
+                    has_changes = True 
                 
                 if not has_changes:
                     curr_line_ids = curr[0].get('order_line', [])
