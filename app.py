@@ -971,6 +971,82 @@ def perform_inventory_sync(lookback_minutes):
         count += 1
     return count, updates
 
+def sync_odoo_fulfillments():
+    """
+    Odoo -> Shopify Fulfillment Sync.
+    Checks for 'Done' deliveries in Odoo and pushes Tracking Numbers to Shopify.
+    """
+    with app.app_context():
+        if not odoo or not setup_shopify_session(): return
+
+        # 1. Look back 2 hours to catch any recent shipments
+        cutoff = datetime.utcnow() - timedelta(minutes=120)
+        
+        # Search for Deliveries (stock.picking) that are DONE and belong to Shopify (ONLINE_)
+        domain = [
+            ['state', '=', 'done'],
+            ['date_done', '>=', str(cutoff)],
+            ['origin', 'like', 'ONLINE_'] 
+        ]
+        
+        try:
+            # Fetch Pickings with Tracking Info
+            pickings = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'stock.picking', 'search_read', [domain], 
+                {'fields': ['origin', 'carrier_tracking_ref', 'carrier_id', 'name']})
+        except Exception as e:
+            log_event('Fulfillment', 'Error', f"Odoo Search Failed: {e}")
+            return
+
+        synced_count = 0
+        for pick in pickings:
+            so_name = pick['origin'] # e.g., "ONLINE_#1024"
+            tracking_ref = pick.get('carrier_tracking_ref') or ''
+            
+            # Extract Shopify Name (Remove 'ONLINE_' prefix)
+            if not so_name or not so_name.startswith('ONLINE_'): continue
+            shopify_order_name = so_name.replace('ONLINE_', '').strip()
+
+            try:
+                # 2. Find the Shopify Order by Name (e.g. "#1024")
+                # We verify status='any' to find open or closed orders
+                orders = shopify.Order.find(name=shopify_order_name, status='any')
+                if not orders: continue
+                order = orders[0]
+
+                # Skip if already fulfilled to prevent duplicates/errors
+                if order.fulfillment_status == 'fulfilled': continue
+
+                # 3. Create Fulfillment in Shopify
+                # Note: We don't specify line_items, so Shopify assumes "Fulfill All Open Items"
+                fulfillment = shopify.Fulfillment(prefix_options={'order_id': order.id})
+                
+                # If we have a configured Warehouse ID, use it
+                if SHOPIFY_LOCATION_ID:
+                    fulfillment.location_id = SHOPIFY_LOCATION_ID
+                
+                # Add Tracking Info if available
+                if tracking_ref:
+                    carrier_name = pick['carrier_id'][1] if pick['carrier_id'] else 'Other'
+                    fulfillment.tracking_info = {
+                        'number': tracking_ref,
+                        'company': carrier_name
+                    }
+                    fulfillment.notify_customer = True # Auto-email the customer
+                
+                fulfillment.save()
+                
+                synced_count += 1
+                log_event('Fulfillment', 'Success', f"Fulfilled {shopify_order_name} with Tracking: {tracking_ref}")
+
+            except Exception as e:
+                # Ignore errors if order is cancelled or already fulfilled
+                if "422" not in str(e): 
+                    log_event('Fulfillment', 'Error', f"Failed {shopify_order_name}: {e}")
+
+        if synced_count > 0:
+            log_event('Fulfillment', 'Success', f"Batch Complete. Fulfilled {synced_count} orders.")
+
 
 def scheduled_inventory_sync():
     with app.app_context():
@@ -1047,6 +1123,12 @@ def sync_inventory_endpoint():
         c, u = perform_inventory_sync(lookback_minutes=525600)
         log_event('Inventory', 'Success', f"Manual Sync Complete. Checked {c}, Updated {u}")
         return jsonify({"synced": c, "updates": u})
+
+@app.route('/sync/fulfillments', methods=['GET'])
+def trigger_fulfillment_sync():
+    log_event('System', 'Info', "Manual Trigger: Checking for new shipments in Odoo...")
+    threading.Thread(target=sync_odoo_fulfillments).start()
+    return jsonify({"message": "Started checking for shipments."})
 
 @app.route('/sync/categories/run_initial_import', methods=['GET'])
 def run_initial_category_import():
@@ -1219,6 +1301,9 @@ def run_schedule():
     # --- Maintenance Job ---
     # Log Cleanup: 7:00 PM NZDT = 06:00 UTC
     schedule.every().day.at("06:00").do(lambda: threading.Thread(target=cleanup_old_logs).start())
+
+    # Fulfillment Sync: Run every 15 minutes to keep customers updated
+    schedule.every(15).minutes.do(lambda: threading.Thread(target=sync_odoo_fulfillments).start())
     
     while True:
         schedule.run_pending()
