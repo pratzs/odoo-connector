@@ -238,7 +238,12 @@ def process_product_data(data):
     return processed_count
 
 def process_order_data(data):
-    """Syncs order. Includes Cache Cooldown to prevent 3x Duplicates."""
+    """
+    Syncs order. 
+    1. STRICT B2B: Forces Branch Ownership (Caltex Fix).
+    2. DEBOUNCE: Caches IDs for 60s to stop 3x Duplicates.
+    3. SILENT: Checks line items to avoid spamming logs on unchanged updates.
+    """
     shopify_id = str(data.get('id', ''))
     shopify_name = data.get('name')
     
@@ -250,11 +255,10 @@ def process_order_data(data):
 
     try:
         # --- 2. CACHE LOCK (Debounce Retries) ---
-        # If we successfully processed this ID less than 60 seconds ago, STOP.
+        # If successfully processed < 60s ago, STOP.
         if shopify_id in recent_processed_cache:
             last_run = recent_processed_cache[shopify_id]
             if (datetime.utcnow() - last_run).total_seconds() < 60:
-                log_event('Order', 'Info', f"Debounced duplicate webhook for {shopify_name}")
                 return False, "Skipped (Debounce)"
 
         email = data.get('email') or data.get('contact_email')
@@ -276,7 +280,7 @@ def process_order_data(data):
             if existing_ids: existing_order_id = existing_ids[0]
         except Exception as e: return False, f"Odoo Error: {str(e)}"
 
-        # --- PARTNER LOGIC ---
+        # --- PARTNER LOGIC (STRICT BRANCH FIX) ---
         partner = odoo.search_partner_by_email(email)
         cust_data = data.get('customer', {})
         def_address = data.get('billing_address') or data.get('shipping_address') or {}
@@ -306,7 +310,7 @@ def process_order_data(data):
                     db.session.commit()
             except Exception as e: return False, f"Customer Creation Error: {e}"
         
-        # STRICT BRANCH MATCHING (Caltex Fix)
+        # STRICT OWNERSHIP: Use the partner found, do not roll up to parent.
         main_partner_id = partner['id']
         
         def is_same_address(addr_data, partner_rec):
@@ -384,7 +388,7 @@ def process_order_data(data):
         gateway = data.get('gateway') or (data.get('payment_gateway_names')[0] if data.get('payment_gateway_names') else 'Shopify')
         note_text = f"Payment Gateway: {gateway}"
 
-        # Double Check existing ID again before action
+        # Double Check existing ID
         if not existing_order_id:
             try:
                 e_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
@@ -392,22 +396,47 @@ def process_order_data(data):
             except: pass
 
         success_flag = False
+        
         if existing_order_id:
+            # --- UPDATE PATH WITH SILENT CHECK ---
             curr = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'read', [[existing_order_id]], {'fields': ['state', 'partner_id', 'note', 'order_line']})
             if not curr: return False, "Order Missing"
+            
             if curr[0]['state'] in ['done', 'cancel']:
-                success_flag = True # Mark as handled (skipped)
+                success_flag = True # Mark handled
             else:
-                # Update Logic
-                update_vals = {
-                    'partner_id': main_partner_id, 'partner_invoice_id': invoice_id,
-                    'partner_shipping_id': shipping_id, 'note': note_text, 'order_line': [(5, 0, 0)] + lines
-                }
-                odoo.update_sale_order(existing_order_id, update_vals)
-                odoo.post_message(existing_order_id, f"Order Updated via Shopify Sync. {note_text}")
-                log_event('Order', 'Success', f"Updated {client_ref}")
+                # DEEP CHANGE DETECTION (Restored)
+                has_changes = False
+                # 1. Note Changed?
+                if note_text != (curr[0].get('note') or ''): has_changes = True
+                # 2. Partner Changed? (Fixes CSB Group issue if initially wrong)
+                if curr[0]['partner_id'][0] != main_partner_id: has_changes = True
+                
+                # 3. Lines Changed?
+                if not has_changes:
+                    curr_line_ids = curr[0].get('order_line', [])
+                    if len(curr_line_ids) != len(lines): has_changes = True
+                    else:
+                        curr_lines = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order.line', 'read', [curr_line_ids], {'fields': ['product_id', 'product_uom_qty', 'price_unit']})
+                        # Compare sets
+                        c_set = sorted([(l['product_id'][0], float(l['product_uom_qty']), float(l['price_unit'])) for l in curr_lines])
+                        n_set = sorted([(l[2]['product_id'], float(l[2]['product_uom_qty']), float(l[2]['price_unit'])) for l in lines])
+                        if c_set != n_set: has_changes = True
+
+                if has_changes:
+                    update_vals = {
+                        'partner_id': main_partner_id, 'partner_invoice_id': invoice_id,
+                        'partner_shipping_id': shipping_id, 'note': note_text, 'order_line': [(5, 0, 0)] + lines
+                    }
+                    odoo.update_sale_order(existing_order_id, update_vals)
+                    odoo.post_message(existing_order_id, f"Order Updated via Shopify Sync. {note_text}")
+                    log_event('Order', 'Success', f"Updated {client_ref}")
+                else:
+                    # Silent success
+                    pass
                 success_flag = True
         else:
+            # --- CREATE PATH ---
             vals = {
                 'name': client_ref, 'client_order_ref': client_ref, 'partner_id': main_partner_id, 
                 'partner_invoice_id': invoice_id, 'partner_shipping_id': shipping_id, 
@@ -421,8 +450,6 @@ def process_order_data(data):
         # --- UPDATE CACHE ON SUCCESS ---
         if success_flag:
             recent_processed_cache[shopify_id] = datetime.utcnow()
-            
-            # Cleanup old cache
             keys_to_del = [k for k, v in recent_processed_cache.items() if (datetime.utcnow() - v).total_seconds() > 300]
             for k in keys_to_del: del recent_processed_cache[k]
             
