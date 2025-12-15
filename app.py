@@ -1197,22 +1197,31 @@ def import_selected_orders():
 @app.route('/webhook/orders', methods=['POST'])
 @app.route('/webhook/orders/updated', methods=['POST'])
 def order_webhook():
-    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')): 
+    """
+    Handle incoming Shopify webhooks.
+    CRITICAL CHANGE: Ignores 'orders/updated' to prevent duplicates/overwrites.
+    Only processes 'orders/create'.
+    """
+    # 1. Security Check
+    hmac_header = request.headers.get('X-Shopify-Hmac-Sha256')
+    if not verify_shopify(request.get_data(), hmac_header):
         return "Unauthorized", 401
 
-    # --- LOGIC CHANGE: IGNORE UPDATES ---
+    # 2. Topic Filter (The Fix)
+    # We check the header to see what kind of event this is.
     topic = request.headers.get('X-Shopify-Topic', '')
-    
-    # If Shopify says "This is an update", we do nothing (return 200 OK)
+
     if topic == 'orders/updated':
+        # Silently ignore updates. Return 200 so Shopify stops retrying.
         return "Update Ignored (Manual Sync Only)", 200
 
-    # We only process if it is 'orders/create'
-    with app.app_context(): 
+    # 3. Process 'orders/create'
+    with app.app_context():
+        # This will now only run ONCE per order (on creation)
         process_order_data(request.json)
-        
-    return "Received", 200
 
+    return "Received", 200
+    
 @app.route('/webhook/orders/cancelled', methods=['POST'])
 def order_cancelled_webhook(): return "Received", 200
 
