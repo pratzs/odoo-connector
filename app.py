@@ -1197,8 +1197,20 @@ def import_selected_orders():
 @app.route('/webhook/orders', methods=['POST'])
 @app.route('/webhook/orders/updated', methods=['POST'])
 def order_webhook():
-    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')): return "Unauthorized", 401
-    with app.app_context(): process_order_data(request.json)
+    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')): 
+        return "Unauthorized", 401
+
+    # --- LOGIC CHANGE: IGNORE UPDATES ---
+    topic = request.headers.get('X-Shopify-Topic', '')
+    
+    # If Shopify says "This is an update", we do nothing (return 200 OK)
+    if topic == 'orders/updated':
+        return "Update Ignored (Manual Sync Only)", 200
+
+    # We only process if it is 'orders/create'
+    with app.app_context(): 
+        process_order_data(request.json)
+        
     return "Received", 200
 
 @app.route('/webhook/orders/cancelled', methods=['POST'])
