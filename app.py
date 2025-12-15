@@ -255,7 +255,6 @@ def process_order_data(data):
 
     try:
         # --- 2. CACHE LOCK (Debounce Retries) ---
-        # If successfully processed < 60s ago, STOP.
         if shopify_id in recent_processed_cache:
             last_run = recent_processed_cache[shopify_id]
             if (datetime.utcnow() - last_run).total_seconds() < 60:
@@ -280,7 +279,7 @@ def process_order_data(data):
             if existing_ids: existing_order_id = existing_ids[0]
         except Exception as e: return False, f"Odoo Error: {str(e)}"
 
-        # --- PARTNER LOGIC (STRICT BRANCH FIX) ---
+        # --- PARTNER LOGIC ---
         partner = odoo.search_partner_by_email(email)
         cust_data = data.get('customer', {})
         def_address = data.get('billing_address') or data.get('shipping_address') or {}
@@ -310,7 +309,6 @@ def process_order_data(data):
                     db.session.commit()
             except Exception as e: return False, f"Customer Creation Error: {e}"
         
-        # STRICT OWNERSHIP: Use the partner found, do not roll up to parent.
         main_partner_id = partner['id']
         
         def is_same_address(addr_data, partner_rec):
@@ -342,6 +340,12 @@ def process_order_data(data):
                 }
                 shipping_id = odoo.find_or_create_child_address(main_partner_id, ship_data, type='delivery')
         else: shipping_id = main_partner_id
+        
+        # --- RESTORED FIX: OVERRIDE MAIN CUSTOMER WITH INVOICE BRANCH ---
+        # This ensures the order belongs to "Caltex Orewa" (invoice_id), not "CSB Group" (main_partner_id)
+        if invoice_id and invoice_id != main_partner_id:
+            main_partner_id = invoice_id
+        # ----------------------------------------------------------------
         
         sales_rep_id = odoo.get_partner_salesperson(main_partner_id) or odoo.uid
 
@@ -398,27 +402,24 @@ def process_order_data(data):
         success_flag = False
         
         if existing_order_id:
-            # --- UPDATE PATH WITH SILENT CHECK ---
+            # --- UPDATE PATH ---
             curr = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'read', [[existing_order_id]], {'fields': ['state', 'partner_id', 'note', 'order_line']})
             if not curr: return False, "Order Missing"
             
             if curr[0]['state'] in ['done', 'cancel']:
-                success_flag = True # Mark handled
+                success_flag = True
             else:
-                # DEEP CHANGE DETECTION (Restored)
                 has_changes = False
-                # 1. Note Changed?
                 if note_text != (curr[0].get('note') or ''): has_changes = True
-                # 2. Partner Changed? (Fixes CSB Group issue if initially wrong)
+                
+                # Check if Partner matches our Force-Fixed ID
                 if curr[0]['partner_id'][0] != main_partner_id: has_changes = True
                 
-                # 3. Lines Changed?
                 if not has_changes:
                     curr_line_ids = curr[0].get('order_line', [])
                     if len(curr_line_ids) != len(lines): has_changes = True
                     else:
                         curr_lines = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order.line', 'read', [curr_line_ids], {'fields': ['product_id', 'product_uom_qty', 'price_unit']})
-                        # Compare sets
                         c_set = sorted([(l['product_id'][0], float(l['product_uom_qty']), float(l['price_unit'])) for l in curr_lines])
                         n_set = sorted([(l[2]['product_id'], float(l[2]['product_uom_qty']), float(l[2]['price_unit'])) for l in lines])
                         if c_set != n_set: has_changes = True
@@ -431,9 +432,6 @@ def process_order_data(data):
                     odoo.update_sale_order(existing_order_id, update_vals)
                     odoo.post_message(existing_order_id, f"Order Updated via Shopify Sync. {note_text}")
                     log_event('Order', 'Success', f"Updated {client_ref}")
-                else:
-                    # Silent success
-                    pass
                 success_flag = True
         else:
             # --- CREATE PATH ---
@@ -447,7 +445,7 @@ def process_order_data(data):
             log_event('Order', 'Success', f"Synced {client_ref}")
             success_flag = True
 
-        # --- UPDATE CACHE ON SUCCESS ---
+        # --- UPDATE CACHE ---
         if success_flag:
             recent_processed_cache[shopify_id] = datetime.utcnow()
             keys_to_del = [k for k, v in recent_processed_cache.items() if (datetime.utcnow() - v).total_seconds() > 300]
@@ -462,7 +460,7 @@ def process_order_data(data):
         with order_processing_lock:
             if shopify_id in active_processing_ids:
                 active_processing_ids.remove(shopify_id)
-
+                
 def sync_products_master():
     """Odoo -> Shopify Product Sync"""
     with app.app_context():
