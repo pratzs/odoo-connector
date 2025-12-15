@@ -52,6 +52,7 @@
                     </div>
                     <div class="mt-3 d-flex gap-2 flex-wrap">
                         <button onclick="openOrderImportModal()" class="btn btn-primary"><i class="bi bi-cloud-download"></i> Fetch Recent Shopify Orders</button>
+                        <button onclick="triggerAction('/sync/fulfillments')" class="btn btn-dark"><i class="bi bi-truck"></i> Push Tracking (Odoo &rarr; Shopify)</button>
                         <button onclick="triggerAction('/sync/inventory')" class="btn btn-secondary"><i class="bi bi-box-seam"></i> Force Inventory Sync</button>
                         <button onclick="triggerAction('/sync/products/master', 'POST')" class="btn btn-warning text-dark"><i class="bi bi-arrow-repeat"></i> Sync Products (Odoo Master)</button>
                         <button onclick="triggerAction('/sync/products/archive_duplicates', 'POST')" class="btn btn-danger"><i class="bi bi-trash"></i> Archive Duplicate SKUs</button>
