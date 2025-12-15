@@ -51,9 +51,6 @@ with app.app_context():
     except Exception as e: 
         print(f"CRITICAL DB INIT ERROR: {e}")
 
-# --- GLOBAL LOCKS FOR CONCURRENCY CONTROL ---
-order_processing_lock = threading.Lock()
-active_processing_ids = set()
 
 # --- GLOBAL LOCKS & CACHE ---
 order_processing_lock = threading.Lock()
@@ -224,14 +221,20 @@ def process_product_data(data):
 def process_order_data(data):
     """
     Syncs order. 
-    1. STRICT B2B: Forces Branch Ownership (Caltex Fix).
+    1. JITTER: Random delay to prevent race conditions on multi-worker servers.
     2. DEBOUNCE: Caches IDs for 60s to stop 3x Duplicates.
-    3. SILENT: Checks line items to avoid spamming logs on unchanged updates.
+    3. STRICT B2B: Forces Branch Ownership (Caltex Fix).
+    4. SILENT: Checks line items to avoid spamming logs.
     """
     shopify_id = str(data.get('id', ''))
     shopify_name = data.get('name')
     
-    # --- 1. MEMORY LOCK (Concurrent) ---
+    # --- 0. ANTI-RACE JITTER (CRITICAL FIX) ---
+    # Sleep 0.5s to 2.0s. If duplicate webhooks hit different workers simultaneously,
+    # this desynchronizes them so the second one finds the order created by the first.
+    time.sleep(random.uniform(0.5, 2.0))
+
+    # --- 1. MEMORY LOCK (Concurrent within same worker) ---
     with order_processing_lock:
         if shopify_id in active_processing_ids:
             return False, "Skipped (Concurrent)"
@@ -255,7 +258,7 @@ def process_order_data(data):
                 if user_info: company_id = user_info[0]['company_id'][0]
             except: pass
 
-        # Check for Existing Order
+        # Check for Existing Order (CRITICAL: Search strictly by Client Ref)
         existing_order_id = None
         try:
             existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
@@ -325,11 +328,10 @@ def process_order_data(data):
                 shipping_id = odoo.find_or_create_child_address(main_partner_id, ship_data, type='delivery')
         else: shipping_id = main_partner_id
         
-        # --- RESTORED FIX: OVERRIDE MAIN CUSTOMER WITH INVOICE BRANCH ---
-        # This ensures the order belongs to "Caltex Orewa" (invoice_id), not "CSB Group" (main_partner_id)
+        # --- BRANCH FIX: OVERRIDE MAIN CUSTOMER WITH INVOICE BRANCH ---
+        # Ensures the order belongs to "Caltex Orewa" (invoice_id), not "CSB Group" (main_partner_id)
         if invoice_id and invoice_id != main_partner_id:
             main_partner_id = invoice_id
-        # ----------------------------------------------------------------
         
         sales_rep_id = odoo.get_partner_salesperson(main_partner_id) or odoo.uid
 
@@ -376,7 +378,7 @@ def process_order_data(data):
         gateway = data.get('gateway') or (data.get('payment_gateway_names')[0] if data.get('payment_gateway_names') else 'Shopify')
         note_text = f"Payment Gateway: {gateway}"
 
-        # Double Check existing ID
+        # Double Check existing ID again (Post-Jitter check)
         if not existing_order_id:
             try:
                 e_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
