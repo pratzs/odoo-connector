@@ -309,3 +309,26 @@ class OdooClient:
         # Return ID and Client Ref so we can find them in Shopify
         return self.models.execute_kw(self.db, self.uid, self.password, 
             'sale.order', 'search_read', [domain], {'fields': ['id', 'client_order_ref']})
+
+def get_product_uom_info(self, product_id):
+        """Fetches the UOM ratio (factor) for a product to handle Carton splitting."""
+        try:
+            # 1. Get Product's UOM ID
+            p_data = self.models.execute_kw(self.db, self.uid, self.password,
+                'product.product', 'read', [product_id], {'fields': ['uom_id']})
+            
+            if not p_data or not p_data[0].get('uom_id'): return None
+            
+            uom_id = p_data[0]['uom_id'][0] # [id, "Name"]
+            
+            # 2. Get UOM Details (Ratio/Factor)
+            uom_data = self.models.execute_kw(self.db, self.uid, self.password,
+                'uom.uom', 'read', [uom_id], {'fields': ['name', 'factor_inv', 'uom_type']})
+            
+            if uom_data:
+                # factor_inv is usually the multiplier (e.g., 24.0 for a Carton of 24)
+                # uom_type: reference, bigger, smaller
+                return uom_data[0]
+        except Exception as e:
+            print(f"UOM Fetch Error: {e}")
+        return None
