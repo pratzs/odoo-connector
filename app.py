@@ -220,7 +220,7 @@ def process_product_data(data):
 
 def process_order_data(data):
     """
-    Syncs order with Strict Guards, Customer Notes, and Branch Logic.
+    Syncs order with Strict Guards, Customer Notes, Branch Logic, AND UOM Switching.
     """
     shopify_id = str(data.get('id', ''))
     shopify_name = data.get('name')
@@ -340,6 +340,15 @@ def process_order_data(data):
         
         sales_rep_id = odoo.get_partner_salesperson(main_partner_id) or odoo.uid
 
+        # --- PRE-FETCH "UNITS" UOM ID ---
+        unit_uom_id = None
+        try:
+            # Look for UOM named "Units" or "Unit"
+            uom_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+                'uom.uom', 'search', [[['name', 'in', ['Units', 'Unit']]]])
+            if uom_ids: unit_uom_id = uom_ids[0]
+        except: pass
+
         lines = []
         for item in data.get('line_items', []):
             sku = item.get('sku')
@@ -359,7 +368,16 @@ def process_order_data(data):
                 qty = int(item.get('quantity', 1))
                 disc = float(item.get('total_discount', 0))
                 pct = (disc / (price * qty)) * 100 if price > 0 else 0.0
-                lines.append((0, 0, {'product_id': product_id, 'product_uom_qty': qty, 'price_unit': price, 'name': item['name'], 'discount': pct}))
+                
+                # --- UOM SWITCH LOGIC ---
+                line_vals = {'product_id': product_id, 'product_uom_qty': qty, 'price_unit': price, 'name': item['name'], 'discount': pct}
+                
+                # Check if variant title contains 'Unit' or 'Single'
+                variant_title = (item.get('variant_title') or '').lower()
+                if unit_uom_id and ('unit' in variant_title or 'single' in variant_title):
+                    line_vals['product_uom'] = unit_uom_id # Force Odoo to use Unit UOM
+                
+                lines.append((0, 0, line_vals))
 
         for ship_line in data.get('shipping_lines', []):
             cost = float(ship_line.get('price', 0.0))
@@ -379,7 +397,7 @@ def process_order_data(data):
 
         if not lines: return False, "No valid lines"
         
-        # --- NOTE & PAYMENT LOGIC (UPDATED) ---
+        # --- NOTE & PAYMENT LOGIC ---
         gateway = data.get('gateway') or (data.get('payment_gateway_names')[0] if data.get('payment_gateway_names') else 'Shopify')
         customer_note = data.get('note') or ""
         
