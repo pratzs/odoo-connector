@@ -421,7 +421,10 @@ def process_order_data(data):
 def sync_products_master():
     """
     Odoo -> Shopify Product Sync (Optimized).
-    FIXED: Naming conventions (Pack Size, CTNX16, Unit) and Tracking status.
+    FIXED: 
+    1. Forces SKU update on new products (Fixes "No SKU" issue).
+    2. Sets Inventory Tracking immediately.
+    3. Handles Pack Size / Unit naming.
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
@@ -547,11 +550,10 @@ def sync_products_master():
                 desired_variants = []
                 price = float(p.get('list_price', 0.0))
                 
-                # FIXED: Get the Main UOM Name directly from Odoo Data [ID, "Name"]
-                # This fixes the "false" issue.
+                # Get correct Carton Name (e.g. CTNX16)
                 main_uom_name = 'Carton'
                 if p.get('uom_id'):
-                    main_uom_name = p['uom_id'][1] # e.g., "CTNX16"
+                    main_uom_name = p['uom_id'][1] 
 
                 opt_name = main_uom_name if is_pack else 'Default Title'
                 
@@ -565,27 +567,36 @@ def sync_products_master():
                 if is_pack:
                     unit_price = round(price / ratio, 2)
                     desired_variants.append({
-                        'option1': 'Unit', # FIXED: Changed from 'Unit (1)' to 'Unit'
+                        'option1': 'Unit', 
                         'price': str(unit_price),
                         'sku': f"{sku}-UNIT",
                         'weight': float(p.get('weight', 0)) / ratio
                     })
 
-                # FIXED: Changed Option Name to "Pack Size"
                 sp.options = [{'name': 'Pack Size'}] if is_pack else []
                 
                 existing_vars = getattr(sp, 'variants', [])
                 final_variants = []
 
                 for des in desired_variants:
+                    match = None
+                    
+                    # 1. Try Exact SKU Match
                     match = next((v for v in existing_vars if v.sku == des['sku']), None)
-                    if not match: match = shopify.Variant({'product_id': sp.id})
+                    
+                    # 2. CRITICAL FIX: If no match, check for "Blank" new variants
+                    # This catches the default variant Shopify creates for new products
+                    if not match:
+                        match = next((v for v in existing_vars if not v.sku or v.sku == ''), None)
+
+                    if not match: 
+                        match = shopify.Variant({'product_id': sp.id})
                     
                     match.option1 = des['option1']
                     match.sku = des['sku']
                     if sync_price and float(des['price']) > 0.01: match.price = des['price']
                     match.weight = des['weight']
-                    match.inventory_management = 'shopify' # This fixes "Inventory Not Tracked"
+                    match.inventory_management = 'shopify' # Forces tracking on
                     
                     if des['sku'] == sku:
                         match.barcode = str(p.get('barcode', '') or '')
