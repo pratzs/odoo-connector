@@ -1098,6 +1098,18 @@ def api_live_logs():
         return jsonify(data)
     except: return jsonify([])
 
+@app.route('/maintenance/wipe_logs', methods=['GET'])
+def maintenance_wipe_logs():
+    """Deletes ALL logs to give a clean slate."""
+    with app.app_context():
+        try:
+            num_deleted = db.session.query(SyncLog).delete()
+            db.session.commit()
+            return jsonify({"message": f"SUCCESS: Deleted {num_deleted} old log entries. The dashboard is now clean."})
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({"error": str(e)})
+
 @app.route('/sync/inventory', methods=['GET'])
 def sync_inventory_endpoint():
     log_event('System', 'Info', 'Manual Trigger: Starting Inventory Sync (Full Scan)...')
