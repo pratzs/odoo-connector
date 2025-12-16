@@ -410,7 +410,7 @@ def process_order_data(data):
 def sync_products_master():
     """
     Odoo -> Shopify Product Sync.
-    With PROGRESS LOGGING and OPTIMIZED UOM FETCHING.
+    FIXED: Handles "New Product" attribute errors safely using getattr().
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
@@ -418,7 +418,6 @@ def sync_products_master():
             return
 
         company_id = get_config('odoo_company_id')
-        # 1. Fetch all products (Now includes uom_id)
         odoo_products = odoo.get_all_products(company_id)
         
         sync_title = get_config('prod_sync_title', True)
@@ -426,7 +425,8 @@ def sync_products_master():
         sync_price = get_config('prod_sync_price', True)
         sync_type = get_config('prod_sync_type', True)
         sync_vendor = get_config('prod_sync_vendor', True)
-        
+        auto_create = get_config('prod_auto_create', True)
+
         total_count = len(odoo_products)
         log_event('Product Sync', 'Info', f"Starting Sync for {total_count} products...")
         
@@ -434,67 +434,70 @@ def sync_products_master():
         active_odoo_skus = set()
 
         for index, p in enumerate(odoo_products):
-            # --- HEARTBEAT LOG (Every 25 items) ---
-            if index > 0 and index % 25 == 0:
-                print(f"Sync Progress: {index}/{total_count}...") # Console log
-                
-            # Log to DB every 100 items to show it's alive
-            if index > 0 and index % 100 == 0:
-                log_event('Product Sync', 'Info', f"Progress: Processed {index}/{total_count} products...")
+            # --- PROGRESS LOGS ---
+            if index > 0 and index % 25 == 0: print(f"Sync Progress: {index}/{total_count}...")
+            if index > 0 and index % 100 == 0: log_event('Product Sync', 'Info', f"Progress: {index}/{total_count}...")
 
             sku = p.get('default_code')
             if not sku: continue
             
+            # Archive inactive
             if not p.get('active', True):
                 shopify_id = find_shopify_product_by_sku(sku)
                 if shopify_id:
                     try:
                         sp = shopify.Product.find(shopify_id)
-                        if sp.status != 'archived':
+                        if getattr(sp, 'status', '') != 'archived':
                             sp.status = 'archived'
                             sp.save()
-                            log_event('Product Sync', 'Info', f"Archived {sku}")
                     except: pass
                 continue 
 
             active_odoo_skus.add(sku)
-            
-            # --- 1. OPTIMIZED UOM CHECK ---
-            # Pass the uom_id we already fetched to save an API call
             split_info = odoo.get_product_split_info(p['id'], uom_id_data=p.get('uom_id'))
             
             is_pack = False
             ratio = 1.0
-            
             if split_info and split_info['ratio'] > 1.0:
                 is_pack = True
                 ratio = split_info['ratio']
             
             shopify_id = find_shopify_product_by_sku(sku)
             
+            # Skip creation if disabled
+            if not shopify_id and not auto_create: continue
+
             try:
                 if shopify_id: sp = shopify.Product.find(shopify_id)
                 else: sp = shopify.Product()
                 
                 product_changed = False
 
+                # --- SAFE ATTRIBUTE ACCESS (Fixes 'title' error) ---
+                current_title = getattr(sp, 'title', '')
+                current_body = getattr(sp, 'body_html', '')
+                current_type = getattr(sp, 'product_type', '')
+                current_vendor = getattr(sp, 'vendor', '')
+                current_status = getattr(sp, 'status', 'active')
+
                 # Title
-                if sync_title and sp.title != p['name']:
+                if sync_title and current_title != p['name']:
                     sp.title = p['name']
                     product_changed = True
                 
                 # Description
                 if sync_desc:
                     odoo_desc = p.get('description_sale') or ''
-                    if (sp.body_html or '') != odoo_desc:
+                    if (current_body or '') != odoo_desc:
                         sp.body_html = odoo_desc
                         product_changed = True
                 
                 # Category
                 odoo_categ_ids = p.get('public_categ_ids', [])
-                if not odoo_categ_ids and sp.product_type:
+                if not odoo_categ_ids and current_type:
+                    # Init Logic (Shopify -> Odoo)
                     try:
-                        cat_name = sp.product_type
+                        cat_name = current_type
                         cat_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.public.category', 'search', [[['name', '=', cat_name]]])
                         cat_id = cat_ids[0] if cat_ids else None
                         if not cat_id:
@@ -503,19 +506,18 @@ def sync_products_master():
                     except: pass
                 elif odoo_categ_ids and sync_type:
                     odoo_cat_name = odoo.get_public_category_name(odoo_categ_ids)
-                    if odoo_cat_name and sp.product_type != odoo_cat_name:
+                    if odoo_cat_name and current_type != odoo_cat_name:
                         sp.product_type = odoo_cat_name
                         product_changed = True
 
                 # Vendor
                 if sync_vendor:
-                    product_title = p.get('name', '')
-                    target_vendor = product_title.split()[0] if product_title else 'Worthy'
-                    if sp.vendor != target_vendor:
+                    target_vendor = p.get('name', '').split()[0] if p.get('name') else 'Worthy'
+                    if current_vendor != target_vendor:
                         sp.vendor = target_vendor
                         product_changed = True
 
-                if sp.status != 'active':
+                if current_status != 'active':
                     sp.status = 'active'
                     product_changed = True
                 
@@ -523,7 +525,7 @@ def sync_products_master():
                     sp.save()
                     if not shopify_id: sp = shopify.Product.find(sp.id)
 
-                # --- 2. DEFINE VARIANTS ---
+                # --- VARIANTS ---
                 desired_variants = []
                 price = float(p.get('list_price', 0.0))
                 opt_name = split_info['uom_name'] if is_pack else 'Default Title'
@@ -544,9 +546,10 @@ def sync_products_master():
                         'weight': float(p.get('weight', 0)) / ratio
                     })
 
-                # --- 3. SYNC VARIANTS ---
                 sp.options = [{'name': 'Format'}] if is_pack else []
-                existing_vars = sp.variants
+                
+                # SAFE ACCESS for variants
+                existing_vars = getattr(sp, 'variants', [])
                 final_variants = []
 
                 for des in desired_variants:
@@ -568,8 +571,7 @@ def sync_products_master():
                 sp.variants = final_variants
                 sp.save()
                 
-                # Image Sync (Only if no images)
-                if get_config('prod_sync_images', False) and not sp.images:
+                if get_config('prod_sync_images', False) and not getattr(sp, 'images', []):
                     try:
                         img_data = odoo.get_product_image(p['id'])
                         if img_data:
@@ -582,7 +584,6 @@ def sync_products_master():
                 synced += 1
                 
             except Exception as e:
-                # Log actual error to DB for specific SKU
                 log_event('Product Sync', 'Error', f"Failed {sku}: {e}")
 
         cleanup_shopify_products(active_odoo_skus)
