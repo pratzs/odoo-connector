@@ -221,44 +221,28 @@ def process_product_data(data):
 
 def process_order_data(data):
     """
-    Syncs order with SQL-Based Locking to prevent duplicates.
+    Syncs order with SQL-Based Locking and Smart UOM Switching.
     """
     shopify_id = str(data.get('id', ''))
     shopify_name = data.get('name')
     
-    # --- GUARD 1: SQL DATABASE LOCK (The Ultimate Fix) ---
-    # We check our local DB file first. It is shared across all workers.
+    # --- GUARD 1: SQL DATABASE LOCK ---
     try:
         exists = ProcessedOrder.query.get(shopify_id)
         if exists:
-            # If we processed it < 5 mins ago, skip it.
             if (datetime.utcnow() - exists.created_at).total_seconds() < 300:
                 return True, "Skipped: Found in Local Lock (Already Processed)"
-    except:
-        pass # If DB error, proceed carefully
+    except: pass 
 
     # --- GUARD 2: Cancelled & Old ---
-    if data.get('cancelled_at'):
-        return False, "Skipped: Order is Cancelled."
-
-    created_at_str = data.get('created_at', '')
-    if created_at_str:
-        try:
-            created_dt = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
-            if created_dt.tzinfo:
-                created_dt = created_dt.astimezone(datetime.utcnow().astimezone().tzinfo).replace(tzinfo=None)
-            if (datetime.utcnow() - created_dt).total_seconds() > 3600: # 60 mins
-                return False, "Skipped: Order is too old."
-        except: pass 
+    if data.get('cancelled_at'): return False, "Skipped: Order is Cancelled."
 
     # --- LOCK IT NOW ---
-    # We write to the DB *before* calling Odoo. This blocks other workers instantly.
     try:
         new_lock = ProcessedOrder(shopify_id=shopify_id)
         db.session.add(new_lock)
         db.session.commit()
     except Exception as e:
-        # If commit fails, it means another worker just locked it. STOP.
         db.session.rollback()
         return True, "Skipped: Race Condition caught by DB Lock"
 
@@ -270,12 +254,11 @@ def process_order_data(data):
         client_ref = f"ONLINE_{shopify_name}"
         company_id = get_config('odoo_company_id')
         
-        # Double Check Odoo just in case
+        # Double Check Odoo
         try:
             existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                 'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
-            if existing_ids: 
-                return True, "Skipped: Order exists in Odoo."
+            if existing_ids: return True, "Skipped: Order exists in Odoo."
         except: pass
 
         # 1. Handle Customer
@@ -284,81 +267,72 @@ def process_order_data(data):
         def_address = data.get('billing_address') or data.get('shipping_address') or {}
         
         if not partner:
-            # Create Partner Logic
             company_name = def_address.get('company')
             person_name = f"{cust_data.get('first_name', '')} {cust_data.get('last_name', '')}".strip()
             final_name = company_name if company_name else (person_name or email)
-            vat_number = None
-            for attr in data.get('note_attributes', []):
-                if attr.get('name', '').lower() in ['vat', 'vat_number', 'tax_id']:
-                    vat_number = attr.get('value')
-
+            
             vals = {
                 'name': final_name, 'email': email, 'phone': cust_data.get('phone'),
                 'street': def_address.get('address1'), 'city': def_address.get('city'),
                 'zip': def_address.get('zip'), 'country_code': def_address.get('country_code'),
-                'vat': vat_number, 'is_company': True, 'company_type': 'company'
+                'is_company': True, 'company_type': 'company'
             }
             if company_id: vals['company_id'] = int(company_id)
             partner_id = odoo.create_partner(vals)
             partner = {'id': partner_id, 'name': final_name}
+            
             if shopify_id and data.get('customer', {}).get('id'):
                 try:
-                    # Check if exists first to avoid Primary Key crashes
                     cust_map_exists = CustomerMap.query.get(str(data['customer']['id']))
                     if not cust_map_exists:
-                        new_map = CustomerMap(
-                            shopify_customer_id=str(data['customer']['id']), 
-                            odoo_partner_id=partner_id, 
-                            email=email
-                        )
-                        db.session.add(new_map)
+                        db.session.add(CustomerMap(shopify_customer_id=str(data['customer']['id']), odoo_partner_id=partner_id, email=email))
                         db.session.commit()
-                except Exception as e:
-                    print(f"Customer Map Error: {e}")
-                    db.session.rollback()
+                except: db.session.rollback()
 
-        # 2. Handle Addresses (Branch Logic)
+        # 2. Handle Addresses
         main_partner_id = partner['id']
-        bill_addr = data.get('billing_address') or {}
-        ship_addr = data.get('shipping_address') or {}
+        invoice_id = main_partner_id
+        shipping_id = main_partner_id
 
-        if bill_addr:
-            inv_data = {
-                'name': f"{bill_addr.get('company') or partner['name']} (Invoice)", 
-                'street': bill_addr.get('address1'), 'city': bill_addr.get('city'),
-                'zip': bill_addr.get('zip'), 'country_code': bill_addr.get('country_code'), 
-                'phone': bill_addr.get('phone'), 'email': email
-            }
+        if data.get('billing_address'):
+            b = data['billing_address']
+            inv_data = {'name': f"{b.get('company') or partner['name']} (Invoice)", 'street': b.get('address1'), 'city': b.get('city'), 'zip': b.get('zip'), 'country_code': b.get('country_code'), 'phone': b.get('phone'), 'email': email}
             invoice_id = odoo.find_or_create_child_address(main_partner_id, inv_data, type='invoice')
-        else: invoice_id = main_partner_id
 
-        if ship_addr:
-            ship_data = {
-                'name': f"{ship_addr.get('company') or partner['name']} (Delivery)", 
-                'street': ship_addr.get('address1'), 'city': ship_addr.get('city'),
-                'zip': ship_addr.get('zip'), 'country_code': ship_addr.get('country_code'), 
-                'phone': ship_addr.get('phone'), 'email': email
-            }
+        if data.get('shipping_address'):
+            s = data['shipping_address']
+            ship_data = {'name': f"{s.get('company') or partner['name']} (Delivery)", 'street': s.get('address1'), 'city': s.get('city'), 'zip': s.get('zip'), 'country_code': s.get('country_code'), 'phone': s.get('phone'), 'email': email}
             shipping_id = odoo.find_or_create_child_address(main_partner_id, ship_data, type='delivery')
-        else: shipping_id = main_partner_id
         
-        if invoice_id: main_partner_id = invoice_id
         sales_rep_id = odoo.get_partner_salesperson(main_partner_id) or odoo.uid
 
-        # 3. Handle Lines & UOM
+        # 3. SMART UOM LOOKUP (FIX FOR CTNX28 ISSUE)
         unit_uom_id = None
         try:
+            # Step A: Look for common names
+            uom_names = ['Units', 'Unit', 'Piece', 'Pieces', 'PCE', 'ea', 'Each']
             uom_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
-                'uom.uom', 'search', [[['name', 'in', ['Units', 'Unit']]]])
-            if uom_ids: unit_uom_id = uom_ids[0]
-        except: pass
+                'uom.uom', 'search', [[['name', 'in', uom_names]]])
+            
+            # Step B: If failed, try fuzzy search for anything containing "Unit"
+            if not uom_ids:
+                uom_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+                    'uom.uom', 'search', [[['name', 'ilike', 'Unit']]])
+            
+            if uom_ids: 
+                unit_uom_id = uom_ids[0]
+                log_event('System', 'Info', f"[UOM DEBUG] Found 'Unit' UOM ID: {unit_uom_id}")
+            else:
+                log_event('System', 'Warning', "[UOM DEBUG] Could not find any UOM named Unit/Piece in Odoo.")
+        except Exception as e:
+            print(f"UOM Lookup Error: {e}")
 
         lines = []
         for item in data.get('line_items', []):
             sku = item.get('sku')
             if not sku: continue
             product_id = odoo.search_product_by_sku(sku, company_id)
+            
             # Auto-Create Product if missing
             if not product_id:
                 if not odoo.check_product_exists_by_sku(sku, company_id):
@@ -377,10 +351,14 @@ def process_order_data(data):
                 
                 line_vals = {'product_id': product_id, 'product_uom_qty': qty, 'price_unit': price, 'name': item['name'], 'discount': pct}
                 
-                # UOM SWITCH
+                # --- APPLY UOM SWITCH ---
+                # Checks if variant name contains keywords indicating a single unit
                 variant_title = (item.get('variant_title') or '').lower()
-                if unit_uom_id and ('unit' in variant_title or 'single' in variant_title):
+                is_single_unit = any(x in variant_title for x in ['unit', 'single', 'each', 'bottle', 'can', 'pce'])
+                
+                if unit_uom_id and is_single_unit:
                     line_vals['product_uom'] = unit_uom_id
+                    log_event('Order', 'Info', f"[UOM] Switched {sku} to Unit UOM (ID: {unit_uom_id})")
                 
                 lines.append((0, 0, line_vals))
 
