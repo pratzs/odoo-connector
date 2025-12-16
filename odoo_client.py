@@ -114,7 +114,7 @@ class OdooClient:
         if company_id:
             domain = ['&', '&', '&', ('type', '=', 'product'), ('default_code', '!=', False), '|', ('active', '=', True), ('active', '=', False), '|', ('company_id', '=', int(company_id)), ('company_id', '=', False)]
         
-        # --- FIELDS UPDATED: Added 'write_date' for optimization and 'sh_' fields for logic ---
+        # --- FIXED: Added 'write_date' to fields list ---
         fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 'description_sale', 'active', 'product_tmpl_id', 'qty_available', 'public_categ_ids', 'product_tag_ids', 'uom_id', 'sh_is_secondary_unit', 'sh_secondary_uom', 'write_date']
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search_read', [domain], {'fields': fields})
 
@@ -181,13 +181,7 @@ class OdooClient:
         return self.models.execute_kw(self.db, self.uid, self.password, 'sale.order', 'search_read', [domain], {'fields': ['id', 'client_order_ref']})
 
     def get_product_split_info(self, product_id, product_data=None):
-        """
-        Checks 'sh_is_secondary_unit' checkbox.
-        If TRUE: Returns ratio and UOM name (Split enabled).
-        If FALSE: Returns None (Split disabled, treat as single unit).
-        """
         try:
-            # 1. Use passed data (optimized) or fetch
             if product_data:
                 is_sec = product_data.get('sh_is_secondary_unit', False)
                 uom_id = product_data.get('uom_id', False)
@@ -199,16 +193,13 @@ class OdooClient:
                 uom_id = p_data[0].get('uom_id', False)
 
             if not is_sec or not uom_id:
-                return None # Checkbox is UNCHECKED. Stop.
+                return None 
 
-            # 2. Get UOM Factor to calculate ratio
-            # uom_id is [id, "Name"]
             real_uom_id = uom_id[0]
             uom_data = self.models.execute_kw(self.db, self.uid, self.password,
                 'uom.uom', 'read', [real_uom_id], {'fields': ['name', 'factor_inv']})
             
             if uom_data:
-                # factor_inv is 16.0 for CTNX16
                 ratio = float(uom_data[0].get('factor_inv', 1.0))
                 return {'ratio': ratio, 'uom_name': uom_data[0]['name']}
                 
