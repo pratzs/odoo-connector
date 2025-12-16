@@ -114,8 +114,8 @@ class OdooClient:
         if company_id:
             domain = ['&', '&', '&', ('type', '=', 'product'), ('default_code', '!=', False), '|', ('active', '=', True), ('active', '=', False), '|', ('company_id', '=', int(company_id)), ('company_id', '=', False)]
         
-        # --- CRITICAL UPDATE: Fetch 'x_is_secondary_unit' ---
-        fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 'description_sale', 'active', 'product_tmpl_id', 'qty_available', 'public_categ_ids', 'product_tag_ids', 'uom_id', 'x_is_secondary_unit']
+        # --- UPDATED: Fetch 'sh_is_secondary_unit' and 'sh_secondary_uom' ---
+        fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 'description_sale', 'active', 'product_tmpl_id', 'qty_available', 'public_categ_ids', 'product_tag_ids', 'uom_id', 'sh_is_secondary_unit', 'sh_secondary_uom']
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search_read', [domain], {'fields': fields})
 
     def get_changed_products(self, time_limit_str, company_id=None):
@@ -182,41 +182,33 @@ class OdooClient:
 
     def get_product_split_info(self, product_id, product_data=None):
         """
-        Checks 'x_is_secondary_unit' checkbox.
-        If TRUE: Returns ratio and UOM name (Split enabled).
-        If FALSE: Returns None (Split disabled, treat as single unit).
+        Checks 'sh_is_secondary_unit' (from your screenshot).
         """
         try:
-            # 1. Use passed data if available (Optimization)
+            # 1. Use passed data (optimized) or fetch
             if product_data:
-                # IMPORTANT: Check the boolean flag first!
-                if not product_data.get('x_is_secondary_unit'):
-                    return None # Stop here. Do not split.
-                
-                uom_id = product_data.get('uom_id')[0] if product_data.get('uom_id') else None
+                is_sec = product_data.get('sh_is_secondary_unit', False)
+                uom_id = product_data.get('uom_id', False)
             else:
-                # Fallback fetch
                 p_data = self.models.execute_kw(self.db, self.uid, self.password,
-                    'product.product', 'read', [product_id], {'fields': ['uom_id', 'x_is_secondary_unit']})
+                    'product.product', 'read', [product_id], {'fields': ['uom_id', 'sh_is_secondary_unit']})
                 if not p_data: return None
-                
-                # Check boolean flag
-                if not p_data[0].get('x_is_secondary_unit'):
-                    return None
-                
-                uom_id = p_data[0]['uom_id'][0] if p_data[0].get('uom_id') else None
+                is_sec = p_data[0].get('sh_is_secondary_unit', False)
+                uom_id = p_data[0].get('uom_id', False)
 
-            if not uom_id: return None
+            if not is_sec or not uom_id:
+                return None # Checkbox is UNCHECKED. Stop.
 
-            # 2. Get UOM Factor
+            # 2. Get UOM Factor to calculate ratio
+            # uom_id is [id, "Name"]
+            real_uom_id = uom_id[0]
             uom_data = self.models.execute_kw(self.db, self.uid, self.password,
-                'uom.uom', 'read', [uom_id], {'fields': ['name', 'factor_inv']})
+                'uom.uom', 'read', [real_uom_id], {'fields': ['name', 'factor_inv']})
             
             if uom_data:
+                # factor_inv is 16.0 for CTNX16
                 ratio = float(uom_data[0].get('factor_inv', 1.0))
-                # Only split if ratio > 1 (e.g., 24)
-                if ratio > 1.0:
-                    return {'ratio': ratio, 'uom_name': uom_data[0]['name']}
+                return {'ratio': ratio, 'uom_name': uom_data[0]['name']}
                 
         except Exception as e:
             print(f"Split Info Error: {e}")
