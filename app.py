@@ -1181,29 +1181,29 @@ def import_selected_orders():
 
 @app.route('/webhook/orders', methods=['POST'])
 @app.route('/webhook/orders/updated', methods=['POST'])
+@app.route('/webhook/orders/cancelled', methods=['POST']) # <--- Make sure this line is here
 def order_webhook():
     """
-    HYBRID MODE:
-    1. 'orders/create'  -> ALLOWED (Syncs automatically 1st time)
-    2. 'orders/updated' -> BLOCKED (Prevents overwriting your manual fixes)
+    HYBRID MODE + CANCELLATIONS:
+    1. 'orders/create'    -> ALLOWED (Create)
+    2. 'orders/cancelled' -> ALLOWED (Cancel)
+    3. 'orders/updated'   -> BLOCKED (Prevent Duplicates)
     """
-    # 1. Security Check
     hmac_header = request.headers.get('X-Shopify-Hmac-Sha256')
     if not verify_shopify(request.get_data(), hmac_header):
         return "Unauthorized", 401
 
-    # 2. Topic Check
     topic = request.headers.get('X-Shopify-Topic', '')
 
-    # --- BLOCK UPDATES ---
-    if topic == 'orders/updated':
-        # We return 200 to tell Shopify "We got it, stop asking," 
-        # but we do NOT run process_order_data().
-        return "Update Ignored (Auto-Update Disabled)", 200
-
-    # --- ALLOW CREATION ---
-    # This runs ONLY for 'orders/create'
     with app.app_context():
+        if topic == 'orders/cancelled':
+            process_cancellation(request.json)
+            return "Cancellation Processed", 200
+            
+        elif topic == 'orders/updated':
+            return "Update Ignored", 200
+
+        # Default to Create logic
         process_order_data(request.json)
 
     return "Received", 200
@@ -1270,6 +1270,32 @@ def api_save_settings():
         return jsonify({"message": str(e)}), 500
 
 
+def process_cancellation(data):
+    """Handles Shopify -> Odoo Cancellation."""
+    shopify_name = data.get('name')
+    client_ref = f"ONLINE_{shopify_name}"
+    
+    try:
+        # Find the order in Odoo
+        existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
+        
+        if existing_ids:
+            order_id = existing_ids[0]
+            # Check current state to avoid double-cancelling
+            current_state = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'sale.order', 'read', [[order_id]], {'fields': ['state']})[0]['state']
+            
+            if current_state != 'cancel':
+                if odoo.cancel_order(order_id):
+                    log_event('Order Cancel', 'Success', f"Cancelled Odoo Order {client_ref}")
+                else:
+                    log_event('Order Cancel', 'Error', f"Failed to cancel {client_ref} in Odoo")
+            else:
+                log_event('Order Cancel', 'Info', f"Order {client_ref} is already cancelled in Odoo.")
+    except Exception as e:
+        log_event('Order Cancel', 'Error', f"Error processing cancellation for {shopify_name}: {e}")
+        
 
 # 1. Define Cleanup Function FIRST
 def cleanup_old_logs():
