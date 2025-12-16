@@ -193,8 +193,8 @@ class OdooClient:
                 '|', ('company_id', '=', int(company_id)), ('company_id', '=', False)
             ]
         
-        # Added 'qty_available', 'public_categ_ids', and 'product_tag_ids' to support new mappings
-        fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 'description_sale', 'active', 'product_tmpl_id', 'qty_available', 'public_categ_ids', 'product_tag_ids']
+        # ADDED 'uom_id' to fields for faster Sync
+        fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 'description_sale', 'active', 'product_tmpl_id', 'qty_available', 'public_categ_ids', 'product_tag_ids', 'uom_id']
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search_read', [domain], {'fields': fields})
 
     def get_changed_products(self, time_limit_str, company_id=None):
@@ -310,22 +310,23 @@ class OdooClient:
         return self.models.execute_kw(self.db, self.uid, self.password, 
             'sale.order', 'search_read', [domain], {'fields': ['id', 'client_order_ref']})
 
-    def get_product_split_info(self, product_id):
+    def get_product_split_info(self, product_id, uom_id_data=None):
         """
         Checks UOM factor. If Ratio > 1 (e.g. 24), we split.
         Returns: { 'ratio': 24.0, 'uom_name': 'Carton' }
         """
         try:
-            # 1. Get Product UOM ID
-            p_data = self.models.execute_kw(self.db, self.uid, self.password,
-                'product.product', 'read', [product_id], {'fields': ['uom_id']})
+            # OPTIMIZATION: If uom_id_data is passed from get_all_products (e.g. [12, "Carton"]), use it directly.
+            if uom_id_data:
+                uom_id = uom_id_data[0]
+            else:
+                # Fallback: Fetch it if missing
+                p_data = self.models.execute_kw(self.db, self.uid, self.password,
+                    'product.product', 'read', [product_id], {'fields': ['uom_id']})
+                if not p_data or not p_data[0].get('uom_id'): return None
+                uom_id = p_data[0]['uom_id'][0] 
             
-            if not p_data or not p_data[0].get('uom_id'): return None
-            
-            uom_id = p_data[0]['uom_id'][0] # [id, "Name"]
-            
-            # 2. Get UOM Factor (The Math)
-            # factor_inv is the multiplier (e.g. 24 for Carton)
+            # 2. Get UOM Factor
             uom_data = self.models.execute_kw(self.db, self.uid, self.password,
                 'uom.uom', 'read', [uom_id], {'fields': ['name', 'factor_inv']})
             
