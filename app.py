@@ -220,73 +220,70 @@ def process_product_data(data):
 
 def process_order_data(data):
     """
-    Syncs order with Strict Guards, Customer Notes, Branch Logic, AND UOM Switching.
+    Syncs order with SQL-Based Locking to prevent duplicates.
     """
     shopify_id = str(data.get('id', ''))
     shopify_name = data.get('name')
     
-    # GUARD 1: Cancelled Orders
+    # --- GUARD 1: SQL DATABASE LOCK (The Ultimate Fix) ---
+    # We check our local DB file first. It is shared across all workers.
+    try:
+        exists = ProcessedOrder.query.get(shopify_id)
+        if exists:
+            # If we processed it < 5 mins ago, skip it.
+            if (datetime.utcnow() - exists.created_at).total_seconds() < 300:
+                return True, "Skipped: Found in Local Lock (Already Processed)"
+    except:
+        pass # If DB error, proceed carefully
+
+    # --- GUARD 2: Cancelled & Old ---
     if data.get('cancelled_at'):
         return False, "Skipped: Order is Cancelled."
 
-    # GUARD 2: Old Orders (>60 mins)
     created_at_str = data.get('created_at', '')
     if created_at_str:
         try:
             created_dt = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
             if created_dt.tzinfo:
                 created_dt = created_dt.astimezone(datetime.utcnow().astimezone().tzinfo).replace(tzinfo=None)
-            
-            age_in_minutes = (datetime.utcnow() - created_dt).total_seconds() / 60
-            if age_in_minutes > 60:
-                return False, f"Skipped: Order is too old ({int(age_in_minutes)} mins)."
-        except Exception as e:
-            print(f"Date Parse Warning: {e}") 
+            if (datetime.utcnow() - created_dt).total_seconds() > 3600: # 60 mins
+                return False, "Skipped: Order is too old."
+        except: pass 
 
-    # GUARD 3: Memory Lock
-    time.sleep(random.uniform(0.5, 1.5))
-    
-    with order_processing_lock:
-        if shopify_id in active_processing_ids:
-            return False, "Skipped: Already processing this ID."
-        active_processing_ids.add(shopify_id)
-
+    # --- LOCK IT NOW ---
+    # We write to the DB *before* calling Odoo. This blocks other workers instantly.
     try:
-        # GUARD 4: Recent Cache
-        if shopify_id in recent_processed_cache:
-            last_run = recent_processed_cache[shopify_id]
-            if (datetime.utcnow() - last_run).total_seconds() < 300:
-                return False, "Skipped: Recently Synced."
+        new_lock = ProcessedOrder(shopify_id=shopify_id)
+        db.session.add(new_lock)
+        db.session.commit()
+    except Exception as e:
+        # If commit fails, it means another worker just locked it. STOP.
+        db.session.rollback()
+        return True, "Skipped: Race Condition caught by DB Lock"
 
+    # ==========================================================
+    # ACTUAL ODOO SYNC STARTS HERE
+    # ==========================================================
+    try:
         email = data.get('email') or data.get('contact_email')
         client_ref = f"ONLINE_{shopify_name}"
         company_id = get_config('odoo_company_id')
         
-        if not company_id and odoo:
-            try:
-                user_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
-                    'res.users', 'read', [[odoo.uid]], {'fields': ['company_id']})
-                if user_info: company_id = user_info[0]['company_id'][0]
-            except: pass
-
-        # Check Odoo for Existing Order
-        existing_order_id = None
+        # Double Check Odoo just in case
         try:
             existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                 'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
-            if existing_ids: existing_order_id = existing_ids[0]
-        except Exception as e: return False, f"Odoo Error: {str(e)}"
+            if existing_ids: 
+                return True, "Skipped: Order exists in Odoo."
+        except: pass
 
-        if existing_order_id:
-             recent_processed_cache[shopify_id] = datetime.utcnow()
-             return True, "Skipped: Order already exists."
-
-        # --- PARTNER LOGIC ---
+        # 1. Handle Customer
         partner = odoo.search_partner_by_email(email)
         cust_data = data.get('customer', {})
         def_address = data.get('billing_address') or data.get('shipping_address') or {}
         
         if not partner:
+            # Create Partner Logic
             company_name = def_address.get('company')
             person_name = f"{cust_data.get('first_name', '')} {cust_data.get('last_name', '')}".strip()
             final_name = company_name if company_name else (person_name or email)
@@ -302,16 +299,15 @@ def process_order_data(data):
                 'vat': vat_number, 'is_company': True, 'company_type': 'company'
             }
             if company_id: vals['company_id'] = int(company_id)
-            try:
-                partner_id = odoo.create_partner(vals)
-                partner = {'id': partner_id, 'name': final_name, 'street': vals['street'], 'zip': vals['zip']}
-                log_event('Customer', 'Success', f"Created Company Partner: {final_name}")
-                if shopify_id and data.get('customer', {}).get('id'):
+            partner_id = odoo.create_partner(vals)
+            partner = {'id': partner_id, 'name': final_name}
+            if shopify_id and data.get('customer', {}).get('id'):
+                try:
                     db.session.add(CustomerMap(shopify_customer_id=str(data['customer']['id']), odoo_partner_id=partner_id, email=email))
                     db.session.commit()
-            except Exception as e: return False, f"Customer Creation Error: {e}"
-        
-        # --- BRANCH ID LOGIC ---
+                except: db.session.rollback()
+
+        # 2. Handle Addresses (Branch Logic)
         main_partner_id = partner['id']
         bill_addr = data.get('billing_address') or {}
         ship_addr = data.get('shipping_address') or {}
@@ -337,13 +333,11 @@ def process_order_data(data):
         else: shipping_id = main_partner_id
         
         if invoice_id: main_partner_id = invoice_id
-        
         sales_rep_id = odoo.get_partner_salesperson(main_partner_id) or odoo.uid
 
-        # --- PRE-FETCH "UNITS" UOM ID ---
+        # 3. Handle Lines & UOM
         unit_uom_id = None
         try:
-            # Look for UOM named "Units" or "Unit"
             uom_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
                 'uom.uom', 'search', [[['name', 'in', ['Units', 'Unit']]]])
             if uom_ids: unit_uom_id = uom_ids[0]
@@ -354,38 +348,37 @@ def process_order_data(data):
             sku = item.get('sku')
             if not sku: continue
             product_id = odoo.search_product_by_sku(sku, company_id)
+            # Auto-Create Product if missing
             if not product_id:
-                if odoo.check_product_exists_by_sku(sku, company_id): continue 
-                try:
-                    new_p = {'name': item['name'], 'default_code': sku, 'list_price': float(item.get('price', 0)), 'type': 'product'}
-                    if company_id: new_p['company_id'] = int(company_id)
-                    odoo.create_product(new_p)
-                    product_id = odoo.search_product_by_sku(sku, company_id) 
-                except: pass
-
+                if not odoo.check_product_exists_by_sku(sku, company_id):
+                    try:
+                        new_p = {'name': item['name'], 'default_code': sku, 'list_price': float(item.get('price', 0)), 'type': 'product'}
+                        if company_id: new_p['company_id'] = int(company_id)
+                        odoo.create_product(new_p)
+                        product_id = odoo.search_product_by_sku(sku, company_id) 
+                    except: pass
+            
             if product_id:
                 price = float(item.get('price', 0))
                 qty = int(item.get('quantity', 1))
                 disc = float(item.get('total_discount', 0))
                 pct = (disc / (price * qty)) * 100 if price > 0 else 0.0
                 
-                # --- UOM SWITCH LOGIC ---
                 line_vals = {'product_id': product_id, 'product_uom_qty': qty, 'price_unit': price, 'name': item['name'], 'discount': pct}
                 
-                # Check if variant title contains 'Unit' or 'Single'
+                # UOM SWITCH
                 variant_title = (item.get('variant_title') or '').lower()
                 if unit_uom_id and ('unit' in variant_title or 'single' in variant_title):
-                    line_vals['product_uom'] = unit_uom_id # Force Odoo to use Unit UOM
+                    line_vals['product_uom'] = unit_uom_id
                 
                 lines.append((0, 0, line_vals))
 
+        # Shipping Lines
         for ship_line in data.get('shipping_lines', []):
             cost = float(ship_line.get('price', 0.0))
             if cost >= 0:
                 s_title = ship_line.get('title', 'Shipping')
-                sp_id = odoo.search_product_by_name(s_title, company_id) or \
-                        odoo.search_product_by_sku("SHIP_FEE", company_id) or \
-                        odoo.search_product_by_name("Shopify Shipping", company_id)
+                sp_id = odoo.search_product_by_name(s_title, company_id) or odoo.search_product_by_sku("SHIP_FEE", company_id)
                 if not sp_id:
                     try:
                         sv = {'name': s_title, 'type': 'service', 'list_price': 0.0, 'default_code': 'SHIP_FEE'}
@@ -396,14 +389,12 @@ def process_order_data(data):
                 if sp_id: lines.append((0, 0, {'product_id': sp_id, 'product_uom_qty': 1, 'price_unit': cost, 'name': s_title, 'discount': 0.0}))
 
         if not lines: return False, "No valid lines"
-        
-        # --- NOTE & PAYMENT LOGIC ---
+
+        # 4. Create Order
         gateway = data.get('gateway') or (data.get('payment_gateway_names')[0] if data.get('payment_gateway_names') else 'Shopify')
         customer_note = data.get('note') or ""
-        
         note_text = f"Payment Gateway: {gateway}"
-        if customer_note:
-            note_text = f"Customer Note: {customer_note}\n\n{note_text}"
+        if customer_note: note_text = f"Customer Note: {customer_note}\n\n{note_text}"
 
         vals = {
             'name': client_ref, 'client_order_ref': client_ref, 'partner_id': main_partner_id, 
@@ -411,23 +402,21 @@ def process_order_data(data):
             'order_line': lines, 'user_id': sales_rep_id, 'state': 'draft', 'note': note_text
         }
         if company_id: vals['company_id'] = int(company_id)
+        
         odoo.create_sale_order(vals, context={'manual_price': True})
         log_event('Order', 'Success', f"Synced {client_ref}")
-
-        # Update Cache
-        recent_processed_cache[shopify_id] = datetime.utcnow()
-        keys_to_del = [k for k, v in recent_processed_cache.items() if (datetime.utcnow() - v).total_seconds() > 300]
-        for k in keys_to_del: del recent_processed_cache[k]
-        
         return True, "Synced"
 
     except Exception as e:
         log_event('Order', 'Error', f"Error {shopify_name}: {e}")
+        # IF IT FAILED, UNLOCK IT SO WE CAN RETRY LATER
+        try:
+            l = ProcessedOrder.query.get(shopify_id)
+            if l: 
+                db.session.delete(l)
+                db.session.commit()
+        except: pass
         return False, str(e)
-    finally:
-        with order_processing_lock:
-            if shopify_id in active_processing_ids:
-                active_processing_ids.remove(shopify_id)
                 
 def sync_products_master():
     """Odoo -> Shopify Product Sync (Fixed: Strict SKU, Price Safety, No Image Leaks)"""
