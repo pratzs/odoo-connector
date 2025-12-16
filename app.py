@@ -336,6 +336,7 @@ def process_order_data(data):
             # --- FIX: SKU CLEANER (Remove -UNIT to find product) ---
             sku = raw_sku
             is_unit_variant = False
+
             if sku.endswith('-UNIT'):
                 sku = sku.replace('-UNIT', '')
                 is_unit_variant = True
@@ -962,8 +963,8 @@ def perform_inventory_sync(lookback_minutes):
     updates = 0
     
     for p_id in product_ids:
-        # Keep as float to handle 0.5 cases
-total_odoo = odoo.get_total_qty_for_locations(p_id, target_locations, field_name=target_field)
+        # 1. Get Total Stock as FLOAT (Crucial for 9.5 cases)
+        total_odoo = odoo.get_total_qty_for_locations(p_id, target_locations, field_name=target_field)
         if sync_zero and total_odoo <= 0: continue
         
         # 2. Fetch Checkbox & UOM
