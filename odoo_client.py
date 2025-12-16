@@ -17,7 +17,7 @@ class OdooClient:
     def models(self):
         """
         Creates a fresh ServerProxy for every call. 
-        This prevents 'ResponseNotReady' errors in multi-threaded environments (Gunicorn/Flask).
+        This prevents 'ResponseNotReady' errors in multi-threaded environments.
         """
         return xmlrpc.client.ServerProxy(f'{self.url}/xmlrpc/2/object', context=self.context, allow_none=True)
 
@@ -146,21 +146,17 @@ class OdooClient:
         return None
 
     def get_vendor_name(self, product_id):
-        """Fetches the primary vendor name for a product template."""
         ids = self.models.execute_kw(self.db, self.uid, self.password, 
             'product.supplierinfo', 'search', [[['product_tmpl_id', '=', product_id]]], {'limit': 1})
         if ids:
             data = self.models.execute_kw(self.db, self.uid, self.password, 
                 'product.supplierinfo', 'read', [ids[0]], {'fields': ['partner_id']})
-            # partner_id is (id, name)
             if data and data[0].get('partner_id'):
                 return data[0]['partner_id'][1]
         return None
 
     def get_public_category_name(self, category_ids):
-        """Fetches the name of the first public category (Ecommerce category)."""
         if not category_ids: return None
-        # category_ids is a list of IDs. We just take the first one.
         data = self.models.execute_kw(self.db, self.uid, self.password,
             'product.public.category', 'read', [category_ids[0]], {'fields': ['name']})
         if data:
@@ -168,14 +164,12 @@ class OdooClient:
         return None
 
     def get_tag_names(self, tag_ids):
-        """Fetches the names of product tags."""
         if not tag_ids: return []
         data = self.models.execute_kw(self.db, self.uid, self.password,
             'product.tag', 'read', [tag_ids], {'fields': ['name']})
         return [t['name'] for t in data]
 
     def get_product_image(self, product_id):
-        """Fetches the base64 image_1920 for a specific product."""
         data = self.models.execute_kw(self.db, self.uid, self.password,
             'product.product', 'read', [product_id], {'fields': ['image_1920']})
         if data and data[0].get('image_1920'):
@@ -193,7 +187,6 @@ class OdooClient:
                 '|', ('company_id', '=', int(company_id)), ('company_id', '=', False)
             ]
         
-        # ADDED 'uom_id' to fields for faster Sync
         fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 'description_sale', 'active', 'product_tmpl_id', 'qty_available', 'public_categ_ids', 'product_tag_ids', 'uom_id']
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search_read', [domain], {'fields': fields})
 
@@ -205,15 +198,11 @@ class OdooClient:
                 ('write_date', '>', time_limit_str), 
                 ('type', '=', 'product'),
                 '|', ('active', '=', True), ('active', '=', False),
-                '|', 
-                ('company_id', '=', int(company_id)), 
-                ('company_id', '=', False)
+                '|', ('company_id', '=', int(company_id)), ('company_id', '=', False)
             ]
-            
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search', [domain])
 
     def get_changed_customers(self, time_limit_str, company_id=None):
-        # UPDATED: Replaced 'customer=True' with 'customer_rank > 0' for Odoo 16+ compatibility
         domain = [('write_date', '>', time_limit_str), ('is_company', '=', True), ('customer_rank', '>', 0), ('active', '=', True)]
         if company_id:
             domain = [
@@ -221,38 +210,24 @@ class OdooClient:
                 ('write_date', '>', time_limit_str), 
                 ('is_company', '=', True),
                 ('customer_rank', '>', 0),
-                '|', 
-                ('company_id', '=', int(company_id)), 
-                ('company_id', '=', False)
+                '|', ('company_id', '=', int(company_id)), ('company_id', '=', False)
             ]
-        
-        # ADDED 'user_id' to this list to fetch Salesperson
         fields = ['id', 'name', 'email', 'phone', 'street', 'city', 'zip', 'country_id', 'vat', 'category_id', 'user_id']
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search_read', [domain], {'fields': fields})
 
     def get_product_ids_with_recent_stock_moves(self, time_limit_str, company_id=None):
-        """
-        Finds products that have moved (Sold, Purchased, Adjusted) recently.
-        This is MUCH more reliable for Inventory Sync than checking product write_date.
-        """
-        # Search stock.move for items processed ('done') since the last check
         domain = [['date', '>', time_limit_str], ['state', '=', 'done']]
         if company_id:
             domain.append(['company_id', '=', int(company_id)])
             
         move_ids = self.models.execute_kw(self.db, self.uid, self.password, 'stock.move', 'search', [domain])
-        
         if not move_ids: return []
         
-        # Read the moves to get the product_ids
         moves = self.models.execute_kw(self.db, self.uid, self.password, 'stock.move', 'read', [move_ids], {'fields': ['product_id']})
-        
-        # Extract unique IDs (product_id is returned as [id, "Name"])
         product_ids = set()
         for m in moves:
             if m.get('product_id'):
                 product_ids.add(m['product_id'][0])
-                
         return list(product_ids)
 
     def get_companies(self):
@@ -285,11 +260,8 @@ class OdooClient:
     def post_message(self, order_id, message):
         return self.models.execute_kw(self.db, self.uid, self.password, 'sale.order', 'message_post', [order_id], {'body': message})
 
-    # --- NEW CANCELLATION METHODS ---
     def cancel_order(self, order_id):
-        """Triggers the 'Cancel' button action on a Sale Order."""
         try:
-            # 'action_cancel' is the method name for the 'Cancel' button in Odoo
             self.models.execute_kw(self.db, self.uid, self.password, 'sale.order', 'action_cancel', [[order_id]])
             return True
         except Exception as e:
@@ -297,36 +269,26 @@ class OdooClient:
             return False
 
     def get_recently_cancelled_orders(self, time_limit_str, company_id=None):
-        """Finds orders that were cancelled in Odoo recently."""
         domain = [
             ['write_date', '>', time_limit_str], 
             ['state', '=', 'cancel'],
-            ['client_order_ref', 'like', 'ONLINE_'] # Only check Shopify orders
+            ['client_order_ref', 'like', 'ONLINE_']
         ]
         if company_id:
             domain.append(['company_id', '=', int(company_id)])
-            
-        # Return ID and Client Ref so we can find them in Shopify
         return self.models.execute_kw(self.db, self.uid, self.password, 
             'sale.order', 'search_read', [domain], {'fields': ['id', 'client_order_ref']})
 
     def get_product_split_info(self, product_id, uom_id_data=None):
-        """
-        Checks UOM factor. If Ratio > 1 (e.g. 24), we split.
-        Returns: { 'ratio': 24.0, 'uom_name': 'Carton' }
-        """
         try:
-            # OPTIMIZATION: If uom_id_data is passed from get_all_products (e.g. [12, "Carton"]), use it directly.
             if uom_id_data:
                 uom_id = uom_id_data[0]
             else:
-                # Fallback: Fetch it if missing
                 p_data = self.models.execute_kw(self.db, self.uid, self.password,
                     'product.product', 'read', [product_id], {'fields': ['uom_id']})
                 if not p_data or not p_data[0].get('uom_id'): return None
                 uom_id = p_data[0]['uom_id'][0] 
             
-            # 2. Get UOM Factor
             uom_data = self.models.execute_kw(self.db, self.uid, self.password,
                 'uom.uom', 'read', [uom_id], {'fields': ['name', 'factor_inv']})
             
