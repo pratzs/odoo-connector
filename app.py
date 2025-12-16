@@ -336,7 +336,6 @@ def process_order_data(data):
             # --- FIX: SKU CLEANER (Remove -UNIT to find product) ---
             sku = raw_sku
             is_unit_variant = False
-
             if sku.endswith('-UNIT'):
                 sku = sku.replace('-UNIT', '')
                 is_unit_variant = True
@@ -446,8 +445,8 @@ def sync_products_master():
             while page:
                 for sp in page:
                     if sp.variants:
-                        # Map ALL variant SKUs to the product
                         for v in sp.variants:
+                            # Map ALL variant SKUs to the product
                             if v.sku: shopify_map[v.sku] = sp
                 if page.has_next_page(): page = page.next_page()
                 else: break
@@ -480,7 +479,8 @@ def sync_products_master():
                 print(f"Sync Progress: {index}/{total_count}...")
                 if index % 200 == 0: log_event('Product Sync', 'Info', f"Progress: {index}/{total_count}...")
 
-            sku = p.get('default_code')
+            # Ensure SKU is clean string
+            sku = str(p.get('default_code') or '').strip()
             if not sku: continue
             
             # Archive inactive
@@ -504,7 +504,7 @@ def sync_products_master():
             except: pass 
 
             # --- PROCESS PRODUCT ---
-            # Use Local UOM Map if available, else fallback
+            # Use Local UOM Map if available
             is_pack = False
             ratio = 1.0
             uom_name = 'Default Title'
@@ -568,7 +568,8 @@ def sync_products_master():
                 
                 if product_changed or not sp.id:
                     sp.save()
-                    if not sp.id: sp = shopify.Product.find(sp.id)
+                    # RELOAD to ensure we get the default variant ID created by Shopify
+                    sp = shopify.Product.find(sp.id)
 
                 # --- VARIANTS SETUP ---
                 desired_variants = []
@@ -583,16 +584,16 @@ def sync_products_master():
                 
                 desired_variants.append({
                     'option1': opt_name,
-                    'price': str(price),
+                    'price': "{:.2f}".format(price),
                     'sku': sku,
                     'weight': p.get('weight', 0)
                 })
 
                 if is_pack:
-                    unit_price = round(price / ratio, 2)
+                    unit_price = price / ratio
                     desired_variants.append({
                         'option1': 'Unit',
-                        'price': str(unit_price),
+                        'price': "{:.2f}".format(unit_price),
                         'sku': f"{sku}-UNIT",
                         'weight': float(p.get('weight', 0)) / ratio
                     })
@@ -604,10 +605,11 @@ def sync_products_master():
 
                 for des in desired_variants:
                     match = None
-                    # Try SKU Match
+                    # 1. Try Exact SKU Match
                     match = next((v for v in existing_vars if v.sku == des['sku']), None)
                     
-                    # Try Blank Match (For new products)
+                    # 2. CRITICAL FIX: If no match, check for "Blank" new variants
+                    # This catches the default variant Shopify creates for new products
                     if not match:
                         match = next((v for v in existing_vars if not v.sku or v.sku == ''), None)
 
@@ -616,8 +618,8 @@ def sync_products_master():
                     match.option1 = des['option1']
                     match.sku = des['sku']
                     
-                    # PRICE UPDATE
-                    if sync_price and float(des['price']) > 0.01: 
+                    # PRICE UPDATE - Ensure string format
+                    if sync_price:
                         match.price = des['price']
                     
                     match.weight = des['weight']
@@ -1016,6 +1018,7 @@ def perform_inventory_sync(lookback_minutes):
 
         count += 1
     return count, updates
+
 
 def sync_odoo_fulfillments():
     """
