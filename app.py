@@ -307,7 +307,7 @@ def process_order_data(data):
         
         sales_rep_id = odoo.get_partner_salesperson(main_partner_id) or odoo.uid
 
-        # 3. SMART UOM LOOKUP (FIX FOR CTNX28 ISSUE)
+        # 3. SMART UOM LOOKUP
         unit_uom_id = None
         try:
             # Step A: Look for common names
@@ -333,11 +333,9 @@ def process_order_data(data):
             raw_sku = item.get('sku')
             if not raw_sku: continue
 
-            # --- FIX: SKU CLEANER ---
-            # If Shopify sends "C0051-UNIT", strip it to find "C0051"
+            # --- FIX: SKU CLEANER (Remove -UNIT to find product) ---
             sku = raw_sku
             is_unit_variant = False
-
             if sku.endswith('-UNIT'):
                 sku = sku.replace('-UNIT', '')
                 is_unit_variant = True
@@ -420,11 +418,8 @@ def process_order_data(data):
                 
 def sync_products_master():
     """
-    Odoo -> Shopify Product Sync (Optimized).
-    FIXED: 
-    1. Forces SKU update on new products (Fixes "No SKU" issue).
-    2. Sets Inventory Tracking immediately.
-    3. Handles Pack Size / Unit naming.
+    Odoo -> Shopify Product Sync (Turbo Mode).
+    Features: Smart Skip, SKU Fixing, Pricing, and Variant Naming.
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
@@ -434,6 +429,31 @@ def sync_products_master():
         company_id = get_config('odoo_company_id')
         odoo_products = odoo.get_all_products(company_id)
         
+        # Cache UOM Data {id: ratio}
+        uom_map = {}
+        try:
+            uoms = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'search_read', [[]], {'fields': ['id', 'name', 'factor_inv']})
+            for u in uoms:
+                uom_map[u['id']] = {'name': u['name'], 'ratio': float(u.get('factor_inv', 1.0))}
+        except: pass
+
+        # Pre-fetch Shopify Data (Turbo Mode)
+        log_event('Product Sync', 'Info', "Building Shopify SKU Map (this takes ~30 seconds)...")
+        shopify_map = {}
+        try:
+            page = shopify.Product.find(limit=250)
+            while page:
+                for sp in page:
+                    if sp.variants:
+                        # Map ALL variant SKUs to the product
+                        for v in sp.variants:
+                            if v.sku: shopify_map[v.sku] = sp
+                if page.has_next_page(): page = page.next_page()
+                else: break
+        except Exception as e:
+            log_event('Product Sync', 'Error', f"Failed to map Shopify: {e}")
+            return
+
         # Configs
         sync_title = get_config('prod_sync_title', True)
         sync_desc = get_config('prod_sync_desc', True)
@@ -442,7 +462,7 @@ def sync_products_master():
         sync_vendor = get_config('prod_sync_vendor', True)
         auto_create = get_config('prod_auto_create', True)
 
-        # Build map
+        # DB Map for Smart Skip
         db_map = {}
         for pm in ProductMap.query.all():
             db_map[pm.sku] = pm.last_synced_at
@@ -464,18 +484,15 @@ def sync_products_master():
             
             # Archive inactive
             if not p.get('active', True):
-                shopify_id = find_shopify_product_by_sku(sku)
-                if shopify_id:
-                    try:
-                        sp = shopify.Product.find(shopify_id)
-                        if getattr(sp, 'status', '') != 'archived':
-                            sp.status = 'archived'; sp.save()
-                    except: pass
+                if sku in shopify_map:
+                    sp = shopify_map[sku]
+                    if getattr(sp, 'status', '') != 'archived':
+                        sp.status = 'archived'; sp.save()
                 continue 
 
             active_odoo_skus.add(sku)
 
-            # Smart Skip
+            # Smart Skip (Speed Boost)
             try:
                 last_mod_str = p.get('write_date')
                 if last_mod_str and sku in db_map:
@@ -486,23 +503,29 @@ def sync_products_master():
             except: pass 
 
             # --- PROCESS PRODUCT ---
-            split_info = odoo.get_product_split_info(p['id'], product_data=p)
-            
+            # Use Local UOM Map if available, else fallback
             is_pack = False
             ratio = 1.0
-            if split_info and split_info['ratio'] > 1.0:
-                is_pack = True
-                ratio = split_info['ratio']
+            uom_name = 'Default Title'
             
-            shopify_id = find_shopify_product_by_sku(sku)
+            if p.get('sh_is_secondary_unit') and p.get('uom_id'):
+                u_id = p['uom_id'][0]
+                if u_id in uom_map:
+                    u_data = uom_map[u_id]
+                    if u_data['ratio'] > 1.0:
+                        is_pack = True
+                        ratio = u_data['ratio']
+                        uom_name = u_data['name']
             
-            if not shopify_id and not auto_create: 
-                skipped += 1; continue
+            # Find in Map first, then creation
+            sp = shopify_map.get(sku)
+            
+            if not sp:
+                if not auto_create: 
+                    skipped += 1; continue
+                sp = shopify.Product()
 
             try:
-                if shopify_id: sp = shopify.Product.find(shopify_id)
-                else: sp = shopify.Product()
-                
                 product_changed = False
 
                 current_title = getattr(sp, 'title', '')
@@ -542,15 +565,15 @@ def sync_products_master():
                 if current_status != 'active':
                     sp.status = 'active'; product_changed = True
                 
-                if product_changed or not shopify_id:
+                if product_changed or not sp.id:
                     sp.save()
-                    if not shopify_id: sp = shopify.Product.find(sp.id)
+                    if not sp.id: sp = shopify.Product.find(sp.id)
 
                 # --- VARIANTS SETUP ---
                 desired_variants = []
                 price = float(p.get('list_price', 0.0))
                 
-                # Get correct Carton Name (e.g. CTNX16)
+                # Dynamic Carton Name
                 main_uom_name = 'Carton'
                 if p.get('uom_id'):
                     main_uom_name = p['uom_id'][1] 
@@ -567,7 +590,7 @@ def sync_products_master():
                 if is_pack:
                     unit_price = round(price / ratio, 2)
                     desired_variants.append({
-                        'option1': 'Unit', 
+                        'option1': 'Unit',
                         'price': str(unit_price),
                         'sku': f"{sku}-UNIT",
                         'weight': float(p.get('weight', 0)) / ratio
@@ -580,23 +603,24 @@ def sync_products_master():
 
                 for des in desired_variants:
                     match = None
-                    
-                    # 1. Try Exact SKU Match
+                    # Try SKU Match
                     match = next((v for v in existing_vars if v.sku == des['sku']), None)
                     
-                    # 2. CRITICAL FIX: If no match, check for "Blank" new variants
-                    # This catches the default variant Shopify creates for new products
+                    # Try Blank Match (For new products)
                     if not match:
                         match = next((v for v in existing_vars if not v.sku or v.sku == ''), None)
 
-                    if not match: 
-                        match = shopify.Variant({'product_id': sp.id})
+                    if not match: match = shopify.Variant({'product_id': sp.id})
                     
                     match.option1 = des['option1']
                     match.sku = des['sku']
-                    if sync_price and float(des['price']) > 0.01: match.price = des['price']
+                    
+                    # PRICE UPDATE
+                    if sync_price and float(des['price']) > 0.01: 
+                        match.price = des['price']
+                    
                     match.weight = des['weight']
-                    match.inventory_management = 'shopify' # Forces tracking on
+                    match.inventory_management = 'shopify' # Force Tracking
                     
                     if des['sku'] == sku:
                         match.barcode = str(p.get('barcode', '') or '')
@@ -912,7 +936,7 @@ def cleanup_shopify_products(odoo_active_skus):
 def perform_inventory_sync(lookback_minutes):
     """
     Checks Odoo for recent stock moves and updates Shopify.
-    CORRECTED MATH: Odoo holds Cartons. We Multiply for Units.
+    CORRECTED MATH: Odoo holds Cartons (Float). We Multiply for Units.
     """
     if not odoo or not setup_shopify_session(): return 0, 0
     
@@ -938,8 +962,8 @@ def perform_inventory_sync(lookback_minutes):
     updates = 0
     
     for p_id in product_ids:
-        # 1. Get Total Stock from Odoo (This is in CARTONS, e.g., 132)
-        total_odoo = int(odoo.get_total_qty_for_locations(p_id, target_locations, field_name=target_field))
+        # 1. Get Total Stock as FLOAT (Crucial for 9.5 cases)
+        total_odoo = odoo.get_total_qty_for_locations(p_id, target_locations, field_name=target_field)
         if sync_zero and total_odoo <= 0: continue
         
         # 2. Fetch Checkbox & UOM
@@ -954,7 +978,6 @@ def perform_inventory_sync(lookback_minutes):
         ratio = 1.0
         should_split = False
         
-        # Only split if 'sh_is_secondary_unit' is CHECKED
         if p_data[0].get('sh_is_secondary_unit'):
             try:
                 uom_id = p_data[0]['uom_id'][0]
@@ -965,8 +988,8 @@ def perform_inventory_sync(lookback_minutes):
             except: pass
 
         # 3. Update MAIN Variant (Carton)
-        # Odoo says 132. Shopify Carton needs 132.
-        carton_qty = total_odoo
+        # 9.5 Cartons -> 9 sellable Cartons
+        carton_qty = int(total_odoo)
         
         shopify_info = get_shopify_variant_inv_by_sku(sku)
         if shopify_info and int(shopify_info['qty']) != carton_qty:
@@ -978,7 +1001,7 @@ def perform_inventory_sync(lookback_minutes):
 
         # 4. Update UNIT Variant (SKU-UNIT) - Only if splitting enabled
         if should_split:
-            # Odoo says 132 Cartons. Units = 132 * 16 = 2112.
+            # 9.5 Cartons * 12 = 114 Units
             unit_qty = int(total_odoo * ratio) 
             
             unit_sku = f"{sku}-UNIT"
