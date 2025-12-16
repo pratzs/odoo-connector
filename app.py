@@ -220,39 +220,31 @@ def process_product_data(data):
 
 def process_order_data(data):
     """
-    Syncs order with Strict Guards & Branch Fix.
-    1. GUARD: Drops Cancelled orders immediately.
-    2. GUARD: Drops Old orders (>60 mins) to stop historical duplicates.
-    3. GUARD: Uses Memory Lock to prevent race conditions.
-    4. LOGIC: Forces Branch Ownership (Caltex Fix) even during updates.
+    Syncs order with Strict Guards, Customer Notes, and Branch Logic.
     """
     shopify_id = str(data.get('id', ''))
     shopify_name = data.get('name')
     
-    # --- GUARD 1: STOP CANCELLED ORDERS (Fixes your issue) ---
-    # If the order is cancelled (like your chargeback #2967), we drop it instantly.
+    # GUARD 1: Cancelled Orders
     if data.get('cancelled_at'):
         return False, "Skipped: Order is Cancelled."
 
-    # --- GUARD 2: STOP OLD ORDERS (The 'Zombie' Fix) ---
-    # If the order is >60 mins old, ignore it. Stops 2-week old duplicates.
+    # GUARD 2: Old Orders (>60 mins)
     created_at_str = data.get('created_at', '')
     if created_at_str:
         try:
-            # Parse ISO8601 date from Shopify
             created_dt = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
             if created_dt.tzinfo:
                 created_dt = created_dt.astimezone(datetime.utcnow().astimezone().tzinfo).replace(tzinfo=None)
             
-            # Check age
             age_in_minutes = (datetime.utcnow() - created_dt).total_seconds() / 60
             if age_in_minutes > 60:
                 return False, f"Skipped: Order is too old ({int(age_in_minutes)} mins)."
         except Exception as e:
             print(f"Date Parse Warning: {e}") 
 
-    # --- GUARD 3: MEMORY LOCK (Concurrent Check) ---
-    time.sleep(random.uniform(0.5, 1.5)) # Slight jitter
+    # GUARD 3: Memory Lock
+    time.sleep(random.uniform(0.5, 1.5))
     
     with order_processing_lock:
         if shopify_id in active_processing_ids:
@@ -260,7 +252,7 @@ def process_order_data(data):
         active_processing_ids.add(shopify_id)
 
     try:
-        # --- GUARD 4: RECENT CACHE (Debounce) ---
+        # GUARD 4: Recent Cache
         if shopify_id in recent_processed_cache:
             last_run = recent_processed_cache[shopify_id]
             if (datetime.utcnow() - last_run).total_seconds() < 300:
@@ -285,10 +277,9 @@ def process_order_data(data):
             if existing_ids: existing_order_id = existing_ids[0]
         except Exception as e: return False, f"Odoo Error: {str(e)}"
 
-        # If it exists, STOP. (We disabled auto-updates to prevent overwriting your manual fixes)
         if existing_order_id:
              recent_processed_cache[shopify_id] = datetime.utcnow()
-             return True, "Skipped: Order already exists (Auto-Update Disabled)."
+             return True, "Skipped: Order already exists."
 
         # --- PARTNER LOGIC ---
         partner = odoo.search_partner_by_email(email)
@@ -320,16 +311,8 @@ def process_order_data(data):
                     db.session.commit()
             except Exception as e: return False, f"Customer Creation Error: {e}"
         
-        # --- FORCE BRANCH ID ---
+        # --- BRANCH ID LOGIC ---
         main_partner_id = partner['id']
-        
-        def is_same_address(addr_data, partner_rec):
-            p_street = (partner_rec.get('street') or '').lower().strip()
-            p_zip = (partner_rec.get('zip') or '').lower().strip()
-            a_street = (addr_data.get('address1') or '').lower().strip()
-            a_zip = (addr_data.get('zip') or '').lower().strip()
-            return p_street == a_street and p_zip == a_zip
-
         bill_addr = data.get('billing_address') or {}
         ship_addr = data.get('shipping_address') or {}
 
@@ -353,7 +336,6 @@ def process_order_data(data):
             shipping_id = odoo.find_or_create_child_address(main_partner_id, ship_data, type='delivery')
         else: shipping_id = main_partner_id
         
-        # Override Main Partner with Branch
         if invoice_id: main_partner_id = invoice_id
         
         sales_rep_id = odoo.get_partner_salesperson(main_partner_id) or odoo.uid
@@ -396,10 +378,15 @@ def process_order_data(data):
                 if sp_id: lines.append((0, 0, {'product_id': sp_id, 'product_uom_qty': 1, 'price_unit': cost, 'name': s_title, 'discount': 0.0}))
 
         if not lines: return False, "No valid lines"
+        
+        # --- NOTE & PAYMENT LOGIC (UPDATED) ---
         gateway = data.get('gateway') or (data.get('payment_gateway_names')[0] if data.get('payment_gateway_names') else 'Shopify')
+        customer_note = data.get('note') or ""
+        
         note_text = f"Payment Gateway: {gateway}"
+        if customer_note:
+            note_text = f"Customer Note: {customer_note}\n\n{note_text}"
 
-        # --- CREATE PATH (No Updates allowed here) ---
         vals = {
             'name': client_ref, 'client_order_ref': client_ref, 'partner_id': main_partner_id, 
             'partner_invoice_id': invoice_id, 'partner_shipping_id': shipping_id, 
