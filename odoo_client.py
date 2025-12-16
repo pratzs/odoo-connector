@@ -296,7 +296,7 @@ class OdooClient:
             print(f"Odoo Cancel Error: {e}")
             return False
 
-    def get_recently_cancelled_orders(self, time_limit_str, company_id=None):
+   def get_recently_cancelled_orders(self, time_limit_str, company_id=None):
         """Finds orders that were cancelled in Odoo recently."""
         domain = [
             ['write_date', '>', time_limit_str], 
@@ -310,7 +310,8 @@ class OdooClient:
         return self.models.execute_kw(self.db, self.uid, self.password, 
             'sale.order', 'search_read', [domain], {'fields': ['id', 'client_order_ref']})
 
-def get_product_split_info(self, product_id):
+    # --- INDENTATION FIXED HERE ---
+    def get_product_split_info(self, product_id):
         """
         Checks UOM factor. If Ratio > 1 (e.g. 24), we split.
         Returns: { 'ratio': 24.0, 'uom_name': 'Carton' }
