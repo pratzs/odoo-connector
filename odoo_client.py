@@ -114,8 +114,8 @@ class OdooClient:
         if company_id:
             domain = ['&', '&', '&', ('type', '=', 'product'), ('default_code', '!=', False), '|', ('active', '=', True), ('active', '=', False), '|', ('company_id', '=', int(company_id)), ('company_id', '=', False)]
         
-        # --- UPDATED: Fetch 'sh_is_secondary_unit' and 'sh_secondary_uom' ---
-        fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 'description_sale', 'active', 'product_tmpl_id', 'qty_available', 'public_categ_ids', 'product_tag_ids', 'uom_id', 'sh_is_secondary_unit', 'sh_secondary_uom']
+        # --- FIELDS UPDATED: Added 'write_date' for optimization and 'sh_' fields for logic ---
+        fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 'description_sale', 'active', 'product_tmpl_id', 'qty_available', 'public_categ_ids', 'product_tag_ids', 'uom_id', 'sh_is_secondary_unit', 'sh_secondary_uom', 'write_date']
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search_read', [domain], {'fields': fields})
 
     def get_changed_products(self, time_limit_str, company_id=None):
@@ -182,7 +182,9 @@ class OdooClient:
 
     def get_product_split_info(self, product_id, product_data=None):
         """
-        Checks 'sh_is_secondary_unit' (from your screenshot).
+        Checks 'sh_is_secondary_unit' checkbox.
+        If TRUE: Returns ratio and UOM name (Split enabled).
+        If FALSE: Returns None (Split disabled, treat as single unit).
         """
         try:
             # 1. Use passed data (optimized) or fetch
