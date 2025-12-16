@@ -1344,6 +1344,11 @@ def run_schedule():
 t = threading.Thread(target=run_schedule, daemon=True)
 t.start()
 
+# --- ADD THIS MARKER ---
+print("**************************************************")
+print(">>> SYSTEM STARTUP: VERSION 5.5 - NO WEBHOOK_LOGS <<<")
+print("**************************************************")
+
 if __name__ == '__main__':
     # Flask Dev Server
     app.run(debug=True)
