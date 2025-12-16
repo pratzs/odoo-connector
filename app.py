@@ -410,8 +410,8 @@ def process_order_data(data):
 def sync_products_master():
     """
     Odoo -> Shopify Product Sync (Optimized).
-    1. Checks 'sh_is_secondary_unit'.
-    2. SKIPS products that have not changed since last sync (Speed Boost).
+    1. Checks 'sh_is_secondary_unit' (Logic).
+    2. SKIPS products that have not changed since last sync (Speed).
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
@@ -428,7 +428,7 @@ def sync_products_master():
         sync_vendor = get_config('prod_sync_vendor', True)
         auto_create = get_config('prod_auto_create', True)
 
-        # Build map of existing sync times from DB for speed
+        # Build map of existing sync times from DB
         db_map = {}
         for pm in ProductMap.query.all():
             db_map[pm.sku] = pm.last_synced_at
@@ -441,10 +441,9 @@ def sync_products_master():
         active_odoo_skus = set()
 
         for index, p in enumerate(odoo_products):
-            # --- PROGRESS LOGS ---
-            if index > 0 and index % 50 == 0: 
-                print(f"Sync Progress: {index}/{total_count} (Synced: {synced}, Skipped: {skipped})...")
-                if index % 200 == 0: log_event('Product Sync', 'Info', f"Progress: {index}/{total_count}...")
+            # --- IMPROVED PROGRESS LOGGING (Every 50 items to DB) ---
+            if index > 0 and index % 50 == 0:
+                log_event('Product Sync', 'Info', f"Progress: {index}/{total_count} (Synced: {synced}, Skipped: {skipped})")
 
             sku = p.get('default_code')
             if not sku: continue
@@ -463,21 +462,19 @@ def sync_products_master():
 
             active_odoo_skus.add(sku)
 
-            # --- OPTIMIZATION: CHECK LAST MODIFIED DATE ---
-            # Odoo write_date format: '2023-12-16 10:00:00'
+            # --- OPTIMIZATION: Check Last Modified ---
             try:
                 last_mod_str = p.get('write_date')
                 if last_mod_str and sku in db_map:
+                    # Parse Odoo date (YYYY-MM-DD HH:MM:SS)
                     last_mod = datetime.fromisoformat(str(last_mod_str))
                     last_sync = db_map[sku]
-                    # If Odoo hasn't changed since last sync, SKIP IT
                     if last_mod <= last_sync:
                         skipped += 1
-                        continue
-            except: pass # If date parsing fails, process it anyway to be safe
+                        continue # SKIP processing this product
+            except: pass 
 
             # --- PROCESS PRODUCT ---
-            # Correctly passing product_data=p
             split_info = odoo.get_product_split_info(p['id'], product_data=p)
             
             is_pack = False
@@ -488,7 +485,6 @@ def sync_products_master():
             
             shopify_id = find_shopify_product_by_sku(sku)
             
-            # Skip creation if disabled
             if not shopify_id and not auto_create: 
                 skipped += 1
                 continue
@@ -589,7 +585,6 @@ def sync_products_master():
                 sp.variants = final_variants
                 sp.save()
                 
-                # Image Sync
                 if get_config('prod_sync_images', False) and not getattr(sp, 'images', []):
                     try:
                         img_data = odoo.get_product_image(p['id'])
@@ -606,7 +601,9 @@ def sync_products_master():
                 try:
                     pm = ProductMap.query.filter_by(sku=sku).first()
                     if not pm:
-                        pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=str(sp.variants[0].id))
+                        # Use first variant ID available
+                        v_id = final_variants[0].id if final_variants else '0'
+                        pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=str(v_id))
                         db.session.add(pm)
                     pm.last_synced_at = datetime.utcnow()
                     db.session.commit()
