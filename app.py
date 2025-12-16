@@ -70,8 +70,7 @@ def get_config(key, default=None):
             return setting.value
     except Exception as e:
         print(f"Config Read Error ({key}): {e}")
-        # CRITICAL FIX: Reset the DB session if reading fails
-        db.session.rollback() 
+        db.session.rollback()  # <--- THIS IS REQUIRED
         return default
 
 def set_config(key, value):
@@ -86,7 +85,7 @@ def set_config(key, value):
         return True
     except Exception as e:
         print(f"Config Save Error ({key}): {e}")
-        db.session.rollback() # CRITICAL FIX
+        db.session.rollback()  # <--- THIS IS REQUIRED
         return False
 
 def verify_shopify(data, hmac_header):
