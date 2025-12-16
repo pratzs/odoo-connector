@@ -222,6 +222,7 @@ def process_product_data(data):
 def process_order_data(data):
     """
     Syncs order with SQL-Based Locking and Smart UOM Switching.
+    FIXED: Strips '-UNIT' suffix to find the correct Odoo product.
     """
     shopify_id = str(data.get('id', ''))
     shopify_name = data.get('name')
@@ -329,11 +330,21 @@ def process_order_data(data):
 
         lines = []
         for item in data.get('line_items', []):
-            sku = item.get('sku')
-            if not sku: continue
+            raw_sku = item.get('sku')
+            if not raw_sku: continue
+
+            # --- FIX: SKU CLEANER ---
+            # If Shopify sends "C0051-UNIT", strip it to find "C0051"
+            sku = raw_sku
+            is_unit_variant = False
+
+            if sku.endswith('-UNIT'):
+                sku = sku.replace('-UNIT', '')
+                is_unit_variant = True
+
             product_id = odoo.search_product_by_sku(sku, company_id)
             
-            # Auto-Create Product if missing
+            # Auto-Create Product if missing (using the CLEAN sku)
             if not product_id:
                 if not odoo.check_product_exists_by_sku(sku, company_id):
                     try:
@@ -352,13 +363,13 @@ def process_order_data(data):
                 line_vals = {'product_id': product_id, 'product_uom_qty': qty, 'price_unit': price, 'name': item['name'], 'discount': pct}
                 
                 # --- APPLY UOM SWITCH ---
-                # Checks if variant name contains keywords indicating a single unit
+                # Logic: If SKU had '-UNIT' suffix OR title has keywords -> Force Unit UOM
                 variant_title = (item.get('variant_title') or '').lower()
-                is_single_unit = any(x in variant_title for x in ['unit', 'single', 'each', 'bottle', 'can', 'pce'])
+                title_indicates_unit = any(x in variant_title for x in ['unit', 'single', 'each', 'bottle', 'can', 'pce'])
                 
-                if unit_uom_id and is_single_unit:
+                if unit_uom_id and (is_unit_variant or title_indicates_unit):
                     line_vals['product_uom'] = unit_uom_id
-                    log_event('Order', 'Info', f"[UOM] Switched {sku} to Unit UOM (ID: {unit_uom_id})")
+                    log_event('Order', 'Info', f"[UOM] Switched {raw_sku} to Unit UOM (ID: {unit_uom_id})")
                 
                 lines.append((0, 0, line_vals))
 
