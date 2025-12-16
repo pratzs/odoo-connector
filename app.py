@@ -408,15 +408,17 @@ def process_order_data(data):
         return False, str(e)
                 
 def sync_products_master():
-    """Odoo -> Shopify Product Sync (Fixed: Strict SKU, Price Safety, No Image Leaks)"""
+    """
+    Odoo -> Shopify Product Sync.
+    AUTOMATION: If Odoo UOM is a Pack (Ratio > 1), automatically create Unit variant.
+    """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
-            log_event('System', 'Error', "Product Sync Failed: Connection Error")
+            log_event('System', 'Error', "Sync Failed: Connection Error")
             return
 
         company_id = get_config('odoo_company_id')
         odoo_products = odoo.get_all_products(company_id)
-        active_odoo_skus = set()
         
         # Load Field Configs
         sync_title = get_config('prod_sync_title', True)
@@ -425,9 +427,10 @@ def sync_products_master():
         sync_type = get_config('prod_sync_type', True)
         sync_vendor = get_config('prod_sync_vendor', True)
         
-        log_event('Product Sync', 'Info', f"Found {len(odoo_products)} products. Starting Master Sync...")
-        
+        log_event('Product Sync', 'Info', f"Starting Auto-Split Sync for {len(odoo_products)} products...")
         synced = 0
+        active_odoo_skus = set()
+
         for p in odoo_products:
             sku = p.get('default_code')
             if not sku: continue
@@ -448,12 +451,26 @@ def sync_products_master():
                 continue 
 
             active_odoo_skus.add(sku)
+            
+            # --- 1. CHECK UOM AUTOMATICALLY ---
+            split_info = odoo.get_product_split_info(p['id'])
+            
+            is_pack = False
+            ratio = 1.0
+            
+            # AUTOMATIC LOGIC: If Ratio > 1.0 (e.g., 6, 12, 24), treat as Pack
+            if split_info and split_info['ratio'] > 1.0:
+                is_pack = True
+                ratio = split_info['ratio']
+            
             shopify_id = find_shopify_product_by_sku(sku)
+            
             try:
                 if shopify_id: sp = shopify.Product.find(shopify_id)
                 else: sp = shopify.Product()
-                product_changed = False
                 
+                product_changed = False
+
                 # Title
                 if sync_title and sp.title != p['name']:
                     sp.title = p['name']
@@ -466,10 +483,9 @@ def sync_products_master():
                         sp.body_html = odoo_desc
                         product_changed = True
                 
-                # Category Mapping (YOUR ORIGINAL LOGIC PRESERVED)
+                # Category Mapping
                 odoo_categ_ids = p.get('public_categ_ids', [])
                 if not odoo_categ_ids and sp.product_type:
-                    # Init logic (Shopify -> Odoo) always runs to fill gaps
                     try:
                         cat_name = sp.product_type
                         cat_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.public.category', 'search', [[['name', '=', cat_name]]])
@@ -477,10 +493,8 @@ def sync_products_master():
                         if not cat_id:
                             cat_id = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.public.category', 'create', [{'name': cat_name}])
                         odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'write', [[p['id']], {'public_categ_ids': [(4, cat_id)]}])
-                        log_event('Product Sync', 'Info', f"Initialized Odoo Category for {sku}: {cat_name}")
                     except Exception as e:
-                        if "pos.category" not in str(e) and "CacheMiss" not in str(e):
-                             print(f"Category Import Error: {e}")
+                        if "pos.category" not in str(e): print(f"Category Import Error: {e}")
 
                 elif odoo_categ_ids and sync_type:
                     odoo_cat_name = odoo.get_public_category_name(odoo_categ_ids)
@@ -491,7 +505,7 @@ def sync_products_master():
                 # Vendor Mapping
                 if sync_vendor:
                     product_title = p.get('name', '')
-                    target_vendor = product_title.split()[0] if product_title else 'Odoo Master'
+                    target_vendor = product_title.split()[0] if product_title else 'Worthy'
                     if sp.vendor != target_vendor:
                         sp.vendor = target_vendor
                         product_changed = True
@@ -502,114 +516,83 @@ def sync_products_master():
                 
                 if product_changed or not shopify_id:
                     sp.save()
-                    if not shopify_id:
-                        sp = shopify.Product.find(sp.id)
+                    if not shopify_id: sp = shopify.Product.find(sp.id)
+
+                # --- 2. DEFINE VARIANTS (Auto-Split Logic) ---
+                desired_variants = []
                 
-                if sp.variants: 
-                    variant = sp.variants[0]
-                else: 
-                    variant = shopify.Variant(prefix_options={'product_id': sp.id})
+                # Variant A: The Carton (Main SKU)
+                price = float(p.get('list_price', 0.0))
+                opt_name = split_info['uom_name'] if is_pack else 'Default Title'
                 
-                variant_changed = False
-                if variant.sku != sku:
-                    variant.sku = sku
-                    variant_changed = True
+                desired_variants.append({
+                    'option1': opt_name,
+                    'price': str(price),
+                    'sku': sku,
+                    'weight': p.get('weight', 0)
+                })
+
+                # Variant B: The Unit (Only if Ratio > 1)
+                if is_pack:
+                    unit_price = round(price / ratio, 2)
+                    desired_variants.append({
+                        'option1': 'Unit (1)',
+                        'price': str(unit_price),
+                        'sku': f"{sku}-UNIT", # Suffix is mandatory for separate stock levels
+                        'weight': float(p.get('weight', 0)) / ratio
+                    })
+
+                # --- 3. SYNC TO SHOPIFY ---
+                sp.options = [{'name': 'Format'}] if is_pack else []
                 
-                if sync_price:
-                    # --- FIX: PRICE SAFETY CHECK (0.00 PROTECTION) ---
-                    # Only update price if Odoo has a valid positive price.
-                    # This prevents 0.00 from overwriting a valid Shopify price.
-                    try:
-                        odoo_price_val = float(p.get('list_price', 0.0))
-                    except: odoo_price_val = 0.0
+                existing_vars = sp.variants
+                final_variants = []
+
+                for des in desired_variants:
+                    # Match by SKU
+                    match = next((v for v in existing_vars if v.sku == des['sku']), None)
+                    if not match:
+                        match = shopify.Variant({'product_id': sp.id})
                     
-                    if odoo_price_val > 0.001:
-                        target_price = str(odoo_price_val)
-                        if float(variant.price or 0) != odoo_price_val:
-                            variant.price = target_price
-                            variant_changed = True
-                    # -------------------------------------------------
+                    match.option1 = des['option1']
+                    match.sku = des['sku']
+                    
+                    if sync_price: 
+                        # Only update price if it's not 0.0 (safety)
+                        if float(des['price']) > 0.01:
+                            match.price = des['price']
+                            
+                    match.weight = des['weight']
+                    match.inventory_management = 'shopify'
+                    
+                    # Sync Barcode if available (Only for Carton/Main variant)
+                    if des['sku'] == sku:
+                        target_barcode = p.get('barcode', 0) or ''
+                        match.barcode = str(target_barcode)
 
-                target_barcode = p.get('barcode', 0) or ''
-                if str(variant.barcode or '') != str(target_barcode):
-                    variant.barcode = str(target_barcode)
-                    variant_changed = True
+                    final_variants.append(match)
+
+                sp.variants = final_variants
+                sp.save()
                 
-                try:
-                    if float(variant.weight or 0) != float(p.get('weight', 0)):
-                        variant.weight = p.get('weight', 0)
-                        variant_changed = True
-                except:
-                    variant.weight = p.get('weight', 0)
-                    variant_changed = True
-
-                if variant.inventory_management != 'shopify':
-                    variant.inventory_management = 'shopify'
-                    variant_changed = True
-                
-                v_product_id = getattr(variant, 'product_id', None)
-                if not v_product_id: 
-                    if variant.attributes: v_product_id = variant.attributes.get('product_id')
-                
-                if str(v_product_id) != str(sp.id):
-                    variant.product_id = sp.id
-                    variant_changed = True
-
-                if variant_changed: variant.save()
-                
-                if SHOPIFY_LOCATION_ID and variant.inventory_item_id:
-                    qty = int(p.get('qty_available', 0))
-                    try:
-                         # Use helper to check quantity before call to save API limits
-                         current_inv = get_shopify_variant_inv_by_sku(sku)
-                         if current_inv and int(current_inv['qty']) != qty:
-                             shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=variant.inventory_item_id, available=qty)
-                             log_event('Product Sync', 'Info', f"Updated Stock for {sku}: {qty}")
-                    except: pass
-
-                # Cost Price Sync
-                if variant.inventory_item_id:
-                    try:
-                        cost = float(p.get('standard_price', 0.0))
-                        inv_item = shopify.InventoryItem.find(variant.inventory_item_id)
-                        if float(inv_item.cost or 0) != cost:
-                            inv_item.cost = cost
-                            inv_item.save()
-                    except: pass
-
                 # Image Sync
                 if get_config('prod_sync_images', False):
                     try:
                         img_data = odoo.get_product_image(p['id'])
                         if img_data and not sp.images:
-                            if isinstance(img_data, bytes):
-                                img_data = img_data.decode('utf-8')
+                            if isinstance(img_data, bytes): img_data = img_data.decode('utf-8')
                             image = shopify.Image(prefix_options={'product_id': sp.id})
                             image.attachment = img_data
                             image.save()
-                            log_event('Product Sync', 'Info', f"Synced Image for {sku}")
-                    except Exception as img_e:
-                        log_event('Product Sync', 'Warning', f"Image Sync Failed for {sku}: {img_e}")
+                    except: pass
 
-                # Metafield Sync
-                if get_config('prod_sync_meta_vendor_code', False):
-                    vendor_code = odoo.get_vendor_product_code(p['product_tmpl_id'][0])
-                    if vendor_code:
-                        metafield = shopify.Metafield({
-                            'key': 'vendor_product_code', 'value': vendor_code, 'type': 'single_line_text_field',
-                            'namespace': 'custom', 'owner_resource': 'product', 'owner_id': sp.id
-                        })
-                        metafield.save()
                 synced += 1
+                
             except Exception as e:
-                err_msg = str(e)
-                if "pos.category" in err_msg or "CacheMiss" in err_msg:
-                    pass 
-                else:
-                    log_event('Product Sync', 'Error', f"Failed {sku}: {e}")
-        
+                log_event('Product Sync', 'Error', f"Failed {sku}: {e}")
+
         cleanup_shopify_products(active_odoo_skus)
-        log_event('Product Sync', 'Success', f"Master Sync Complete. Processed {synced} active products.")
+        log_event('Product Sync', 'Success', f"Sync Complete. Processed {synced} products.")
 
 def sync_customers_master():
     """
