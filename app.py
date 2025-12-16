@@ -962,8 +962,8 @@ def perform_inventory_sync(lookback_minutes):
     updates = 0
     
     for p_id in product_ids:
-        # 1. Get Total Stock as FLOAT (Crucial for 9.5 cases)
-        total_odoo = odoo.get_total_qty_for_locations(p_id, target_locations, field_name=target_field)
+        # Keep as float to handle 0.5 cases
+total_odoo = odoo.get_total_qty_for_locations(p_id, target_locations, field_name=target_field)
         if sync_zero and total_odoo <= 0: continue
         
         # 2. Fetch Checkbox & UOM
