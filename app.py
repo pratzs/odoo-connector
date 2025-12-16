@@ -59,7 +59,7 @@ recent_processed_cache = {} # Stores {shopify_id: timestamp} <--- ADD THIS LINE
 
 # --- HELPERS ---
 def get_config(key, default=None):
-    """Safely retrieve config with session management"""
+    """Safely retrieve config with strict rollback on error"""
     try:
         setting = AppSetting.query.get(key)
         if not setting:
@@ -70,6 +70,8 @@ def get_config(key, default=None):
             return setting.value
     except Exception as e:
         print(f"Config Read Error ({key}): {e}")
+        # CRITICAL FIX: Reset the DB session if reading fails
+        db.session.rollback() 
         return default
 
 def set_config(key, value):
@@ -84,7 +86,7 @@ def set_config(key, value):
         return True
     except Exception as e:
         print(f"Config Save Error ({key}): {e}")
-        db.session.rollback()
+        db.session.rollback() # CRITICAL FIX
         return False
 
 def verify_shopify(data, hmac_header):
@@ -106,7 +108,7 @@ def log_event(entity, status, message):
         db.session.commit()
     except Exception as e: 
         print(f"DB LOG ERROR: {e}")
-        db.session.rollback()
+        db.session.rollback() # CRITICAL FIX
 
 def extract_id(res):
     if isinstance(res, list) and len(res) > 0:
@@ -303,9 +305,19 @@ def process_order_data(data):
             partner = {'id': partner_id, 'name': final_name}
             if shopify_id and data.get('customer', {}).get('id'):
                 try:
-                    db.session.add(CustomerMap(shopify_customer_id=str(data['customer']['id']), odoo_partner_id=partner_id, email=email))
-                    db.session.commit()
-                except: db.session.rollback()
+                    # Check if exists first to avoid Primary Key crashes
+                    cust_map_exists = CustomerMap.query.get(str(data['customer']['id']))
+                    if not cust_map_exists:
+                        new_map = CustomerMap(
+                            shopify_customer_id=str(data['customer']['id']), 
+                            odoo_partner_id=partner_id, 
+                            email=email
+                        )
+                        db.session.add(new_map)
+                        db.session.commit()
+                except Exception as e:
+                    print(f"Customer Map Error: {e}")
+                    db.session.rollback()
 
         # 2. Handle Addresses (Branch Logic)
         main_partner_id = partner['id']
