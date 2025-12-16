@@ -284,3 +284,28 @@ class OdooClient:
 
     def post_message(self, order_id, message):
         return self.models.execute_kw(self.db, self.uid, self.password, 'sale.order', 'message_post', [order_id], {'body': message})
+
+    # --- NEW CANCELLATION METHODS ---
+    def cancel_order(self, order_id):
+        """Triggers the 'Cancel' button action on a Sale Order."""
+        try:
+            # 'action_cancel' is the method name for the 'Cancel' button in Odoo
+            self.models.execute_kw(self.db, self.uid, self.password, 'sale.order', 'action_cancel', [[order_id]])
+            return True
+        except Exception as e:
+            print(f"Odoo Cancel Error: {e}")
+            return False
+
+    def get_recently_cancelled_orders(self, time_limit_str, company_id=None):
+        """Finds orders that were cancelled in Odoo recently."""
+        domain = [
+            ['write_date', '>', time_limit_str], 
+            ['state', '=', 'cancel'],
+            ['client_order_ref', 'like', 'ONLINE_'] # Only check Shopify orders
+        ]
+        if company_id:
+            domain.append(['company_id', '=', int(company_id)])
+            
+        # Return ID and Client Ref so we can find them in Shopify
+        return self.models.execute_kw(self.db, self.uid, self.password, 
+            'sale.order', 'search_read', [domain], {'fields': ['id', 'client_order_ref']})
