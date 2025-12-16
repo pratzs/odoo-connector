@@ -28,3 +28,8 @@ class AppSetting(db.Model):
     __tablename__ = 'app_settings'
     key = db.Column(db.String(50), primary_key=True)
     value = db.Column(db.Text) # Storing JSON strings or simple values
+
+class ProcessedOrder(db.Model):
+    __tablename__ = 'processed_orders'
+    shopify_id = db.Column(db.String(50), primary_key=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
