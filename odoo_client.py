@@ -310,10 +310,13 @@ class OdooClient:
         return self.models.execute_kw(self.db, self.uid, self.password, 
             'sale.order', 'search_read', [domain], {'fields': ['id', 'client_order_ref']})
 
-def get_product_uom_info(self, product_id):
-        """Fetches the UOM ratio (factor) for a product to handle Carton splitting."""
+def get_product_split_info(self, product_id):
+        """
+        Checks UOM factor. If Ratio > 1 (e.g. 24), we split.
+        Returns: { 'ratio': 24.0, 'uom_name': 'Carton' }
+        """
         try:
-            # 1. Get Product's UOM ID
+            # 1. Get Product UOM ID
             p_data = self.models.execute_kw(self.db, self.uid, self.password,
                 'product.product', 'read', [product_id], {'fields': ['uom_id']})
             
@@ -321,14 +324,15 @@ def get_product_uom_info(self, product_id):
             
             uom_id = p_data[0]['uom_id'][0] # [id, "Name"]
             
-            # 2. Get UOM Details (Ratio/Factor)
+            # 2. Get UOM Factor (The Math)
+            # factor_inv is the multiplier (e.g. 24 for Carton)
             uom_data = self.models.execute_kw(self.db, self.uid, self.password,
-                'uom.uom', 'read', [uom_id], {'fields': ['name', 'factor_inv', 'uom_type']})
+                'uom.uom', 'read', [uom_id], {'fields': ['name', 'factor_inv']})
             
             if uom_data:
-                # factor_inv is usually the multiplier (e.g., 24.0 for a Carton of 24)
-                # uom_type: reference, bigger, smaller
-                return uom_data[0]
+                ratio = float(uom_data[0].get('factor_inv', 1.0))
+                return {'ratio': ratio, 'uom_name': uom_data[0]['name']}
+                
         except Exception as e:
-            print(f"UOM Fetch Error: {e}")
+            print(f"Split Info Error: {e}")
         return None
