@@ -1178,16 +1178,30 @@ def import_selected_orders():
 @app.route('/webhook/orders/updated', methods=['POST'])
 def order_webhook():
     """
-    MANUAL MODE ENFORCED:
-    Always return 200 OK to Shopify so they don't retry,
-    but DO NOT process the order automatically.
+    HYBRID MODE:
+    1. 'orders/create'  -> ALLOWED (Syncs automatically 1st time)
+    2. 'orders/updated' -> BLOCKED (Prevents overwriting your manual fixes)
     """
-    # We log it just so you know Shopify tried to talk to you, 
-    # but we take NO action.
-    # topic = request.headers.get('X-Shopify-Topic', 'Unknown')
-    # log_event('Webhook', 'Skipped', f"Received {topic} - Ignored (Manual Mode)")
+    # 1. Security Check
+    hmac_header = request.headers.get('X-Shopify-Hmac-Sha256')
+    if not verify_shopify(request.get_data(), hmac_header):
+        return "Unauthorized", 401
 
-    return "Received (Manual Mode)", 200
+    # 2. Topic Check
+    topic = request.headers.get('X-Shopify-Topic', '')
+
+    # --- BLOCK UPDATES ---
+    if topic == 'orders/updated':
+        # We return 200 to tell Shopify "We got it, stop asking," 
+        # but we do NOT run process_order_data().
+        return "Update Ignored (Auto-Update Disabled)", 200
+
+    # --- ALLOW CREATION ---
+    # This runs ONLY for 'orders/create'
+    with app.app_context():
+        process_order_data(request.json)
+
+    return "Received", 200
     
 @app.route('/webhook/orders/cancelled', methods=['POST'])
 def order_cancelled_webhook(): return "Received", 200
