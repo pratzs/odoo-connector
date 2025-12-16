@@ -867,7 +867,7 @@ def cleanup_shopify_products(odoo_active_skus):
 def perform_inventory_sync(lookback_minutes):
     """
     Checks Odoo for recent stock moves and updates Shopify.
-    INCLUDES MATH: Calculates Cartons vs Units based on UOM Ratio.
+    CORRECTED MATH: Odoo holds Cartons. We Multiply for Units.
     """
     if not odoo or not setup_shopify_session(): return 0, 0
     
@@ -882,7 +882,6 @@ def perform_inventory_sync(lookback_minutes):
             if u: company_id = u[0]['company_id'][0]
         except: pass
 
-    # Use Stock Moves for accuracy
     last_run = datetime.utcnow() - timedelta(minutes=lookback_minutes)
     try: 
         product_ids = odoo.get_product_ids_with_recent_stock_moves(str(last_run), company_id)
@@ -894,27 +893,35 @@ def perform_inventory_sync(lookback_minutes):
     updates = 0
     
     for p_id in product_ids:
-        # 1. Get Total Units from Odoo
+        # 1. Get Total Stock from Odoo (This is in CARTONS, e.g., 132)
         total_odoo = int(odoo.get_total_qty_for_locations(p_id, target_locations, field_name=target_field))
         if sync_zero and total_odoo <= 0: continue
         
-        # 2. Get SKU and UOM Ratio
-        p_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'read', [p_id], {'fields': ['default_code', 'uom_id']})
+        # 2. Fetch Checkbox & UOM
+        p_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+            'product.product', 'read', [p_id], {'fields': ['default_code', 'uom_id', 'sh_is_secondary_unit']})
+        
         if not p_data: continue
         sku = p_data[0].get('default_code')
         if not sku: continue
         
+        # --- CHECK SPLIT LOGIC ---
         ratio = 1.0
-        try:
-            # Check if this is a Carton (Ratio > 1)
-            uom_id = p_data[0]['uom_id'][0]
-            uom_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'read', [uom_id], {'fields': ['factor_inv']})
-            if uom_data: ratio = float(uom_data[0].get('factor_inv', 1.0))
-        except: pass
+        should_split = False
+        
+        # Only split if 'sh_is_secondary_unit' is CHECKED
+        if p_data[0].get('sh_is_secondary_unit'):
+            try:
+                uom_id = p_data[0]['uom_id'][0]
+                uom_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'read', [uom_id], {'fields': ['factor_inv']})
+                if uom_data: 
+                    ratio = float(uom_data[0].get('factor_inv', 1.0))
+                    if ratio > 1.0: should_split = True
+            except: pass
 
-        # 3. Update CARTON Variant (Main SKU)
-        # Math: 2400 Units / 24 Ratio = 100 Cartons
-        carton_qty = int(total_odoo // ratio) if ratio > 0 else 0
+        # 3. Update MAIN Variant (Carton)
+        # Odoo says 132. Shopify Carton needs 132.
+        carton_qty = total_odoo
         
         shopify_info = get_shopify_variant_inv_by_sku(sku)
         if shopify_info and int(shopify_info['qty']) != carton_qty:
@@ -924,15 +931,18 @@ def perform_inventory_sync(lookback_minutes):
                 log_event('Inventory', 'Info', f"Updated Carton {sku}: {shopify_info['qty']} -> {carton_qty}")
             except Exception as e: print(f"Inv Error {sku}: {e}")
 
-        # 4. Update UNIT Variant (SKU-UNIT) - Only if it exists
-        if ratio > 1.0:
+        # 4. Update UNIT Variant (SKU-UNIT) - Only if splitting enabled
+        if should_split:
+            # Odoo says 132 Cartons. Units = 132 * 16 = 2112.
+            unit_qty = int(total_odoo * ratio) 
+            
             unit_sku = f"{sku}-UNIT"
             shopify_info_unit = get_shopify_variant_inv_by_sku(unit_sku)
-            if shopify_info_unit and int(shopify_info_unit['qty']) != total_odoo:
+            if shopify_info_unit and int(shopify_info_unit['qty']) != unit_qty:
                 try:
-                    shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=shopify_info_unit['inventory_item_id'], available=total_odoo)
+                    shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=shopify_info_unit['inventory_item_id'], available=unit_qty)
                     updates += 1
-                    log_event('Inventory', 'Info', f"Updated Unit {unit_sku}: {shopify_info_unit['qty']} -> {total_odoo}")
+                    log_event('Inventory', 'Info', f"Updated Unit {unit_sku}: {shopify_info_unit['qty']} -> {unit_qty}")
                 except Exception as e: print(f"Inv Error {unit_sku}: {e}")
 
         count += 1
