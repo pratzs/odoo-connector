@@ -409,8 +409,9 @@ def process_order_data(data):
                 
 def sync_products_master():
     """
-    Odoo -> Shopify Product Sync.
-    FIXED: Handles "New Product" attribute errors safely using getattr().
+    Odoo -> Shopify Product Sync (Optimized).
+    1. Checks 'sh_is_secondary_unit'.
+    2. SKIPS products that have not changed since last sync (Speed Boost).
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
@@ -427,16 +428,23 @@ def sync_products_master():
         sync_vendor = get_config('prod_sync_vendor', True)
         auto_create = get_config('prod_auto_create', True)
 
+        # Build map of existing sync times from DB for speed
+        db_map = {}
+        for pm in ProductMap.query.all():
+            db_map[pm.sku] = pm.last_synced_at
+
         total_count = len(odoo_products)
-        log_event('Product Sync', 'Info', f"Starting Sync for {total_count} products...")
+        log_event('Product Sync', 'Info', f"Starting Smart Sync for {total_count} products...")
         
         synced = 0
+        skipped = 0
         active_odoo_skus = set()
 
         for index, p in enumerate(odoo_products):
             # --- PROGRESS LOGS ---
-            if index > 0 and index % 25 == 0: print(f"Sync Progress: {index}/{total_count}...")
-            if index > 0 and index % 100 == 0: log_event('Product Sync', 'Info', f"Progress: {index}/{total_count}...")
+            if index > 0 and index % 50 == 0: 
+                print(f"Sync Progress: {index}/{total_count} (Synced: {synced}, Skipped: {skipped})...")
+                if index % 200 == 0: log_event('Product Sync', 'Info', f"Progress: {index}/{total_count}...")
 
             sku = p.get('default_code')
             if not sku: continue
@@ -454,7 +462,23 @@ def sync_products_master():
                 continue 
 
             active_odoo_skus.add(sku)
-            split_info = odoo.get_product_split_info(p['id'], uom_id_data=p.get('uom_id'))
+
+            # --- OPTIMIZATION: CHECK LAST MODIFIED DATE ---
+            # Odoo write_date format: '2023-12-16 10:00:00'
+            try:
+                last_mod_str = p.get('write_date')
+                if last_mod_str and sku in db_map:
+                    last_mod = datetime.fromisoformat(str(last_mod_str))
+                    last_sync = db_map[sku]
+                    # If Odoo hasn't changed since last sync, SKIP IT
+                    if last_mod <= last_sync:
+                        skipped += 1
+                        continue
+            except: pass # If date parsing fails, process it anyway to be safe
+
+            # --- PROCESS PRODUCT ---
+            # Correctly passing product_data=p
+            split_info = odoo.get_product_split_info(p['id'], product_data=p)
             
             is_pack = False
             ratio = 1.0
@@ -465,7 +489,9 @@ def sync_products_master():
             shopify_id = find_shopify_product_by_sku(sku)
             
             # Skip creation if disabled
-            if not shopify_id and not auto_create: continue
+            if not shopify_id and not auto_create: 
+                skipped += 1
+                continue
 
             try:
                 if shopify_id: sp = shopify.Product.find(shopify_id)
@@ -473,29 +499,24 @@ def sync_products_master():
                 
                 product_changed = False
 
-                # --- SAFE ATTRIBUTE ACCESS (Fixes 'title' error) ---
                 current_title = getattr(sp, 'title', '')
                 current_body = getattr(sp, 'body_html', '')
                 current_type = getattr(sp, 'product_type', '')
                 current_vendor = getattr(sp, 'vendor', '')
                 current_status = getattr(sp, 'status', 'active')
 
-                # Title
                 if sync_title and current_title != p['name']:
                     sp.title = p['name']
                     product_changed = True
                 
-                # Description
                 if sync_desc:
                     odoo_desc = p.get('description_sale') or ''
                     if (current_body or '') != odoo_desc:
                         sp.body_html = odoo_desc
                         product_changed = True
                 
-                # Category
                 odoo_categ_ids = p.get('public_categ_ids', [])
                 if not odoo_categ_ids and current_type:
-                    # Init Logic (Shopify -> Odoo)
                     try:
                         cat_name = current_type
                         cat_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.public.category', 'search', [[['name', '=', cat_name]]])
@@ -510,7 +531,6 @@ def sync_products_master():
                         sp.product_type = odoo_cat_name
                         product_changed = True
 
-                # Vendor
                 if sync_vendor:
                     target_vendor = p.get('name', '').split()[0] if p.get('name') else 'Worthy'
                     if current_vendor != target_vendor:
@@ -547,8 +567,6 @@ def sync_products_master():
                     })
 
                 sp.options = [{'name': 'Format'}] if is_pack else []
-                
-                # SAFE ACCESS for variants
                 existing_vars = getattr(sp, 'variants', [])
                 final_variants = []
 
@@ -571,6 +589,7 @@ def sync_products_master():
                 sp.variants = final_variants
                 sp.save()
                 
+                # Image Sync
                 if get_config('prod_sync_images', False) and not getattr(sp, 'images', []):
                     try:
                         img_data = odoo.get_product_image(p['id'])
@@ -583,11 +602,22 @@ def sync_products_master():
 
                 synced += 1
                 
+                # --- UPDATE SYNC TIMESTAMP IN DB ---
+                try:
+                    pm = ProductMap.query.filter_by(sku=sku).first()
+                    if not pm:
+                        pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=str(sp.variants[0].id))
+                        db.session.add(pm)
+                    pm.last_synced_at = datetime.utcnow()
+                    db.session.commit()
+                except: 
+                    db.session.rollback()
+                
             except Exception as e:
                 log_event('Product Sync', 'Error', f"Failed {sku}: {e}")
 
         cleanup_shopify_products(active_odoo_skus)
-        log_event('Product Sync', 'Success', f"Sync Complete. Processed {synced} products.")
+        log_event('Product Sync', 'Success', f"Sync Complete. Synced: {synced}, Skipped (Unchanged): {skipped}.")
 
 def sync_customers_master():
     """
