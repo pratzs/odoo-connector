@@ -8,7 +8,7 @@ import schedule
 import time
 import shopify 
 from flask import Flask, request, jsonify, render_template
-from sqlalchemy import tex
+from sqlalchemy import text
 from models import db, ProductMap, SyncLog, AppSetting, CustomerMap, ProcessedOrder
 from odoo_client import OdooClient
 import requests
