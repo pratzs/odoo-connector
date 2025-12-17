@@ -15,20 +15,17 @@ import requests
 from datetime import datetime, timedelta
 import random
 import xmlrpc.client
-import ssl
 from sqlalchemy import text
+import ssl
+import gc 
 
 # --- FIX: Explicit FulfillmentOrder Import ---
-
-# --- ADD THIS TO TOP OF app.py AFTER IMPORTS ---
 try:
-    # Try to ensure FulfillmentOrder is available in the shopify namespace
-    if not hasattr(shopify, 'FulfillmentOrder'):
-        from shopify.resources.fulfillment_order import FulfillmentOrder
-        shopify.FulfillmentOrder = FulfillmentOrder
+    from shopify.resources.fulfillment_order import FulfillmentOrder
+    shopify.FulfillmentOrder = FulfillmentOrder
 except ImportError:
     pass
-# -----------------------------------------------
+# ---------------------------------------------
 
 app = Flask(__name__)
 
@@ -43,15 +40,51 @@ if database_url:
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# --- FIX: SSL Context for Supabase/Render ---
-# Create a relaxed SSL context that accepts self-signed certificates
-ctx = ssl.create_default_context()
-ctx.check_hostname = False
-ctx.verify_mode = ssl.CERT_NONE
+# --- SSL FIX FOR RENDER/SUPABASE ---
+try:
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+        "connect_args": {"ssl_context": ssl_ctx}
+    }
+except: pass
 
-app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    "connect_args": {"ssl_context": ctx} 
-}
+SHOPIFY_LOCATION_ID = int(os.getenv('SHOPIFY_WAREHOUSE_ID', '0'))import xmlrpc.client
+from sqlalchemy import text
+import ssl
+import gc 
+
+# --- FIX: Explicit FulfillmentOrder Import ---
+try:
+    from shopify.resources.fulfillment_order import FulfillmentOrder
+    shopify.FulfillmentOrder = FulfillmentOrder
+except ImportError:
+    pass
+# ---------------------------------------------
+
+app = Flask(__name__)
+
+# --- CONFIGURATION ---
+database_url = os.getenv('DATABASE_URL', 'sqlite:///local.db')
+if database_url:
+    if database_url.startswith("postgres://"):
+        database_url = database_url.replace("postgres://", "postgresql+pg8000://", 1)
+    elif database_url.startswith("postgresql://"):
+        database_url = database_url.replace("postgresql://", "postgresql+pg8000://", 1)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# --- SSL FIX FOR RENDER/SUPABASE ---
+try:
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+        "connect_args": {"ssl_context": ssl_ctx}
+    }
+except: pass
 
 SHOPIFY_LOCATION_ID = int(os.getenv('SHOPIFY_WAREHOUSE_ID', '0'))
 
@@ -1555,103 +1588,107 @@ t.start()
 
 def sync_images_only_manual():
     """
-    THREAD-SAFE Image Sync:
-    1. Maps Shopify Images via GraphQL (Instant).
-    2. Calculates Hashes in Parallel (CPU Bound).
-    3. Writes to DB in Main Thread (IO/DB Bound) to avoid pg8000 errors.
+    MEMORY-OPTIMIZED Image Sync (Batched):
+    1. Gets all Odoo IDs first (Low Memory).
+    2. Processes in chunks of 20.
+    3. Clears memory after every chunk.
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): return
         
-        log_event('Image Sync', 'Info', "Mapping Shopify Products...")
-        shopify_map = {} 
+        log_event('Image Sync', 'Info', "Starting Memory-Safe Image Sync...")
+        
+        # 1. Get IDs only
+        company_id = get_config('odoo_company_id')
+        domain = [['type', 'in', ['product', 'consu']]]
+        if company_id: domain.append(['company_id', '=', int(company_id)])
+        
         try:
-            client = shopify.GraphQL()
-            cursor = None
-            while True:
-                q = "{ products(first: 50, %s) { pageInfo { hasNextPage endCursor } edges { node { legacyResourceId images(first: 1) { edges { node { id } } } variants(first: 1) { edges { node { sku } } } } } } }" % (f'after: "{cursor}"' if cursor else "")
-                res = json.loads(client.execute(q))
-                for edge in res['data']['products']['edges']:
-                    node = edge['node']
-                    sku = node['variants']['edges'][0]['node']['sku'] if node['variants']['edges'] else None
-                    if sku:
-                        has_img = len(node['images']['edges']) > 0
-                        shopify_map[sku] = {'id': node['legacyResourceId'], 'has_images': has_img}
-                
-                if not res['data']['products']['pageInfo']['hasNextPage']: break
-                cursor = res['data']['products']['pageInfo']['endCursor']
+            odoo_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'product.product', 'search', [domain])
         except Exception as e:
-            log_event('Image Sync', 'Error', f"GraphQL Map Failed: {e}")
+            log_event('Image Sync', 'Error', f"Odoo Search Failed: {e}")
             return
 
-        company_id = get_config('odoo_company_id')
-        odoo_products = odoo.get_all_products(company_id)
+        total = len(odoo_ids)
+        log_event('Image Sync', 'Info', f"Found {total} products. Processing in batches of 20...")
+
+        # 2. Process in Batches
+        BATCH_SIZE = 20
+        processed = 0
+        updates = 0
         
-        # Get DB Hashes safely
+        # Pre-load DB hashes (lightweight string map)
         db_hashes = {}
         try:
             for pm in ProductMap.query.all():
                 if pm.sku: db_hashes[pm.sku] = pm.image_hash
         except: pass
 
-        # Worker: Only fetch & Hash (No DB Write)
-        def process_image(p):
-            sku = p.get('default_code')
-            if not sku or sku not in shopify_map: return None
+        for i in range(0, total, BATCH_SIZE):
+            chunk_ids = odoo_ids[i:i + BATCH_SIZE]
             
+            # Fetch Data for just this chunk
             try:
-                img_data = odoo.get_product_image(p['id'])
-                if not img_data: return None
+                odoo_chunk = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                    'product.product', 'read', [chunk_ids], {'fields': ['default_code', 'image_1920']})
+            except: continue
+
+            for p in odoo_chunk:
+                sku = p.get('default_code')
+                img_b64 = p.get('image_1920')
                 
-                if isinstance(img_data, bytes): img_str = img_data.decode('utf-8')
-                else: img_str = img_data
+                if not sku or not img_b64: continue
+                
+                # Check Hash
+                if isinstance(img_b64, bytes): img_str = img_b64.decode('utf-8')
+                else: img_str = img_b64
+                img_str = img_str.replace("\n", "") # Cleanup
                 
                 current_hash = hashlib.md5(img_str.encode('utf-8')).hexdigest()
                 stored_hash = db_hashes.get(sku)
-                sp_data = shopify_map[sku]
                 
-                if (current_hash != stored_hash) or (not sp_data['has_images']):
-                    return (sku, p['id'], sp_data['id'], img_str, current_hash)
-            except: pass
-            return None
+                # Skip if identical
+                if current_hash == stored_hash: continue 
 
-        log_event('Image Sync', 'Info', "Calculating Hashes in Parallel...")
-        
-        # Parallel Fetch
-        results = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            futures = [executor.submit(process_image, p) for p in odoo_products]
-            for future in concurrent.futures.as_completed(futures):
-                res = future.result()
-                if res: results.append(res)
-
-        log_event('Image Sync', 'Info', f"Found {len(results)} images to update. Uploading...")
-
-        # Sequential Write (Safe for DB)
-        updates = 0
-        for sku, oid, sid, img_str, h in results:
-            try:
-                sp = shopify.Product.find(sid)
-                sp.images = []
-                sp.save()
+                # Find in Shopify
+                sid = find_shopify_product_by_sku(sku)
+                if not sid: continue
                 
-                img = shopify.Image(prefix_options={'product_id': sp.id})
-                img.attachment = img_str
-                img.save()
-                
-                # DB Write in main thread = No Crash
-                pm = ProductMap.query.filter_by(sku=sku).first()
-                if not pm: pm = ProductMap(sku=sku, odoo_product_id=oid, shopify_variant_id='0')
-                pm.image_hash = h
-                db.session.commit()
-                updates += 1
-                print(f"Updated Image: {sku}")
-            except Exception as e:
-                print(f"Failed update {sku}: {e}")
-                db.session.rollback()
+                try:
+                    sp = shopify.Product.find(sid)
+                    sp.images = [] 
+                    sp.save()
+                    
+                    image = shopify.Image(prefix_options={'product_id': sp.id})
+                    image.attachment = img_str
+                    image.save()
+                    
+                    # Update DB
+                    pm = ProductMap.query.filter_by(sku=sku).first()
+                    if not pm: 
+                        pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id='0')
+                        db.session.add(pm)
+                    
+                    pm.image_hash = current_hash
+                    db.session.commit()
+                    db_hashes[sku] = current_hash # Update local map
+                    updates += 1
+                    
+                except Exception as e:
+                    print(f"Img Error {sku}: {e}")
+                    db.session.rollback()
 
-        log_event('Image Sync', 'Success', f"Fast Sync: Updated {updates} images.")
+            processed += len(chunk_ids)
+            
+            # FREE MEMORY
+            del odoo_chunk
+            gc.collect()
+            
+            if processed % 100 == 0:
+                log_event('Image Sync', 'Info', f"Processed {processed}/{total}...")
 
+        log_event('Image Sync', 'Success', f"Sync Complete. Updated {updates} images.")
 @app.route('/sync/images/manual', methods=['GET'])
 def trigger_manual_image_sync():
     threading.Thread(target=sync_images_only_manual).start()
