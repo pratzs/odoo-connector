@@ -8,6 +8,7 @@ import schedule
 import time
 import shopify 
 from flask import Flask, request, jsonify, render_template
+from sqlalchemy import tex
 from models import db, ProductMap, SyncLog, AppSetting, CustomerMap, ProcessedOrder
 from odoo_client import OdooClient
 import requests
@@ -405,11 +406,7 @@ def process_order_data(data):
 
 def sync_products_master():
     """
-    Odoo -> Shopify Product Sync (v8.0 - TURBO MODE).
-    Performance Optimizations:
-    1. SMART SKIP: Ignores products not modified in Odoo since last run.
-    2. API REDUCTION: Removed redundant Shopify re-fetches.
-    3. ATOMICITY: All previous fixes (Global Scope, Images, Strict UOM) included.
+    Odoo -> Shopify Product Sync (v8.1 - Image Hash & Resync Fixes).
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
@@ -421,30 +418,26 @@ def sync_products_master():
         log_event('Product Sync', 'Info', "Fetching Odoo products...")
         raw_odoo_products = odoo.get_all_products(company_id)
         
-        # --- 1. DEDUPLICATION (Memory Efficient) ---
+        # --- 1. DEDUPLICATION ---
         odoo_product_map = {}
         for p in raw_odoo_products:
             sku = p.get('default_code')
             if not sku: continue
-            
-            # Logic: If duplicate, prioritize the ACTIVE one
             if sku not in odoo_product_map:
                 odoo_product_map[sku] = p
             else:
                 stored_p = odoo_product_map[sku]
                 if p.get('active', True) and not stored_p.get('active', True):
                     odoo_product_map[sku] = p
-        
         odoo_products = list(odoo_product_map.values())
 
-        # --- 2. LOAD SYNC HISTORY (The Speed Secret) ---
-        # Load all last_synced timestamps into a dictionary for O(1) lookup
+        # --- 2. LOAD SYNC HISTORY (Now with Hash) ---
         db_map = {}
         try:
             all_maps = ProductMap.query.all()
             for pm in all_maps:
-                if pm.sku and pm.last_synced_at:
-                    db_map[pm.sku] = pm.last_synced_at
+                if pm.sku:
+                    db_map[pm.sku] = {'date': pm.last_synced_at, 'hash': pm.image_hash}
         except: pass
 
         # --- 3. CACHE UOM ---
@@ -492,29 +485,30 @@ def sync_products_master():
         log_event('Product Sync', 'Info', f"Starting Turbo Sync for {total_count} SKUs...")
 
         for index, p in enumerate(odoo_products):
-            # Visual Progress (Show skipped count too)
             if index > 0 and index % 50 == 0: 
                 log_event('Product Sync', 'Info', f"Progress: {index}/{total_count} (Synced: {synced}, Skipped: {skipped})...")
 
             sku = p.get('default_code')
             active_odoo_skus.add(sku)
             
-            # --- 5. SMART SKIP CHECK (The Turbo Button) ---
-            # If product is in DB and hasn't changed in Odoo -> SKIP
-            try:
-                last_write_str = p.get('write_date') # Odoo Format: '2023-12-01 10:00:00'
-                if last_write_str and sku in db_map:
-                    # Convert Odoo string to datetime
-                    last_write = datetime.strptime(last_write_str.split('.')[0], "%Y-%m-%d %H:%M:%S")
-                    last_sync = db_map[sku]
-                    
-                    # If Odoo write date is OLDER or EQUAL to last sync time, we skip
-                    if last_write <= last_sync:
-                        skipped += 1
-                        continue
-            except Exception: 
-                # If date parsing fails, just sync it to be safe
-                pass
+            # --- 5. SMART SKIP CHECK (FIXED) ---
+            exists_in_shopify = sku in shopify_map
+            
+            should_skip = False
+            # Only check timestamp if it actually exists in Shopify
+            if exists_in_shopify and sku in db_map:
+                try:
+                    last_write_str = p.get('write_date')
+                    if last_write_str:
+                        last_write = datetime.strptime(last_write_str.split('.')[0], "%Y-%m-%d %H:%M:%S")
+                        last_sync = db_map[sku]['date']
+                        if last_write <= last_sync:
+                            should_skip = True
+                except: pass
+            
+            if should_skip:
+                skipped += 1
+                continue
 
             # --- ARCHIVE CHECK ---
             if not p.get('active', True):
@@ -601,7 +595,7 @@ def sync_products_master():
                     sp.vendor = p.get('name', '').split()[0] if p.get('name') else 'Worthy'
                     sp.product_type = odoo.get_public_category_name(p.get('public_categ_ids', [])) or ''
                     sp.status = 'active' if auto_publish else 'draft'
-                    sp.published_scope = 'global' # POS + Online
+                    sp.published_scope = 'global'
 
                     if sync_tags:
                         odoo_tags = odoo.get_tag_names(p.get('product_tag_ids', []))
@@ -623,8 +617,6 @@ def sync_products_master():
                     
                     sp.variants = new_variants
                     sp.save()
-                    # Optimization: Only reload if we really need to (e.g. for Cost)
-                    # sp = shopify.Product.find(sp.id) 
                 
                 # UPDATE PRODUCT
                 else:
@@ -667,7 +659,7 @@ def sync_products_master():
                     sp.variants = final_vars
                     sp.save()
 
-                # Sync Cost (Only if ID exists - might fail on fresh creation without reload, which is fine for speed)
+                # Sync Cost
                 if sp.variants:
                     for v in sp.variants:
                         d_data = next((d for d in desired_variants if d['sku'] == v.sku), None)
@@ -688,16 +680,38 @@ def sync_products_master():
                             'key': 'vendor_product_code', 'value': v_code, 'type': 'single_line_text_field', 'namespace': 'custom'
                         }))
 
-                # Sync Images
-                if sync_images and not getattr(sp, 'images', []):
+                # ---------------------------
+                # IMAGE SYNC (NEW HASH LOGIC)
+                # ---------------------------
+                if sync_images:
                      try:
                         img_data = odoo.get_product_image(p['id'])
                         if img_data:
-                            if isinstance(img_data, bytes): img_data = img_data.decode('utf-8')
-                            image = shopify.Image(prefix_options={'product_id': sp.id})
-                            image.attachment = img_data
-                            image.save()
-                     except: pass
+                            if isinstance(img_data, bytes): img_data_str = img_data.decode('utf-8')
+                            else: img_data_str = img_data
+                            
+                            current_hash = hashlib.md5(img_data_str.encode('utf-8')).hexdigest()
+                            stored_hash = db_map.get(sku, {}).get('hash')
+                            
+                            shopify_has_images = True if getattr(sp, 'images', []) else False
+                            
+                            if (current_hash != stored_hash) or (not shopify_has_images):
+                                sp.images = [] 
+                                sp.save()
+                                
+                                image = shopify.Image(prefix_options={'product_id': sp.id})
+                                image.attachment = img_data_str
+                                image.save()
+                                
+                                try:
+                                    pm = ProductMap.query.filter_by(sku=sku).first()
+                                    if pm: 
+                                        pm.image_hash = current_hash
+                                        db.session.commit()
+                                except: pass
+                                if sku in db_map: db_map[sku]['hash'] = current_hash
+                     except Exception as e: 
+                        print(f"Image Error {sku}: {e}")
 
                 synced += 1
                 
@@ -709,7 +723,6 @@ def sync_products_master():
                         pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=str(v_id))
                         db.session.add(pm)
                     
-                    # Update local timestamp to Match Odoo Write Date (or Now)
                     pm.last_synced_at = datetime.utcnow()
                     db.session.commit()
                 except: db.session.rollback()
@@ -1532,6 +1545,99 @@ def run_schedule():
 # This ensures all functions are defined before the thread starts using them
 t = threading.Thread(target=run_schedule, daemon=True)
 t.start()
+
+def sync_images_only_manual():
+    """
+    Manual Button: Forces verification and update of ALL product images.
+    Ignores timestamps. Relies purely on Hash comparison.
+    """
+    with app.app_context():
+        if not odoo or not setup_shopify_session(): return
+        
+        company_id = get_config('odoo_company_id')
+        log_event('Image Sync', 'Info', "Starting Full Image Audit...")
+        
+        # 1. Get Products
+        odoo_products = odoo.get_all_products(company_id)
+        
+        # 2. Map DB Hashes
+        db_hashes = {}
+        for pm in ProductMap.query.all():
+            if pm.sku: db_hashes[pm.sku] = pm.image_hash
+
+        updated_count = 0
+        checked_count = 0
+        
+        for p in odoo_products:
+            sku = p.get('default_code')
+            if not sku: continue
+            checked_count += 1
+            
+            try:
+                # Find Shopify ID
+                shopify_id = find_shopify_product_by_sku(sku)
+                if not shopify_id: continue 
+                
+                sp = shopify.Product.find(shopify_id)
+                
+                # Get Odoo Image & Hash
+                img_data = odoo.get_product_image(p['id'])
+                if not img_data: continue 
+                
+                if isinstance(img_data, bytes): img_data_str = img_data.decode('utf-8')
+                else: img_data_str = img_data
+                
+                current_hash = hashlib.md5(img_data_str.encode('utf-8')).hexdigest()
+                
+                # Check conditions
+                stored_hash = db_hashes.get(sku)
+                shopify_has_images = True if getattr(sp, 'images', []) else False
+                
+                if (current_hash != stored_hash) or (not shopify_has_images):
+                    if shopify_has_images:
+                        sp.images = []
+                        sp.save()
+                    
+                    image = shopify.Image(prefix_options={'product_id': sp.id})
+                    image.attachment = img_data_str
+                    image.save()
+                    
+                    # Save new hash
+                    pm = ProductMap.query.filter_by(sku=sku).first()
+                    if not pm:
+                        pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id='0')
+                        db.session.add(pm)
+                    pm.image_hash = current_hash
+                    db.session.commit()
+                    
+                    updated_count += 1
+                    log_event('Image Sync', 'Info', f"Updated Image for {sku}")
+                    
+            except Exception as e:
+                print(f"Image Sync Error {sku}: {e}")
+                
+        log_event('Image Sync', 'Success', f"Image Audit Complete. Checked {checked_count}, Updated {updated_count}")
+
+@app.route('/sync/images/manual', methods=['GET'])
+def trigger_manual_image_sync():
+    threading.Thread(target=sync_images_only_manual).start()
+    return jsonify({"message": "Image Sync Started"})
+
+@app.route('/maintenance/add_hash_column', methods=['GET'])
+def maintenance_add_column():
+    """
+    Run this ONCE to update your Supabase Database.
+    """
+    try:
+        with app.app_context():
+            # Postgres specific command to add the column if it doesn't exist
+            db.session.execute(text('ALTER TABLE product_map ADD COLUMN IF NOT EXISTS image_hash VARCHAR(32);'))
+            db.session.commit()
+            return jsonify({"message": "SUCCESS: Column 'image_hash' added to Supabase."})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)})
+        
 
 # --- ADD THIS MARKER ---
 print("**************************************************")
