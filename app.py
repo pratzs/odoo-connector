@@ -1606,12 +1606,13 @@ def sync_images_only_manual():
         
         log_event('Image Sync', 'Info', "Starting Memory-Safe Image Sync...")
         
-        # 1. Get IDs only
+        # 1. Get IDs only (Lightweight)
         company_id = get_config('odoo_company_id')
         domain = [['type', 'in', ['product', 'consu']]]
         if company_id: domain.append(['company_id', '=', int(company_id)])
         
         try:
+            # search() only returns a list of IDs [1, 2, 3...] - Very low memory
             odoo_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                 'product.product', 'search', [domain])
         except Exception as e:
@@ -1636,7 +1637,7 @@ def sync_images_only_manual():
         for i in range(0, total, BATCH_SIZE):
             chunk_ids = odoo_ids[i:i + BATCH_SIZE]
             
-            # Fetch Data for just this chunk
+            # Fetch Data for just this chunk (Heavy data, but only 20 items)
             try:
                 odoo_chunk = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                     'product.product', 'read', [chunk_ids], {'fields': ['default_code', 'image_1920']})
@@ -1685,22 +1686,19 @@ def sync_images_only_manual():
                     
                 except Exception as e:
                     print(f"Img Error {sku}: {e}")
+                    # Rollback to keep connection healthy
                     db.session.rollback()
 
             processed += len(chunk_ids)
             
-            # FREE MEMORY
+            # 3. FREE MEMORY IMMEDIATELY
             del odoo_chunk
-            gc.collect()
+            gc.collect() 
             
             if processed % 100 == 0:
                 log_event('Image Sync', 'Info', f"Processed {processed}/{total}...")
 
         log_event('Image Sync', 'Success', f"Sync Complete. Updated {updates} images.")
-@app.route('/sync/images/manual', methods=['GET'])
-def trigger_manual_image_sync():
-    threading.Thread(target=sync_images_only_manual).start()
-    return jsonify({"message": "Image Sync Started"})
 
 @app.route('/maintenance/add_hash_column', methods=['GET'])
 def maintenance_add_column():
