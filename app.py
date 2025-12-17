@@ -15,7 +15,10 @@ import requests
 from datetime import datetime, timedelta
 import random
 import xmlrpc.client
+import ssl
 from sqlalchemy import text
+
+# --- FIX: Explicit FulfillmentOrder Import ---
 
 # --- ADD THIS TO TOP OF app.py AFTER IMPORTS ---
 try:
