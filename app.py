@@ -406,7 +406,7 @@ def process_order_data(data):
 
 def sync_products_master():
     """
-    Odoo -> Shopify Product Sync (v8.1 - Image Hash & Resync Fixes).
+    Odoo -> Shopify Product Sync (v9.1 - Strict Single Variant Enforcement).
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
@@ -414,11 +414,10 @@ def sync_products_master():
             return
 
         company_id = get_config('odoo_company_id')
-        
         log_event('Product Sync', 'Info', "Fetching Odoo products...")
         raw_odoo_products = odoo.get_all_products(company_id)
         
-        # --- 1. DEDUPLICATION ---
+        # 1. Deduplication
         odoo_product_map = {}
         for p in raw_odoo_products:
             sku = p.get('default_code')
@@ -426,12 +425,11 @@ def sync_products_master():
             if sku not in odoo_product_map:
                 odoo_product_map[sku] = p
             else:
-                stored_p = odoo_product_map[sku]
-                if p.get('active', True) and not stored_p.get('active', True):
+                if p.get('active', True) and not odoo_product_map[sku].get('active', True):
                     odoo_product_map[sku] = p
         odoo_products = list(odoo_product_map.values())
 
-        # --- 2. LOAD SYNC HISTORY (Now with Hash) ---
+        # 2. Load Sync History
         db_map = {}
         try:
             all_maps = ProductMap.query.all()
@@ -440,15 +438,7 @@ def sync_products_master():
                     db_map[pm.sku] = {'date': pm.last_synced_at, 'hash': pm.image_hash}
         except: pass
 
-        # --- 3. CACHE UOM ---
-        uom_map = {}
-        try:
-            uoms = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'search_read', [[]], {'fields': ['id', 'name', 'factor_inv']})
-            for u in uoms:
-                uom_map[u['id']] = {'name': u['name'], 'ratio': float(u.get('factor_inv', 1.0))}
-        except: pass
-
-        # --- 4. MAP SHOPIFY ---
+        # 3. Shopify Map
         log_event('Product Sync', 'Info', "Building Shopify SKU Map...")
         shopify_map = {}
         try:
@@ -463,6 +453,14 @@ def sync_products_master():
         except Exception as e:
             log_event('Product Sync', 'Error', f"Failed to map Shopify: {e}")
             return
+
+        # 4. UOM Cache
+        uom_map = {}
+        try:
+            uoms = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'search_read', [[]], {'fields': ['id', 'name', 'factor_inv']})
+            for u in uoms:
+                uom_map[u['id']] = {'name': u['name'], 'ratio': float(u.get('factor_inv', 1.0))}
+        except: pass
 
         # Configs
         sync_title = get_config('prod_sync_title', True)
@@ -482,7 +480,7 @@ def sync_products_master():
         total_count = len(odoo_products)
         active_odoo_skus = set()
 
-        log_event('Product Sync', 'Info', f"Starting Turbo Sync for {total_count} SKUs...")
+        log_event('Product Sync', 'Info', f"Starting Strict Sync for {total_count} SKUs...")
 
         for index, p in enumerate(odoo_products):
             if index > 0 and index % 50 == 0: 
@@ -491,11 +489,10 @@ def sync_products_master():
             sku = p.get('default_code')
             active_odoo_skus.add(sku)
             
-            # --- 5. SMART SKIP CHECK (FIXED) ---
             exists_in_shopify = sku in shopify_map
             
+            # Smart Skip Check
             should_skip = False
-            # Only check timestamp if it actually exists in Shopify
             if exists_in_shopify and sku in db_map:
                 try:
                     last_write_str = p.get('write_date')
@@ -510,7 +507,7 @@ def sync_products_master():
                 skipped += 1
                 continue
 
-            # --- ARCHIVE CHECK ---
+            # Archive Check
             if not p.get('active', True):
                 if sku in shopify_map:
                     sp = shopify_map[sku]
@@ -524,63 +521,64 @@ def sync_products_master():
                 continue 
 
             # ---------------------------
-            # PREPARE DATA
+            # STRICT UOM LOGIC
             # ---------------------------
             is_pack = False
             ratio = 1.0
-            base_price_is_pack = True 
-            main_uom_name = p['uom_id'][1] if (p.get('uom_id') and len(p['uom_id']) > 1) else 'Default Title'
-
-            uom_id = p.get('uom_id') 
-            sec_uom_id = p.get('sh_secondary_uom') 
-            has_sec_unit_enabled = p.get('sh_is_secondary_unit', False)
-
-            if has_sec_unit_enabled and sec_uom_id:
-                if sec_uom_id[0] in uom_map:
-                    sec_data = uom_map[sec_uom_id[0]]
-                    if sec_data['ratio'] > 1.0:
-                        is_pack = True; ratio = sec_data['ratio']; base_price_is_pack = False 
-                    else:
-                        if uom_id and uom_id[0] in uom_map:
-                            prim_data = uom_map[uom_id[0]]
-                            if prim_data['ratio'] > 1.0:
-                                is_pack = True; ratio = prim_data['ratio']; base_price_is_pack = True 
             
+            # STRICT: Only True if explicitly enabled in Odoo
+            has_sec_unit_enabled = p.get('sh_is_secondary_unit') is True 
+            sec_uom_tuple = p.get('sh_secondary_uom')
+
+            if has_sec_unit_enabled and sec_uom_tuple:
+                if sec_uom_tuple[0] in uom_map:
+                    sec_data = uom_map[sec_uom_tuple[0]]
+                    ratio = sec_data['ratio']
+                    # Only treat as pack if ratio logic holds
+                    if ratio > 1.0:
+                        is_pack = True
+                    else:
+                        # Fallback check on primary uom
+                        uom_id = p.get('uom_id')
+                        if uom_id and uom_id[0] in uom_map:
+                             prim_data = uom_map[uom_id[0]]
+                             if prim_data['ratio'] > 1.0:
+                                 is_pack = True; ratio = prim_data['ratio']
+
+            # Determine Main Name (Carton/Outer)
+            main_name = 'Outer'
+            if p.get('uom_id'):
+                u_id = p['uom_id'][0]
+                if u_id in uom_map: main_name = uom_map[u_id]['name']
+                elif len(p['uom_id']) > 1: main_name = p['uom_id'][1]
+
             raw_price = float(p.get('list_price', 0.0))
             raw_cost = float(p.get('standard_price', 0.0))
             
+            # BUILD DESIRED VARIANTS
             desired_variants = []
-            v1_name = str(main_uom_name) 
             
+            # 1. Main Variant (ALWAYS EXISTS)
             desired_variants.append({
-                'option1': v1_name if is_pack else 'Default Title',
+                'option1': main_name, 
                 'price': str(raw_price),
                 'sku': sku,
                 'weight': p.get('weight', 0),
                 'cost': str(raw_cost)
             })
 
+            # 2. Unit Variant (ONLY if is_pack is True)
             if is_pack:
-                if base_price_is_pack:
-                    desired_variants.append({
-                        'option1': 'Unit',
-                        'price': str(round(raw_price / ratio, 2)),
-                        'sku': f"{sku}-UNIT",
-                        'weight': float(p.get('weight', 0)) / ratio,
-                        'cost': str(round(raw_cost / ratio, 2))
-                    })
-                else:
-                    sec_name = sec_uom_id[1] if len(sec_uom_id) > 1 else 'Carton'
-                    desired_variants.append({
-                        'option1': sec_name,
-                        'price': str(round(raw_price * ratio, 2)),
-                        'sku': f"{sku}-{sec_name.upper().replace(' ','')}",
-                        'weight': float(p.get('weight', 0)) * ratio,
-                        'cost': str(round(raw_cost * ratio, 2))
-                    })
+                desired_variants.append({
+                    'option1': 'Unit',
+                    'price': str(round(raw_price / ratio, 2)),
+                    'sku': f"{sku}-UNIT",
+                    'weight': float(p.get('weight', 0)) / ratio,
+                    'cost': str(round(raw_cost / ratio, 2))
+                })
 
             # ---------------------------
-            # CREATE OR UPDATE
+            # SHOPIFY UPDATE
             # ---------------------------
             sp = shopify_map.get(sku)
             
@@ -596,27 +594,13 @@ def sync_products_master():
                     sp.product_type = odoo.get_public_category_name(p.get('public_categ_ids', [])) or ''
                     sp.status = 'active' if auto_publish else 'draft'
                     sp.published_scope = 'global'
+                    sp.options = [{'name': 'Format'}] # Force option name
 
                     if sync_tags:
                         odoo_tags = odoo.get_tag_names(p.get('product_tag_ids', []))
                         if odoo_tags: sp.tags = ",".join(odoo_tags)
                     
                     if sync_desc: sp.body_html = p.get('description_sale') or ''
-
-                    if is_pack: sp.options = [{'name': 'Pack Size'}]
-                    
-                    new_variants = []
-                    for des in desired_variants:
-                        v = shopify.Variant()
-                        v.option1 = des['option1']
-                        v.price = des['price']
-                        v.sku = des['sku']
-                        v.weight = des['weight']
-                        v.inventory_management = 'shopify'
-                        new_variants.append(v)
-                    
-                    sp.variants = new_variants
-                    sp.save()
                 
                 # UPDATE PRODUCT
                 else:
@@ -629,35 +613,41 @@ def sync_products_master():
                          target_v = p.get('name', '').split()[0] if p.get('name') else 'Worthy'
                          if getattr(sp, 'vendor', '') != target_v: sp.vendor = target_v; product_changed = True
                     
+                    # Ensure option is Format (to avoid "Default Title" issues)
+                    if not sp.options or sp.options[0].name == 'Title':
+                        sp.options = [{'name': 'Format'}]
+                        product_changed = True
+
                     if product_changed: sp.save()
 
-                # ---------------------------
-                # POST-SAVE SYNC
-                # ---------------------------
+                # --- SYNC VARIANTS (DESTRUCTIVE MODE) ---
                 existing_vars = getattr(sp, 'variants', [])
-                vars_changed = False
                 final_vars = []
                 
-                if is_pack and not sp.options: 
-                    sp.options = [{'name': 'Pack Size'}]; vars_changed = True
-                elif not is_pack and sp.options:
-                    sp.options = []; vars_changed = True
-
                 for des in desired_variants:
+                    # Try to find existing by SKU
                     match = next((v for v in existing_vars if v.sku == des['sku']), None)
-                    if not match: match = next((v for v in existing_vars if not v.sku), None)
-                    if not match: match = shopify.Variant({'product_id': sp.id})
                     
-                    if match.option1 != des['option1']: match.option1 = des['option1']; vars_changed = True
-                    if match.sku != des['sku']: match.sku = des['sku']; vars_changed = True
-                    if match.price != des['price'] and sync_price: match.price = des['price']; vars_changed = True
-                    
+                    # If single product and sku mismatch/missing, take the first one
+                    if not match and len(desired_variants) == 1 and len(existing_vars) == 1:
+                        match = existing_vars[0]
+
+                    if not match: 
+                        match = shopify.Variant({'product_id': sp.id})
+
+                    # Force update
+                    match.option1 = des['option1']
+                    match.sku = des['sku']
+                    match.price = des['price']
+                    match.weight = des['weight']
                     match.inventory_management = 'shopify'
+                    
                     final_vars.append(match)
 
-                if vars_changed or len(existing_vars) != len(final_vars):
-                    sp.variants = final_vars
-                    sp.save()
+                # Assigning final_vars replaces the list. 
+                # Shopify API will DELETE any existing variants not in this list.
+                sp.variants = final_vars
+                sp.save()
 
                 # Sync Cost
                 if sp.variants:
@@ -681,7 +671,7 @@ def sync_products_master():
                         }))
 
                 # ---------------------------
-                # IMAGE SYNC (NEW HASH LOGIC)
+                # IMAGE SYNC
                 # ---------------------------
                 if sync_images:
                      try:
@@ -714,15 +704,14 @@ def sync_products_master():
                         print(f"Image Error {sku}: {e}")
 
                 synced += 1
-                
-                # --- UPDATE DB TIMESTAMP ---
+
+                # Update DB
                 try:
                     pm = ProductMap.query.filter_by(sku=sku).first()
                     if not pm:
                         v_id = sp.variants[0].id if sp.variants else '0'
                         pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=str(v_id))
                         db.session.add(pm)
-                    
                     pm.last_synced_at = datetime.utcnow()
                     db.session.commit()
                 except: db.session.rollback()
@@ -732,6 +721,98 @@ def sync_products_master():
 
         cleanup_shopify_products(active_odoo_skus)
         log_event('Product Sync', 'Success', f"Turbo Sync Complete. Synced: {synced}, Skipped: {skipped}")
+
+def fix_variant_mess_task():
+    """
+    CLEANUP TOOL:
+    1. Checks if Odoo Product is a Pack.
+    2. If NOT a pack:
+       - Deletes any variant ending in -UNIT.
+       - Renames the remaining variant to Odoo UOM (e.g., 'Carton') or 'Outer'.
+       - Ensures Option Name is 'Format'.
+    """
+    with app.app_context():
+        if not odoo or not setup_shopify_session(): return
+        
+        log_event('Cleanup', 'Info', "Starting Strict Variant Cleanup...")
+        
+        company_id = get_config('odoo_company_id')
+        odoo_products = odoo.get_all_products(company_id)
+        # Create map for fast lookup
+        odoo_map = {p.get('default_code'): p for p in odoo_products if p.get('default_code')}
+        
+        fixed_count = 0
+        
+        page = shopify.Product.find(limit=250)
+        while page:
+            for sp in page:
+                if not sp.variants: continue
+                
+                # Identify SKU
+                sku = sp.variants[0].sku 
+                if not sku or sku not in odoo_map:
+                    # Try finding sku in other variants if first one is weird
+                    for v in sp.variants:
+                        if v.sku in odoo_map:
+                            sku = v.sku
+                            break
+                
+                if not sku or sku not in odoo_map: continue
+
+                p_data = odoo_map[sku]
+                is_pack_in_odoo = p_data.get('sh_is_secondary_unit') is True
+
+                # Determine correct name
+                correct_name = 'Outer'
+                if p_data.get('uom_id') and len(p_data['uom_id']) > 1:
+                    correct_name = p_data['uom_id'][1] # e.g. "Carton", "Box"
+
+                # === SCENARIO 1: SHOULD BE SINGLE VARIANT ===
+                if not is_pack_in_odoo:
+                    variants_to_keep = []
+                    dirty = False
+
+                    for v in sp.variants:
+                        # If it looks like a Unit variant, KILL IT
+                        if v.sku and v.sku.endswith('-UNIT'):
+                            log_event('Cleanup', 'Warning', f"Deleting extra -UNIT variant for {sku}")
+                            dirty = True
+                        else:
+                            # This is our main guy. Fix his name.
+                            if v.option1 != correct_name:
+                                v.option1 = correct_name
+                                dirty = True
+                            variants_to_keep.append(v)
+                    
+                    # If we somehow deleted EVERYTHING (shouldn't happen), keep the first one found
+                    if not variants_to_keep and sp.variants:
+                        v = sp.variants[0]
+                        v.option1 = correct_name
+                        v.sku = sku # Ensure SKU is clean
+                        variants_to_keep.append(v)
+                        dirty = True
+
+                    if dirty:
+                        sp.options = [{'name': 'Format'}] # Must set this to allow custom names
+                        sp.variants = variants_to_keep
+                        sp.save()
+                        fixed_count += 1
+                        log_event('Cleanup', 'Success', f"Fixed {sku}: Enforced Single Variant '{correct_name}'")
+
+                # === SCENARIO 2: SINGLE VARIANT BUT WRONG NAME (Default Title) ===
+                elif len(sp.variants) == 1:
+                    v = sp.variants[0]
+                    if v.option1 == 'Default Title' or v.option1 != correct_name:
+                        sp.options = [{'name': 'Format'}]
+                        v.option1 = correct_name
+                        sp.save()
+                        fixed_count += 1
+                        log_event('Cleanup', 'Success', f"Fixed Name for {sku}: Default Title -> {correct_name}")
+
+            if page.has_next_page(): page = page.next_page()
+            else: break
+            
+        log_event('Cleanup', 'Success', f"Cleanup Finished. Fixed {fixed_count} products.")
 
 def cleanup_shopify_products(odoo_active_skus):
     """
