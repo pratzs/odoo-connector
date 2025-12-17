@@ -55,26 +55,21 @@ with app.app_context():
 # --- GLOBAL LOCKS & CACHE ---
 order_processing_lock = threading.Lock()
 active_processing_ids = set()
-recent_processed_cache = {} # Stores {shopify_id: timestamp} <--- ADD THIS LINE
+recent_processed_cache = {} 
 
 # --- HELPERS ---
 def get_config(key, default=None):
-    """Safely retrieve config with strict rollback on error"""
     try:
         setting = AppSetting.query.get(key)
-        if not setting:
-            return default
-        try: 
-            return json.loads(setting.value)
-        except: 
-            return setting.value
+        if not setting: return default
+        try: return json.loads(setting.value)
+        except: return setting.value
     except Exception as e:
         print(f"Config Read Error ({key}): {e}")
-        db.session.rollback()  # <--- THIS IS REQUIRED
+        db.session.rollback()
         return default
 
 def set_config(key, value):
-    """Safely save config with rollback support"""
     try:
         setting = AppSetting.query.get(key)
         if not setting:
@@ -85,7 +80,7 @@ def set_config(key, value):
         return True
     except Exception as e:
         print(f"Config Save Error ({key}): {e}")
-        db.session.rollback()  # <--- THIS IS REQUIRED
+        db.session.rollback()
         return False
 
 def verify_shopify(data, hmac_header):
@@ -97,25 +92,14 @@ def verify_shopify(data, hmac_header):
 
 def log_event(entity, status, message):
     try:
-        log = SyncLog(
-            entity=entity, 
-            status=status, 
-            message=message, 
-            timestamp=datetime.utcnow()
-        )
+        log = SyncLog(entity=entity, status=status, message=message, timestamp=datetime.utcnow())
         db.session.add(log)
         db.session.commit()
     except Exception as e: 
         print(f"DB LOG ERROR: {e}")
-        db.session.rollback() # CRITICAL FIX
-
-def extract_id(res):
-    if isinstance(res, list) and len(res) > 0:
-        return res[0]
-    return res
+        db.session.rollback()
 
 def setup_shopify_session():
-    """Initializes the Shopify Session"""
     shop_url = os.getenv('SHOPIFY_URL')
     token = os.getenv('SHOPIFY_TOKEN')
     if not shop_url or not token: return False
@@ -123,25 +107,17 @@ def setup_shopify_session():
     shopify.ShopifyResource.activate_session(session)
     return True
 
-# --- GRAPHQL HELPERS (FIXED SKU MATCHING) ---
+# --- GRAPHQL HELPERS ---
 def find_shopify_product_by_sku(sku):
-    """
-    Finds a Shopify Product ID by SKU.
-    FIX: Now requests the SKU field back and performs an EXACT MATCH check.
-    This prevents '100' from matching '100-A' and overwriting the wrong product.
-    """
     if not setup_shopify_session(): return None
-    # Request SKU field in response to verify match
     query = """{ productVariants(first: 5, query: "sku:%s") { edges { node { sku product { legacyResourceId } } } } }""" % sku
     try:
         client = shopify.GraphQL()
         result = client.execute(query)
         data = json.loads(result)
         edges = data.get('data', {}).get('productVariants', {}).get('edges', [])
-        
         for edge in edges:
             node = edge['node']
-            # STRICT CHECK: Only return if SKU matches exactly
             if node.get('sku') == sku:
                 return node['product']['legacyResourceId']
     except Exception as e: print(f"GraphQL Error: {e}")
@@ -149,7 +125,6 @@ def find_shopify_product_by_sku(sku):
 
 def get_shopify_variant_inv_by_sku(sku):
     if not setup_shopify_session(): return None
-    # Added SKU to query here too for safety
     query = """{ productVariants(first: 5, query: "sku:%s") { edges { node { sku legacyResourceId inventoryItem { legacyResourceId } inventoryQuantity } } } }""" % sku
     try:
         client = shopify.GraphQL()
@@ -158,7 +133,7 @@ def get_shopify_variant_inv_by_sku(sku):
         edges = data.get('data', {}).get('productVariants', {}).get('edges', [])
         for edge in edges:
             node = edge['node']
-            if node.get('sku') == sku: # Strict Match
+            if node.get('sku') == sku:
                 return {
                     'variant_id': node['legacyResourceId'],
                     'inventory_item_id': node['inventoryItem']['legacyResourceId'],
@@ -170,54 +145,8 @@ def get_shopify_variant_inv_by_sku(sku):
 # --- CORE LOGIC ---
 
 def process_product_data(data):
-    """
-    Handles Shopify Product Webhooks (Update Only).
-    """
-    product_type = data.get('product_type', '')
-    cat_id = None
-    if product_type:
-        try:
-            cat_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                'product.public.category', 'search', [[['name', '=', product_type]]])
-            if cat_ids:
-                cat_id = cat_ids[0]
-            else:
-                cat_id = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                    'product.public.category', 'create', [{'name': product_type}])
-        except Exception as e:
-            print(f"Category Logic Error: {e}")
-
-    variants = data.get('variants', [])
-    processed_count = 0
-    company_id = get_config('odoo_company_id')
-    
-    for v in variants:
-        sku = v.get('sku')
-        if not sku: continue
-        product_id = odoo.search_product_by_sku(sku, company_id)
-        
-        if product_id:
-            # --- UPDATE LOGIC (Category Only) ---
-            if cat_id:
-                try:
-                    current_prod = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                        'product.product', 'read', [[product_id]], {'fields': ['public_categ_ids']})
-                    current_cat_ids = current_prod[0].get('public_categ_ids', [])
-                    if cat_id not in current_cat_ids:
-                        odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                            'product.product', 'write', [[product_id], {'public_categ_ids': [(4, cat_id)]}])
-                        log_event('Product', 'Info', f"Webhook: Updated Category for {sku} to '{product_type}'")
-                        processed_count += 1
-                except Exception as e:
-                    err_msg = str(e)
-                    if "pos.category" in err_msg or "CacheMiss" in err_msg or "KeyError" in err_msg:
-                        pass
-                    else:
-                        print(f"Webhook Update Error: {e}")
-        else:
-            pass # Skip creation from webhook
-
-    return processed_count
+    # Webhook updates handled by Master Sync for safety
+    return 0 
 
 def process_order_data(data):
     """
@@ -336,6 +265,7 @@ def process_order_data(data):
             # --- FIX: SKU CLEANER (Remove -UNIT to find product) ---
             sku = raw_sku
             is_unit_variant = False
+
             if sku.endswith('-UNIT'):
                 sku = sku.replace('-UNIT', '')
                 is_unit_variant = True
@@ -415,7 +345,7 @@ def process_order_data(data):
                 db.session.commit()
         except: pass
         return False, str(e)
-                
+
 def sync_products_master():
     """
     Odoo -> Shopify Product Sync (Turbo Mode).
@@ -445,8 +375,8 @@ def sync_products_master():
             while page:
                 for sp in page:
                     if sp.variants:
+                        # Map ALL variant SKUs to the product
                         for v in sp.variants:
-                            # Map ALL variant SKUs to the product
                             if v.sku: shopify_map[v.sku] = sp
                 if page.has_next_page(): page = page.next_page()
                 else: break
@@ -479,8 +409,7 @@ def sync_products_master():
                 print(f"Sync Progress: {index}/{total_count}...")
                 if index % 200 == 0: log_event('Product Sync', 'Info', f"Progress: {index}/{total_count}...")
 
-            # Ensure SKU is clean string
-            sku = str(p.get('default_code') or '').strip()
+            sku = p.get('default_code')
             if not sku: continue
             
             # Archive inactive
@@ -504,7 +433,7 @@ def sync_products_master():
             except: pass 
 
             # --- PROCESS PRODUCT ---
-            # Use Local UOM Map if available
+            # Use Local UOM Map if available, else fallback
             is_pack = False
             ratio = 1.0
             uom_name = 'Default Title'
@@ -568,8 +497,7 @@ def sync_products_master():
                 
                 if product_changed or not sp.id:
                     sp.save()
-                    # RELOAD to ensure we get the default variant ID created by Shopify
-                    sp = shopify.Product.find(sp.id)
+                    if not sp.id: sp = shopify.Product.find(sp.id)
 
                 # --- VARIANTS SETUP ---
                 desired_variants = []
@@ -584,16 +512,16 @@ def sync_products_master():
                 
                 desired_variants.append({
                     'option1': opt_name,
-                    'price': "{:.2f}".format(price),
+                    'price': str(price),
                     'sku': sku,
                     'weight': p.get('weight', 0)
                 })
 
                 if is_pack:
-                    unit_price = price / ratio
+                    unit_price = round(price / ratio, 2)
                     desired_variants.append({
                         'option1': 'Unit',
-                        'price': "{:.2f}".format(unit_price),
+                        'price': str(unit_price),
                         'sku': f"{sku}-UNIT",
                         'weight': float(p.get('weight', 0)) / ratio
                     })
@@ -605,11 +533,10 @@ def sync_products_master():
 
                 for des in desired_variants:
                     match = None
-                    # 1. Try Exact SKU Match
+                    # Try SKU Match
                     match = next((v for v in existing_vars if v.sku == des['sku']), None)
                     
-                    # 2. CRITICAL FIX: If no match, check for "Blank" new variants
-                    # This catches the default variant Shopify creates for new products
+                    # Try Blank Match (For new products)
                     if not match:
                         match = next((v for v in existing_vars if not v.sku or v.sku == ''), None)
 
@@ -618,8 +545,8 @@ def sync_products_master():
                     match.option1 = des['option1']
                     match.sku = des['sku']
                     
-                    # PRICE UPDATE - Ensure string format
-                    if sync_price:
+                    # PRICE UPDATE
+                    if sync_price and float(des['price']) > 0.01: 
                         match.price = des['price']
                     
                     match.weight = des['weight']
@@ -1433,7 +1360,7 @@ t.start()
 
 # --- ADD THIS MARKER ---
 print("**************************************************")
-print(">>> SYSTEM STARTUP: VERSION 5.5 - NO WEBHOOK_LOGS <<<")
+print(">>> SYSTEM STARTUP: VERSION 6.0 - FINAL FIXES <<<")
 print("**************************************************")
 
 if __name__ == '__main__':
