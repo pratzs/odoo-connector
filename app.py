@@ -405,11 +405,11 @@ def process_order_data(data):
 
 def sync_products_master():
     """
-    Odoo -> Shopify Product Sync (Strict Mode).
-    Fixes:
-    1. ONLY creates variants if 'sh_secondary_uom' is explicitly set.
-    2. Names the primary variant correctly using the Odoo UOM Name (e.g. 'Box', 'Carton').
-    3. Prevents 'false' variant names.
+    Odoo -> Shopify Product Sync (Final Version).
+    Includes:
+    1. Visual Progress Logs (Shows in Dashboard).
+    2. Crash Protection for 404 Inventory Items.
+    3. Strict UOM Logic.
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
@@ -421,7 +421,7 @@ def sync_products_master():
         log_event('Product Sync', 'Info', "Fetching Odoo products...")
         raw_odoo_products = odoo.get_all_products(company_id)
         
-        # --- DEDUPLICATION (Keep Active) ---
+        # --- DEDUPLICATION ---
         odoo_product_map = {}
         for p in raw_odoo_products:
             sku = p.get('default_code')
@@ -434,7 +434,7 @@ def sync_products_master():
                     odoo_product_map[sku] = p
         odoo_products = list(odoo_product_map.values())
 
-        # --- CACHE UOM DATA ---
+        # --- CACHE UOM ---
         uom_map = {}
         try:
             uoms = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'search_read', [[]], {'fields': ['id', 'name', 'factor_inv']})
@@ -476,8 +476,10 @@ def sync_products_master():
         log_event('Product Sync', 'Info', f"Starting Sync for {total_count} Unique SKUs...")
 
         for index, p in enumerate(odoo_products):
-            if index > 0 and index % 50 == 0: 
-                print(f"Sync Progress: {index}/{total_count}...")
+            # --- FIXED HERE: Visual Progress Logs ---
+            # Changed 'print' to 'log_event' so you see it in the dashboard
+            if index > 0 and index % 25 == 0: 
+                log_event('Product Sync', 'Info', f"Progress: {index}/{total_count} products processed...")
 
             sku = p.get('default_code')
             active_odoo_skus.add(sku)
@@ -492,43 +494,22 @@ def sync_products_master():
             # --- STRICT UOM LOGIC ---
             is_pack = False
             ratio = 1.0
-            base_price_is_pack = True # Default assumption
-            
-            # FIX 1: Get the Name directly from the product data to avoid "false"
-            # Odoo returns [id, "Name"] for Many2one fields.
+            base_price_is_pack = True 
             main_uom_name = p['uom_id'][1] if (p.get('uom_id') and len(p['uom_id']) > 1) else 'Default Title'
 
             uom_id = p.get('uom_id') 
-            sec_uom_id = p.get('sh_secondary_uom') # This is the trigger
+            sec_uom_id = p.get('sh_secondary_uom') 
 
-            # FIX 2: ONLY trigger Pack logic if Secondary UOM exists
             if sec_uom_id:
-                # We have a secondary unit, so we MUST split variants.
-                # Now we need to figure out the ratio.
-                
-                # Case A: Primary is Carton (Ratio > 1), Secondary is Unit
-                # Case B: Primary is Unit, Secondary is Carton (Ratio > 1)
-                
-                # Check Secondary Data
                 if sec_uom_id[0] in uom_map:
                     sec_data = uom_map[sec_uom_id[0]]
                     if sec_data['ratio'] > 1.0:
-                        # Secondary is the BIG unit (Carton)
-                        is_pack = True
-                        ratio = sec_data['ratio']
-                        base_price_is_pack = False # Odoo Price is Unit
-                        # The "Main" variant name should be the Unit (Primary UOM)
-                        # The "Secondary" variant will be the Carton
-                        # Wait, usually we want Variant 1 = Odoo SKU.
+                        is_pack = True; ratio = sec_data['ratio']; base_price_is_pack = False 
                     else:
-                        # Secondary is likely the Unit (Ratio 1.0)
-                        # So Primary must be the Carton
                         if uom_id and uom_id[0] in uom_map:
                             prim_data = uom_map[uom_id[0]]
                             if prim_data['ratio'] > 1.0:
-                                is_pack = True
-                                ratio = prim_data['ratio']
-                                base_price_is_pack = True # Odoo Price is Carton
+                                is_pack = True; ratio = prim_data['ratio']; base_price_is_pack = True 
             
             # Find or Create
             sp = shopify_map.get(sku)
@@ -564,13 +545,16 @@ def sync_products_master():
                      if getattr(sp, 'status', '') != target_status:
                         sp.status = target_status; product_changed = True
 
+                # --- FIXED HERE: Safer Tags Access ---
                 if sync_tags:
                     odoo_tags = odoo.get_tag_names(p.get('product_tag_ids', []))
                     if odoo_tags:
-                        current_tags = [t.strip() for t in sp.tags.split(',')] if sp.tags else []
+                        current_tag_str = getattr(sp, 'tags', '') or ''
+                        current_tags = [t.strip() for t in current_tag_str.split(',')] if current_tag_str else []
                         final_tags = list(set(current_tags + odoo_tags))
                         new_tag_str = ",".join(final_tags)
-                        if sp.tags != new_tag_str: sp.tags = new_tag_str; product_changed = True
+                        if getattr(sp, 'tags', '') != new_tag_str:
+                             sp.tags = new_tag_str; product_changed = True
 
                 if sync_meta_vendor and sp.id:
                      v_code = odoo.get_vendor_product_code(p['product_tmpl_id'][0])
@@ -595,24 +579,13 @@ def sync_products_master():
 
                 if is_pack:
                     if base_price_is_pack:
-                        unit_price = raw_price / ratio
-                        unit_cost = raw_cost / ratio
+                        unit_price = raw_price / ratio; unit_cost = raw_cost / ratio
                     else:
-                        # Swap! Base (Odoo) is Unit. We need to calculate Pack.
-                        # But wait, usually Variant 1 IS the Odoo product.
-                        # So Variant 1 = Unit, Variant 2 = Pack.
-                        # For consistency, let's keep Variant 1 as Odoo SKU.
-                        pack_price = raw_price # Actually Unit Price here
+                        pack_price = raw_price 
                         pack_cost = raw_cost
-                        unit_price = raw_price # Placeholder
-                        # Re-calc based on logic below
-                        pass
+                        unit_price = raw_price 
 
-                # --- BUILD VARIANTS ---
                 desired_variants = []
-                
-                # Variant 1: The Odoo Main SKU
-                # Name: Use main_uom_name (e.g. "Carton" or "Box")
                 v1_name = str(main_uom_name) 
                 
                 desired_variants.append({
@@ -623,15 +596,8 @@ def sync_products_master():
                     'cost': str(raw_cost)
                 })
 
-                # Variant 2: The Derived Unit (Only if is_pack)
                 if is_pack:
-                    # Logic: If Odoo is Carton, Var 2 is Unit.
-                    # If Odoo is Unit, Var 2 is Carton? 
-                    # Usually "Secondary UOM" implies the *smaller* unit if Odoo is Carton, 
-                    # or the *larger* unit if Odoo is Unit.
-                    
                     if base_price_is_pack:
-                        # Odoo = Carton. Create Unit.
                         desired_variants.append({
                             'option1': 'Unit',
                             'price': str(round(raw_price / ratio, 2)),
@@ -640,9 +606,6 @@ def sync_products_master():
                             'cost': str(round(raw_cost / ratio, 2))
                         })
                     else:
-                        # Odoo = Unit. Create Carton.
-                        # Note: This is rare in typical Odoo->Shopify setups but possible.
-                        # We name it based on the Secondary UOM Name
                         sec_name = sec_uom_id[1] if len(sec_uom_id) > 1 else 'Carton'
                         desired_variants.append({
                             'option1': sec_name,
@@ -652,11 +615,8 @@ def sync_products_master():
                             'cost': str(round(raw_cost * ratio, 2))
                         })
 
-                # Clear options if not pack
-                if not is_pack:
-                    sp.options = []
-                else:
-                    sp.options = [{'name': 'Pack Size'}]
+                if not is_pack: sp.options = []
+                else: sp.options = [{'name': 'Pack Size'}]
 
                 existing_vars = getattr(sp, 'variants', [])
                 final_variants = []
@@ -679,16 +639,20 @@ def sync_products_master():
                 sp.variants = final_variants
                 sp.save()
                 
-                # Sync Cost
+                # --- FIXED HERE: Cost Sync with 404 Handler ---
                 if sp.variants:
                     for v in sp.variants:
                         d_data = next((d for d in desired_variants if d['sku'] == v.sku), None)
                         if d_data and v.inventory_item_id:
-                            inv_item = shopify.InventoryItem.find(v.inventory_item_id)
-                            if inv_item:
-                                inv_item.cost = d_data['cost']
-                                inv_item.tracked = True
-                                inv_item.save()
+                            try:
+                                inv_item = shopify.InventoryItem.find(v.inventory_item_id)
+                                if inv_item:
+                                    inv_item.cost = d_data['cost']
+                                    inv_item.tracked = True
+                                    inv_item.save()
+                            except Exception:
+                                # Silently fail if inventory item is Not Found (404)
+                                pass 
 
                 if get_config('prod_sync_images', False) and not getattr(sp, 'images', []):
                      try:
