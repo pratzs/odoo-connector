@@ -396,7 +396,7 @@ def process_order_data(data):
 def sync_products_master():
     """
     Odoo -> Shopify Product Sync (Turbo Mode).
-    Features: Smart Skip, SKU Fixing, Pricing, and Variant Naming.
+    Features: Smart Skip, SKU Fixing, Pricing, Variant Naming, TAGS, and METAFIELDS.
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
@@ -404,9 +404,12 @@ def sync_products_master():
             return
 
         company_id = get_config('odoo_company_id')
+        
+        # 1. Fetch Odoo Products (Batch)
+        log_event('Product Sync', 'Info', "Fetching Odoo products...")
         odoo_products = odoo.get_all_products(company_id)
         
-        # Cache UOM Data {id: ratio}
+        # 2. Cache UOM Data {id: ratio}
         uom_map = {}
         try:
             uoms = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'search_read', [[]], {'fields': ['id', 'name', 'factor_inv']})
@@ -414,8 +417,8 @@ def sync_products_master():
                 uom_map[u['id']] = {'name': u['name'], 'ratio': float(u.get('factor_inv', 1.0))}
         except: pass
 
-        # Pre-fetch Shopify Data (Turbo Mode)
-        log_event('Product Sync', 'Info', "Building Shopify SKU Map (this takes ~30 seconds)...")
+        # 3. Pre-fetch Shopify Data (Turbo Mode)
+        log_event('Product Sync', 'Info', "Building Shopify SKU Map...")
         shopify_map = {}
         try:
             page = shopify.Product.find(limit=250)
@@ -431,35 +434,37 @@ def sync_products_master():
             log_event('Product Sync', 'Error', f"Failed to map Shopify: {e}")
             return
 
-        # Configs
+        # 4. Load Configs
         sync_title = get_config('prod_sync_title', True)
         sync_desc = get_config('prod_sync_desc', True)
         sync_price = get_config('prod_sync_price', True)
         sync_type = get_config('prod_sync_type', True)
         sync_vendor = get_config('prod_sync_vendor', True)
+        sync_tags = get_config('prod_sync_tags', False)
+        sync_meta_vendor = get_config('prod_sync_meta_vendor_code', False)
         auto_create = get_config('prod_auto_create', True)
+        auto_publish = get_config('prod_auto_publish', False)
 
-        # DB Map for Smart Skip
+        # 5. Smart Skip DB Map
         db_map = {}
         for pm in ProductMap.query.all():
             db_map[pm.sku] = pm.last_synced_at
 
         total_count = len(odoo_products)
-        log_event('Product Sync', 'Info', f"Starting Smart Sync for {total_count} products...")
-        
         synced = 0
         skipped = 0
         active_odoo_skus = set()
 
+        log_event('Product Sync', 'Info', f"Starting Smart Sync for {total_count} products...")
+
         for index, p in enumerate(odoo_products):
             if index > 0 and index % 50 == 0: 
                 print(f"Sync Progress: {index}/{total_count}...")
-                if index % 200 == 0: log_event('Product Sync', 'Info', f"Progress: {index}/{total_count}...")
 
             sku = p.get('default_code')
             if not sku: continue
             
-            # Archive inactive
+            # Archive inactive logic
             if not p.get('active', True):
                 if sku in shopify_map:
                     sp = shopify_map[sku]
@@ -469,7 +474,7 @@ def sync_products_master():
 
             active_odoo_skus.add(sku)
 
-            # Smart Skip (Speed Boost)
+            # Smart Skip Check
             try:
                 last_mod_str = p.get('write_date')
                 if last_mod_str and sku in db_map:
@@ -479,12 +484,11 @@ def sync_products_master():
                         skipped += 1; continue
             except: pass 
 
-            # --- PROCESS PRODUCT ---
-            # Use Local UOM Map if available, else fallback
+            # --- PREPARE DATA ---
             is_pack = False
             ratio = 1.0
-            uom_name = 'Default Title'
             
+            # UOM Logic (Carton vs Unit)
             if p.get('sh_is_secondary_unit') and p.get('uom_id'):
                 u_id = p['uom_id'][0]
                 if u_id in uom_map:
@@ -492,11 +496,9 @@ def sync_products_master():
                     if u_data['ratio'] > 1.0:
                         is_pack = True
                         ratio = u_data['ratio']
-                        uom_name = u_data['name']
             
-            # Find in Map first, then creation
+            # Find or Create Shopify Product
             sp = shopify_map.get(sku)
-            
             if not sp:
                 if not auto_create: 
                     skipped += 1; continue
@@ -505,72 +507,94 @@ def sync_products_master():
             try:
                 product_changed = False
 
-                current_title = getattr(sp, 'title', '')
-                current_body = getattr(sp, 'body_html', '')
-                current_type = getattr(sp, 'product_type', '')
-                current_vendor = getattr(sp, 'vendor', '')
-                current_status = getattr(sp, 'status', 'active')
-
-                if sync_title and current_title != p['name']:
+                # A. Basic Fields
+                if sync_title and getattr(sp, 'title', '') != p['name']:
                     sp.title = p['name']; product_changed = True
                 
                 if sync_desc:
                     odoo_desc = p.get('description_sale') or ''
-                    if (current_body or '') != odoo_desc:
+                    if getattr(sp, 'body_html', '') != odoo_desc:
                         sp.body_html = odoo_desc; product_changed = True
                 
+                # B. Product Type / Category
                 odoo_categ_ids = p.get('public_categ_ids', [])
-                if not odoo_categ_ids and current_type:
-                    try:
-                        cat_name = current_type
-                        cat_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.public.category', 'search', [[['name', '=', cat_name]]])
-                        cat_id = cat_ids[0] if cat_ids else None
-                        if not cat_id:
-                            cat_id = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.public.category', 'create', [{'name': cat_name}])
-                        odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'write', [[p['id']], {'public_categ_ids': [(4, cat_id)]}])
-                    except: pass
-                elif odoo_categ_ids and sync_type:
+                current_type = getattr(sp, 'product_type', '')
+                if odoo_categ_ids and sync_type:
                     odoo_cat_name = odoo.get_public_category_name(odoo_categ_ids)
                     if odoo_cat_name and current_type != odoo_cat_name:
                         sp.product_type = odoo_cat_name; product_changed = True
 
+                # C. Vendor
                 if sync_vendor:
                     target_vendor = p.get('name', '').split()[0] if p.get('name') else 'Worthy'
-                    if current_vendor != target_vendor:
+                    if getattr(sp, 'vendor', '') != target_vendor:
                         sp.vendor = target_vendor; product_changed = True
 
-                if current_status != 'active':
-                    sp.status = 'active'; product_changed = True
-                
+                # D. Status (Active/Draft)
+                target_status = 'active' if auto_publish else 'draft'
+                # Only force status if we are creating new, or if product was archived
+                if not sp.id or getattr(sp, 'status', '') == 'archived':
+                     if getattr(sp, 'status', '') != target_status:
+                        sp.status = target_status; product_changed = True
+
+                # E. Tags (New!)
+                if sync_tags:
+                    odoo_tags = odoo.get_tag_names(p.get('product_tag_ids', []))
+                    if odoo_tags:
+                        current_tags = [t.strip() for t in sp.tags.split(',')] if sp.tags else []
+                        # Merge without duplicates
+                        final_tags = list(set(current_tags + odoo_tags))
+                        new_tag_str = ",".join(final_tags)
+                        if sp.tags != new_tag_str:
+                            sp.tags = new_tag_str; product_changed = True
+
+                # F. Vendor Code Metafield (New!)
+                if sync_meta_vendor and sp.id: 
+                    # Note: Metafields usually require an existing product ID
+                    v_code = odoo.get_vendor_product_code(p['product_tmpl_id'][0])
+                    if v_code:
+                        # We append this to a list to save later, or save immediately
+                        # Simplest way for Shopify API is saving the product with metafields attached
+                        sp.add_metafield(shopify.Metafield({
+                            'key': 'vendor_product_code',
+                            'value': v_code,
+                            'type': 'single_line_text_field',
+                            'namespace': 'custom'
+                        }))
+                        product_changed = True
+
+                # Save parent product if changes pending
                 if product_changed or not sp.id:
                     sp.save()
-                    if not sp.id: sp = shopify.Product.find(sp.id)
+                    if not sp.id: sp = shopify.Product.find(sp.id) # Reload to get ID
 
                 # --- VARIANTS SETUP ---
                 desired_variants = []
                 price = float(p.get('list_price', 0.0))
-                
-                # Dynamic Carton Name
-                main_uom_name = 'Carton'
-                if p.get('uom_id'):
-                    main_uom_name = p['uom_id'][1] 
+                cost = float(p.get('standard_price', 0.0)) # Cost Price
 
+                # Variant 1: Carton/Main
+                main_uom_name = p['uom_id'][1] if p.get('uom_id') else 'Default Title'
                 opt_name = main_uom_name if is_pack else 'Default Title'
                 
                 desired_variants.append({
                     'option1': opt_name,
                     'price': str(price),
                     'sku': sku,
-                    'weight': p.get('weight', 0)
+                    'weight': p.get('weight', 0),
+                    'cost': str(cost)
                 })
 
+                # Variant 2: Unit (if split)
                 if is_pack:
                     unit_price = round(price / ratio, 2)
+                    unit_cost = round(cost / ratio, 2)
                     desired_variants.append({
                         'option1': 'Unit',
                         'price': str(unit_price),
                         'sku': f"{sku}-UNIT",
-                        'weight': float(p.get('weight', 0)) / ratio
+                        'weight': float(p.get('weight', 0)) / ratio,
+                        'cost': str(unit_cost)
                     })
 
                 sp.options = [{'name': 'Pack Size'}] if is_pack else []
@@ -582,31 +606,41 @@ def sync_products_master():
                     match = None
                     # Try SKU Match
                     match = next((v for v in existing_vars if v.sku == des['sku']), None)
-                    
-                    # Try Blank Match (For new products)
-                    if not match:
-                        match = next((v for v in existing_vars if not v.sku or v.sku == ''), None)
-
+                    # Try Blank Match
+                    if not match: match = next((v for v in existing_vars if not v.sku), None)
                     if not match: match = shopify.Variant({'product_id': sp.id})
                     
                     match.option1 = des['option1']
                     match.sku = des['sku']
+                    match.weight = des['weight']
+                    match.barcode = str(p.get('barcode', '') or '')
                     
-                    # PRICE UPDATE
+                    # Ensure Inventory Tracking is ON
+                    match.inventory_management = 'shopify' 
+                    
+                    # Sync Price
                     if sync_price and float(des['price']) > 0.01: 
                         match.price = des['price']
                     
-                    match.weight = des['weight']
-                    match.inventory_management = 'shopify' # Force Tracking
-                    
-                    if des['sku'] == sku:
-                        match.barcode = str(p.get('barcode', '') or '')
-
                     final_variants.append(match)
 
                 sp.variants = final_variants
                 sp.save()
-                
+
+                # --- COST PRICE SYNC (InventoryItem) ---
+                # We must update cost on the InventoryItem, not the Variant
+                if sp.variants:
+                    for v in sp.variants:
+                        # Find matching desired data for cost
+                        d_data = next((d for d in desired_variants if d['sku'] == v.sku), None)
+                        if d_data and v.inventory_item_id:
+                            inv_item = shopify.InventoryItem.find(v.inventory_item_id)
+                            if inv_item:
+                                inv_item.cost = d_data['cost']
+                                inv_item.tracked = True # Force tracking
+                                inv_item.save()
+
+                # --- IMAGE SYNC ---
                 if get_config('prod_sync_images', False) and not getattr(sp, 'images', []):
                     try:
                         img_data = odoo.get_product_image(p['id'])
