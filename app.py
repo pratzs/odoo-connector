@@ -42,9 +42,15 @@ if database_url:
 
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-# --- FIX: Disable Prepared Statements for Supabase/pg8000 Compatibility in Threads ---
+
+# --- FIX: SSL Context for Supabase/Render ---
+# Create a relaxed SSL context that accepts self-signed certificates
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    "connect_args": {"ssl_context": True} 
+    "connect_args": {"ssl_context": ctx} 
 }
 
 SHOPIFY_LOCATION_ID = int(os.getenv('SHOPIFY_WAREHOUSE_ID', '0'))
