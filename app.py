@@ -50,10 +50,7 @@ try:
     }
 except: pass
 
-SHOPIFY_LOCATION_ID = int(os.getenv('SHOPIFY_WAREHOUSE_ID', '0'))import xmlrpc.client
-from sqlalchemy import text
-import ssl
-import gc 
+SHOPIFY_LOCATION_ID = int(os.getenv('SHOPIFY_WAREHOUSE_ID', '0'))
 
 # --- FIX: Explicit FulfillmentOrder Import ---
 try:
