@@ -145,8 +145,55 @@ def get_shopify_variant_inv_by_sku(sku):
 # --- CORE LOGIC ---
 
 def process_product_data(data):
-    # Webhook updates handled by Master Sync for safety
-    return 0 
+    """
+    Handles Shopify Product Webhooks (Update Only).
+    Restored: Updates Odoo Category based on Shopify Product Type.
+    """
+    product_type = data.get('product_type', '')
+    cat_id = None
+    if product_type:
+        try:
+            cat_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'product.public.category', 'search', [[['name', '=', product_type]]])
+            if cat_ids:
+                cat_id = cat_ids[0]
+            else:
+                cat_id = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                    'product.public.category', 'create', [{'name': product_type}])
+        except Exception as e:
+            print(f"Category Logic Error: {e}")
+
+    variants = data.get('variants', [])
+    processed_count = 0
+    company_id = get_config('odoo_company_id')
+    
+    for v in variants:
+        sku = v.get('sku')
+        if not sku: continue
+        product_id = odoo.search_product_by_sku(sku, company_id)
+        
+        if product_id:
+            # --- UPDATE LOGIC (Category Only) ---
+            if cat_id:
+                try:
+                    current_prod = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                        'product.product', 'read', [[product_id]], {'fields': ['public_categ_ids']})
+                    current_cat_ids = current_prod[0].get('public_categ_ids', [])
+                    if cat_id not in current_cat_ids:
+                        odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                            'product.product', 'write', [[product_id], {'public_categ_ids': [(4, cat_id)]}])
+                        log_event('Product', 'Info', f"Webhook: Updated Category for {sku} to '{product_type}'")
+                        processed_count += 1
+                except Exception as e:
+                    err_msg = str(e)
+                    if "pos.category" in err_msg or "CacheMiss" in err_msg or "KeyError" in err_msg:
+                        pass
+                    else:
+                        print(f"Webhook Update Error: {e}")
+        else:
+            pass # Skip creation from webhook
+
+    return processed_count
 
 def process_order_data(data):
     """
