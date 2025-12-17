@@ -450,7 +450,8 @@ def process_order_data(data):
 
 def sync_products_master():
     """
-    Odoo -> Shopify Product Sync (v9.3 - Correct Simple Product Logic).
+    Odoo -> Shopify Product Sync (v9.4 - Memory Optimized).
+    Fetches specific fields only. Avoids downloading images in the main loop.
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
@@ -458,10 +459,34 @@ def sync_products_master():
             return
 
         company_id = get_config('odoo_company_id')
-        log_event('Product Sync', 'Info', "Fetching Odoo products...")
-        raw_odoo_products = odoo.get_all_products(company_id)
         
-        # 1. Deduplication
+        # --- 1. OPTIMIZED FETCH (Specify Fields) ---
+        log_event('Product Sync', 'Info', "Fetching Odoo product data (Lightweight)...")
+        
+        domain = [['type', 'in', ['product', 'consu']]]
+        if company_id: domain.append(['company_id', '=', int(company_id)])
+        
+        # Explicitly ask ONLY for these fields. This skips 'image_1920' which causes the crash/lag.
+        fields_to_fetch = [
+            'default_code', 'name', 'list_price', 'standard_price', 'weight', 
+            'active', 'write_date', 'uom_id', 'sh_is_secondary_unit', 
+            'sh_secondary_uom', 'public_categ_ids', 'product_tag_ids', 
+            'description_sale', 'product_tmpl_id'
+        ]
+        
+        try:
+            raw_odoo_products = odoo.models.execute_kw(
+                odoo.db, odoo.uid, odoo.password,
+                'product.product', 'search_read', [domain], 
+                {'fields': fields_to_fetch}
+            )
+        except Exception as e:
+            log_event('Product Sync', 'Error', f"Odoo Fetch Failed: {e}")
+            return
+
+        log_event('Product Sync', 'Info', f"Fetched {len(raw_odoo_products)} products. Processing...")
+
+        # --- 2. Deduplication ---
         odoo_product_map = {}
         for p in raw_odoo_products:
             sku = p.get('default_code')
@@ -473,8 +498,7 @@ def sync_products_master():
                     odoo_product_map[sku] = p
         odoo_products = list(odoo_product_map.values())
 
-        # 2. Shopify Map
-        log_event('Product Sync', 'Info', "Building Shopify SKU Map...")
+        # --- 3. Shopify Map ---
         shopify_map = {}
         try:
             page = shopify.Product.find(limit=250)
@@ -487,7 +511,7 @@ def sync_products_master():
                 else: break
         except Exception as e: return
 
-        # 3. UOM Cache
+        # --- 4. UOM Cache ---
         uom_map = {}
         try:
             uoms = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'search_read', [[]], {'fields': ['id', 'name', 'factor_inv']})
@@ -514,9 +538,11 @@ def sync_products_master():
                 if pm.sku: db_map[pm.sku] = {'date': pm.last_synced_at, 'hash': pm.image_hash}
         except: pass
 
-        log_event('Product Sync', 'Info', f"Starting Sync for {len(odoo_products)} SKUs...")
+        for index, p in enumerate(odoo_products):
+            # Log progress every 50 items so you know it's not stuck
+            if index > 0 and index % 50 == 0:
+                log_event('Product Sync', 'Info', f"Processed {index}/{len(odoo_products)}...")
 
-        for p in odoo_products:
             sku = p.get('default_code')
             if not p.get('active', True): continue 
 
@@ -531,9 +557,7 @@ def sync_products_master():
                         continue
                 except: pass
 
-            # ---------------------------
-            # STRICT VARIANT LOGIC
-            # ---------------------------
+            # --- STRICT VARIANT LOGIC ---
             is_pack = False
             ratio = 1.0
             
@@ -560,17 +584,17 @@ def sync_products_master():
             
             desired_variants = []
 
-            # === SCENARIO 1: SIMPLE PRODUCT (NO VARIANTS) ===
+            # === SCENARIO 1: SIMPLE PRODUCT ===
             if not is_pack:
                 desired_variants.append({
-                    'option1': 'Default Title', # MAGIC VALUE FOR NO VARIANTS
+                    'option1': 'Default Title',
                     'price': str(raw_price),
                     'sku': sku,
                     'weight': p.get('weight', 0),
                     'cost': str(raw_cost)
                 })
 
-            # === SCENARIO 2: PACK PRODUCT (VARIANTS) ===
+            # === SCENARIO 2: PACK PRODUCT ===
             else:
                 desired_variants.append({
                     'option1': main_name, 
@@ -595,7 +619,9 @@ def sync_products_master():
             try:
                 # NEW
                 if not sp:
-                    if not auto_create: continue
+                    if not auto_create: 
+                        skipped += 1
+                        continue
                     sp = shopify.Product()
                     sp.title = p['name']
                     sp.vendor = 'Worthy'
@@ -603,7 +629,6 @@ def sync_products_master():
                     sp.status = 'active' if auto_publish else 'draft'
                     
                     if is_pack: sp.options = [{'name': 'Format'}]
-                    # else: LEAVE OPTIONS EMPTY for Simple Product
 
                     if sync_tags:
                         odoo_tags = odoo.get_tag_names(p.get('product_tag_ids', []))
@@ -620,13 +645,11 @@ def sync_products_master():
                         if not sp.options or sp.options[0].name == 'Title':
                             sp.options = [{'name': 'Format'}]; changed = True
                     else:
-                        # Convert back to Simple Product -> Clear Options
                         if sp.options and sp.options[0].name != 'Title':
                             sp.options = []; changed = True
 
                     if changed: sp.save()
 
-                # VARIANTS SYNC
                 existing_vars = getattr(sp, 'variants', [])
                 final_vars = []
                 
@@ -660,35 +683,44 @@ def sync_products_master():
                                     inv_item.save()
                             except: pass
 
-                # Metafields & Images (Standard Logic)
+                # Sync Metafield
                 if sync_meta_vendor:
                      v_code = odoo.get_vendor_product_code(p['product_tmpl_id'][0])
                      if v_code:
                         sp.add_metafield(shopify.Metafield({'key': 'vendor_product_code', 'value': v_code, 'type': 'single_line_text_field', 'namespace': 'custom'}))
 
+                # Image Sync (Separated to avoid blocking)
                 if sync_images:
                      try:
-                        img_data = odoo.get_product_image(p['id'])
-                        if img_data:
-                            if isinstance(img_data, bytes): img_data_str = img_data.decode('utf-8')
-                            else: img_data_str = img_data
-                            current_hash = hashlib.md5(img_data_str.encode('utf-8')).hexdigest()
-                            stored_hash = db_map.get(sku, {}).get('hash')
-                            shopify_has_images = True if getattr(sp, 'images', []) else False
-                            if (current_hash != stored_hash) or (not shopify_has_images):
-                                sp.images = []; sp.save()
-                                image = shopify.Image(prefix_options={'product_id': sp.id})
-                                image.attachment = img_data_str
-                                image.save()
-                                try:
-                                    pm = ProductMap.query.filter_by(sku=sku).first()
-                                    if pm: pm.image_hash = current_hash; db.session.commit()
-                                except: pass
-                     except: pass
+                        # Only fetch image if we really need to (saves bandwidth)
+                        stored_hash = db_map.get(sku, {}).get('hash')
+                        shopify_has_images = True if getattr(sp, 'images', []) else False
+                        
+                        if not shopify_has_images or not stored_hash:
+                            img_data = odoo.get_product_image(p['id'])
+                            if img_data:
+                                if isinstance(img_data, bytes): img_data_str = img_data.decode('utf-8')
+                                else: img_data_str = img_data
+                                current_hash = hashlib.md5(img_data_str.encode('utf-8')).hexdigest()
+                                
+                                if (current_hash != stored_hash) or (not shopify_has_images):
+                                    sp.images = [] 
+                                    sp.save()
+                                    image = shopify.Image(prefix_options={'product_id': sp.id})
+                                    image.attachment = img_data_str
+                                    image.save()
+                                    
+                                    try:
+                                        pm = ProductMap.query.filter_by(sku=sku).first()
+                                        if pm: 
+                                            pm.image_hash = current_hash
+                                            db.session.commit()
+                                    except: pass
+                     except Exception as e: pass
 
                 synced += 1
 
-                # DB Timestamp
+                # Update DB
                 try:
                     pm = ProductMap.query.filter_by(sku=sku).first()
                     if not pm:
