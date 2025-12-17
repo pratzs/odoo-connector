@@ -395,11 +395,11 @@ def process_order_data(data):
 
 def sync_products_master():
     """
-    Odoo -> Shopify Product Sync (Fixed UOM Logic).
-    Updates:
-    1. Checks 'sh_secondary_uom' if 'uom_id' is just a Unit.
-    2. Correctly calculates prices whether Odoo price is for the Unit OR the Carton.
-    3. Safe Deduplication & Cleanup maintained.
+    Odoo -> Shopify Product Sync (Strict Mode).
+    Fixes:
+    1. ONLY creates variants if 'sh_secondary_uom' is explicitly set.
+    2. Names the primary variant correctly using the Odoo UOM Name (e.g. 'Box', 'Carton').
+    3. Prevents 'false' variant names.
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
@@ -411,7 +411,7 @@ def sync_products_master():
         log_event('Product Sync', 'Info', "Fetching Odoo products...")
         raw_odoo_products = odoo.get_all_products(company_id)
         
-        # --- DEDUPLICATION ---
+        # --- DEDUPLICATION (Keep Active) ---
         odoo_product_map = {}
         for p in raw_odoo_products:
             sku = p.get('default_code')
@@ -448,7 +448,7 @@ def sync_products_master():
             log_event('Product Sync', 'Error', f"Failed to map Shopify: {e}")
             return
 
-        # Load Configs
+        # Configs
         sync_title = get_config('prod_sync_title', True)
         sync_desc = get_config('prod_sync_desc', True)
         sync_price = get_config('prod_sync_price', True)
@@ -472,7 +472,6 @@ def sync_products_master():
             sku = p.get('default_code')
             active_odoo_skus.add(sku)
 
-            # Archive inactive logic
             if not p.get('active', True):
                 if sku in shopify_map:
                     sp = shopify_map[sku]
@@ -480,33 +479,47 @@ def sync_products_master():
                         sp.status = 'archived'; sp.save()
                 continue 
 
-            # --- SMART UOM DETECTION (The Fix) ---
+            # --- STRICT UOM LOGIC ---
             is_pack = False
             ratio = 1.0
-            base_price_is_pack = True # Assume Odoo price is for the big unit
-            main_uom_name = 'Default Title'
+            base_price_is_pack = True # Default assumption
+            
+            # FIX 1: Get the Name directly from the product data to avoid "false"
+            # Odoo returns [id, "Name"] for Many2one fields.
+            main_uom_name = p['uom_id'][1] if (p.get('uom_id') and len(p['uom_id']) > 1) else 'Default Title'
 
-            uom_id = p.get('uom_id') # [id, name]
-            sec_uom_id = p.get('sh_secondary_uom') # [id, name]
+            uom_id = p.get('uom_id') 
+            sec_uom_id = p.get('sh_secondary_uom') # This is the trigger
 
-            # 1. Check Primary UOM (e.g. Carton 12)
-            if uom_id and uom_id[0] in uom_map:
-                u_data = uom_map[uom_id[0]]
-                if u_data['ratio'] > 1.0:
-                    is_pack = True
-                    ratio = u_data['ratio']
-                    main_uom_name = u_data['name']
-                    base_price_is_pack = True
-
-            # 2. If Primary failed, Check Secondary UOM (e.g. Primary=Unit, Secondary=Carton 12)
-            if not is_pack and sec_uom_id and sec_uom_id[0] in uom_map:
-                u_data = uom_map[sec_uom_id[0]]
-                if u_data['ratio'] > 1.0:
-                    is_pack = True
-                    ratio = u_data['ratio']
-                    main_uom_name = u_data['name']
-                    base_price_is_pack = False # Odoo Price is for the SMALL unit
-
+            # FIX 2: ONLY trigger Pack logic if Secondary UOM exists
+            if sec_uom_id:
+                # We have a secondary unit, so we MUST split variants.
+                # Now we need to figure out the ratio.
+                
+                # Case A: Primary is Carton (Ratio > 1), Secondary is Unit
+                # Case B: Primary is Unit, Secondary is Carton (Ratio > 1)
+                
+                # Check Secondary Data
+                if sec_uom_id[0] in uom_map:
+                    sec_data = uom_map[sec_uom_id[0]]
+                    if sec_data['ratio'] > 1.0:
+                        # Secondary is the BIG unit (Carton)
+                        is_pack = True
+                        ratio = sec_data['ratio']
+                        base_price_is_pack = False # Odoo Price is Unit
+                        # The "Main" variant name should be the Unit (Primary UOM)
+                        # The "Secondary" variant will be the Carton
+                        # Wait, usually we want Variant 1 = Odoo SKU.
+                    else:
+                        # Secondary is likely the Unit (Ratio 1.0)
+                        # So Primary must be the Carton
+                        if uom_id and uom_id[0] in uom_map:
+                            prim_data = uom_map[uom_id[0]]
+                            if prim_data['ratio'] > 1.0:
+                                is_pack = True
+                                ratio = prim_data['ratio']
+                                base_price_is_pack = True # Odoo Price is Carton
+            
             # Find or Create
             sp = shopify_map.get(sku)
             if not sp:
@@ -516,7 +529,6 @@ def sync_products_master():
             try:
                 product_changed = False
                 
-                # Basic Fields
                 if sync_title and getattr(sp, 'title', '') != p['name']:
                     sp.title = p['name']; product_changed = True
                 
@@ -542,7 +554,6 @@ def sync_products_master():
                      if getattr(sp, 'status', '') != target_status:
                         sp.status = target_status; product_changed = True
 
-                # Tags
                 if sync_tags:
                     odoo_tags = odoo.get_tag_names(p.get('product_tag_ids', []))
                     if odoo_tags:
@@ -563,61 +574,80 @@ def sync_products_master():
                     sp.save()
                     if not sp.id: sp = shopify.Product.find(sp.id)
 
-                # --- CALCULATE PRICES & VARIANTS ---
+                # --- CALCULATE PRICES ---
                 raw_price = float(p.get('list_price', 0.0))
                 raw_cost = float(p.get('standard_price', 0.0))
                 
-                pack_price = 0.0
+                pack_price = raw_price
+                pack_cost = raw_cost
                 unit_price = 0.0
-                pack_cost = 0.0
                 unit_cost = 0.0
 
                 if is_pack:
                     if base_price_is_pack:
-                        # Odoo Price = Carton Price
-                        pack_price = raw_price
                         unit_price = raw_price / ratio
-                        pack_cost = raw_cost
                         unit_cost = raw_cost / ratio
                     else:
-                        # Odoo Price = Unit Price (but Secondary UOM is Carton)
-                        pack_price = raw_price * ratio
-                        unit_price = raw_price
-                        pack_cost = raw_cost * ratio
-                        unit_cost = raw_cost
-                else:
-                    # Single Unit Product
-                    pack_price = raw_price
-                    pack_cost = raw_cost
+                        # Swap! Base (Odoo) is Unit. We need to calculate Pack.
+                        # But wait, usually Variant 1 IS the Odoo product.
+                        # So Variant 1 = Unit, Variant 2 = Pack.
+                        # For consistency, let's keep Variant 1 as Odoo SKU.
+                        pack_price = raw_price # Actually Unit Price here
+                        pack_cost = raw_cost
+                        unit_price = raw_price # Placeholder
+                        # Re-calc based on logic below
+                        pass
 
-                # Build Variants
+                # --- BUILD VARIANTS ---
                 desired_variants = []
-                opt_name = main_uom_name if is_pack else 'Default Title'
-
-                # 1. Main Variant (The Odoo SKU)
-                # If base_price_is_pack=False, this SKU represents the UNIT in Odoo.
-                # However, usually the main SKU in Shopify is the Carton.
-                # Let's assume the SKU p['default_code'] matches the PACK size if is_pack is True?
-                # Actually, safe bet: Map SKU to Option 1.
+                
+                # Variant 1: The Odoo Main SKU
+                # Name: Use main_uom_name (e.g. "Carton" or "Box")
+                v1_name = str(main_uom_name) 
+                
                 desired_variants.append({
-                    'option1': opt_name, 
-                    'price': str(round(pack_price, 2)), 
+                    'option1': v1_name if is_pack else 'Default Title',
+                    'price': str(raw_price),
                     'sku': sku,
-                    'weight': p.get('weight', 0), 
-                    'cost': str(round(pack_cost, 2))
+                    'weight': p.get('weight', 0),
+                    'cost': str(raw_cost)
                 })
 
-                # 2. Unit Variant (Split)
+                # Variant 2: The Derived Unit (Only if is_pack)
                 if is_pack:
-                    desired_variants.append({
-                        'option1': 'Unit', 
-                        'price': str(round(unit_price, 2)), 
-                        'sku': f"{sku}-UNIT",
-                        'weight': float(p.get('weight', 0)) / ratio, 
-                        'cost': str(round(unit_cost, 2))
-                    })
+                    # Logic: If Odoo is Carton, Var 2 is Unit.
+                    # If Odoo is Unit, Var 2 is Carton? 
+                    # Usually "Secondary UOM" implies the *smaller* unit if Odoo is Carton, 
+                    # or the *larger* unit if Odoo is Unit.
+                    
+                    if base_price_is_pack:
+                        # Odoo = Carton. Create Unit.
+                        desired_variants.append({
+                            'option1': 'Unit',
+                            'price': str(round(raw_price / ratio, 2)),
+                            'sku': f"{sku}-UNIT",
+                            'weight': float(p.get('weight', 0)) / ratio,
+                            'cost': str(round(raw_cost / ratio, 2))
+                        })
+                    else:
+                        # Odoo = Unit. Create Carton.
+                        # Note: This is rare in typical Odoo->Shopify setups but possible.
+                        # We name it based on the Secondary UOM Name
+                        sec_name = sec_uom_id[1] if len(sec_uom_id) > 1 else 'Carton'
+                        desired_variants.append({
+                            'option1': sec_name,
+                            'price': str(round(raw_price * ratio, 2)),
+                            'sku': f"{sku}-{sec_name.upper().replace(' ','')}",
+                            'weight': float(p.get('weight', 0)) * ratio,
+                            'cost': str(round(raw_cost * ratio, 2))
+                        })
 
-                sp.options = [{'name': 'Pack Size'}] if is_pack else []
+                # Clear options if not pack
+                if not is_pack:
+                    sp.options = []
+                else:
+                    sp.options = [{'name': 'Pack Size'}]
+
                 existing_vars = getattr(sp, 'variants', [])
                 final_variants = []
 
@@ -638,8 +668,8 @@ def sync_products_master():
 
                 sp.variants = final_variants
                 sp.save()
-
-                # Sync Cost (InventoryItem)
+                
+                # Sync Cost
                 if sp.variants:
                     for v in sp.variants:
                         d_data = next((d for d in desired_variants if d['sku'] == v.sku), None)
@@ -650,7 +680,6 @@ def sync_products_master():
                                 inv_item.tracked = True
                                 inv_item.save()
 
-                # Sync Image
                 if get_config('prod_sync_images', False) and not getattr(sp, 'images', []):
                      try:
                         img_data = odoo.get_product_image(p['id'])
