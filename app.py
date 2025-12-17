@@ -39,6 +39,10 @@ if database_url:
 
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+# --- FIX: Disable Prepared Statements for Supabase/pg8000 Compatibility in Threads ---
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    "connect_args": {"ssl_context": True} 
+}
 
 SHOPIFY_LOCATION_ID = int(os.getenv('SHOPIFY_WAREHOUSE_ID', '0'))
 
@@ -1542,14 +1546,14 @@ t.start()
 
 def sync_images_only_manual():
     """
-    FAST Image Sync:
+    THREAD-SAFE Image Sync:
     1. Maps Shopify Images via GraphQL (Instant).
-    2. Checks Odoo Images in Parallel (5 Threads).
+    2. Calculates Hashes in Parallel (CPU Bound).
+    3. Writes to DB in Main Thread (IO/DB Bound) to avoid pg8000 errors.
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): return
         
-        # 1. Build Shopify Map (SKU -> {id, has_images}) using GraphQL
         log_event('Image Sync', 'Info', "Mapping Shopify Products...")
         shopify_map = {} 
         try:
@@ -1571,14 +1575,17 @@ def sync_images_only_manual():
             log_event('Image Sync', 'Error', f"GraphQL Map Failed: {e}")
             return
 
-        # 2. Get Odoo Products
         company_id = get_config('odoo_company_id')
         odoo_products = odoo.get_all_products(company_id)
         
-        # 3. Get DB Hashes
-        db_hashes = {pm.sku: pm.image_hash for pm in ProductMap.query.all() if pm.sku}
+        # Get DB Hashes safely
+        db_hashes = {}
+        try:
+            for pm in ProductMap.query.all():
+                if pm.sku: db_hashes[pm.sku] = pm.image_hash
+        except: pass
 
-        # 4. Worker Function
+        # Worker: Only fetch & Hash (No DB Write)
         def process_image(p):
             sku = p.get('default_code')
             if not sku or sku not in shopify_map: return None
@@ -1599,33 +1606,40 @@ def sync_images_only_manual():
             except: pass
             return None
 
-        # 5. Execute in Parallel
-        log_event('Image Sync', 'Info', "Checking images in parallel...")
-        updates = 0
+        log_event('Image Sync', 'Info', "Calculating Hashes in Parallel...")
+        
+        # Parallel Fetch
+        results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             futures = [executor.submit(process_image, p) for p in odoo_products]
             for future in concurrent.futures.as_completed(futures):
                 res = future.result()
-                if res:
-                    sku, oid, sid, img_str, h = res
-                    try:
-                        sp = shopify.Product.find(sid)
-                        sp.images = []
-                        sp.save()
-                        
-                        img = shopify.Image(prefix_options={'product_id': sp.id})
-                        img.attachment = img_str
-                        img.save()
-                        
-                        # Update DB
-                        pm = ProductMap.query.filter_by(sku=sku).first()
-                        if not pm: pm = ProductMap(sku=sku, odoo_product_id=oid, shopify_variant_id='0')
-                        pm.image_hash = h
-                        db.session.commit()
-                        updates += 1
-                        print(f"Updated Image: {sku}")
-                    except Exception as e:
-                        print(f"Failed update {sku}: {e}")
+                if res: results.append(res)
+
+        log_event('Image Sync', 'Info', f"Found {len(results)} images to update. Uploading...")
+
+        # Sequential Write (Safe for DB)
+        updates = 0
+        for sku, oid, sid, img_str, h in results:
+            try:
+                sp = shopify.Product.find(sid)
+                sp.images = []
+                sp.save()
+                
+                img = shopify.Image(prefix_options={'product_id': sp.id})
+                img.attachment = img_str
+                img.save()
+                
+                # DB Write in main thread = No Crash
+                pm = ProductMap.query.filter_by(sku=sku).first()
+                if not pm: pm = ProductMap(sku=sku, odoo_product_id=oid, shopify_variant_id='0')
+                pm.image_hash = h
+                db.session.commit()
+                updates += 1
+                print(f"Updated Image: {sku}")
+            except Exception as e:
+                print(f"Failed update {sku}: {e}")
+                db.session.rollback()
 
         log_event('Image Sync', 'Success', f"Fast Sync: Updated {updates} images.")
 
