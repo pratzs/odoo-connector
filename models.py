@@ -10,6 +10,8 @@ class ProductMap(db.Model):
     sku = db.Column(db.String(50), index=True)
     last_synced_at = db.Column(db.DateTime, default=datetime.utcnow)
 
+    image_hash = db.Column(db.String(32), nullable=True)
+
 class CustomerMap(db.Model):
     __tablename__ = 'customer_map'
     shopify_customer_id = db.Column(db.String(50), primary_key=True)
