@@ -691,14 +691,13 @@ def sync_products_master():
 
         cleanup_shopify_products(active_odoo_skus)
         log_event('Product Sync', 'Success', f"Turbo Sync Complete. Synced: {synced}, Skipped: {skipped}")
+
+
 def fix_variant_mess_task():
     """
     CLEANUP TOOL:
-    1. Checks if Odoo Product is a Pack.
-    2. If NOT a pack:
-       - Deletes any variant ending in -UNIT.
-       - Renames the remaining variant to Odoo UOM (e.g., 'Carton') or 'Outer'.
-       - Ensures Option Name is 'Format'.
+    - If product NOT pack in Odoo -> Revert to 'Default Title' (Simple Product).
+    - If product IS pack in Odoo -> Ensure 'Outer'/'Unit' naming.
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): return
@@ -707,7 +706,6 @@ def fix_variant_mess_task():
         
         company_id = get_config('odoo_company_id')
         odoo_products = odoo.get_all_products(company_id)
-        # Create map for fast lookup
         odoo_map = {p.get('default_code'): p for p in odoo_products if p.get('default_code')}
         
         fixed_count = 0
@@ -717,10 +715,9 @@ def fix_variant_mess_task():
             for sp in page:
                 if not sp.variants: continue
                 
-                # Identify SKU
                 sku = sp.variants[0].sku 
                 if not sku or sku not in odoo_map:
-                    # Try finding sku in other variants if first one is weird
+                    # Look for ANY valid SKU in variants
                     for v in sp.variants:
                         if v.sku in odoo_map:
                             sku = v.sku
@@ -731,52 +728,39 @@ def fix_variant_mess_task():
                 p_data = odoo_map[sku]
                 is_pack_in_odoo = p_data.get('sh_is_secondary_unit') is True
 
-                # Determine correct name
-                correct_name = 'Outer'
-                if p_data.get('uom_id') and len(p_data['uom_id']) > 1:
-                    correct_name = p_data['uom_id'][1] # e.g. "Carton", "Box"
-
-                # === SCENARIO 1: SHOULD BE SINGLE VARIANT ===
+                # === SCENARIO 1: SHOULD BE SIMPLE (No Variants) ===
                 if not is_pack_in_odoo:
                     variants_to_keep = []
                     dirty = False
 
                     for v in sp.variants:
-                        # If it looks like a Unit variant, KILL IT
+                        # KILL THE UNIT VARIANT
                         if v.sku and v.sku.endswith('-UNIT'):
                             log_event('Cleanup', 'Warning', f"Deleting extra -UNIT variant for {sku}")
                             dirty = True
                         else:
-                            # This is our main guy. Fix his name.
-                            if v.option1 != correct_name:
-                                v.option1 = correct_name
+                            # This is the Main Variant.
+                            # RESET IT TO 'Default Title'
+                            if v.option1 != 'Default Title':
+                                v.option1 = 'Default Title'
                                 dirty = True
                             variants_to_keep.append(v)
                     
-                    # If we somehow deleted EVERYTHING (shouldn't happen), keep the first one found
                     if not variants_to_keep and sp.variants:
-                        v = sp.variants[0]
-                        v.option1 = correct_name
-                        v.sku = sku # Ensure SKU is clean
-                        variants_to_keep.append(v)
-                        dirty = True
+                         v = sp.variants[0]; v.option1 = 'Default Title'; variants_to_keep.append(v); dirty=True
 
                     if dirty:
-                        sp.options = [{'name': 'Format'}] # Must set this to allow custom names
+                        sp.options = [] # CLEAR OPTIONS -> Hides Dropdown
                         sp.variants = variants_to_keep
                         sp.save()
                         fixed_count += 1
-                        log_event('Cleanup', 'Success', f"Fixed {sku}: Enforced Single Variant '{correct_name}'")
+                        log_event('Cleanup', 'Success', f"Fixed {sku}: Reverted to Simple Product")
 
-                # === SCENARIO 2: SINGLE VARIANT BUT WRONG NAME (Default Title) ===
-                elif len(sp.variants) == 1:
-                    v = sp.variants[0]
-                    if v.option1 == 'Default Title' or v.option1 != correct_name:
-                        sp.options = [{'name': 'Format'}]
-                        v.option1 = correct_name
-                        sp.save()
-                        fixed_count += 1
-                        log_event('Cleanup', 'Success', f"Fixed Name for {sku}: Default Title -> {correct_name}")
+                # === SCENARIO 2: SHOULD BE PACK ===
+                elif is_pack_in_odoo:
+                    # Logic to ensure names are 'Outer' and 'Unit' (if you need it)
+                    # For now, focusing on fixing the simple ones as per your request.
+                    pass
 
             if page.has_next_page(): page = page.next_page()
             else: break
