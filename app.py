@@ -686,14 +686,15 @@ def sync_products_master():
 
 def fix_variant_mess_task():
     """
-    CLEANUP TOOL:
-    - If product NOT pack in Odoo -> Revert to Simple Product (No Dropdowns).
-    - If product IS pack in Odoo -> Ensure correct naming.
+    CLEANUP TOOL (Aggressive):
+    - Identifies unwanted variants (-UNIT) and explicitly DESTROYS them.
+    - Forces the remaining variant to 'Default Title'.
+    - Resets Product Options to standard 'Title'.
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): return
         
-        log_event('Cleanup', 'Info', "Starting Strict Variant Cleanup...")
+        log_event('Cleanup', 'Info', "Starting Aggressive Variant Cleanup...")
         
         company_id = get_config('odoo_company_id')
         odoo_products = odoo.get_all_products(company_id)
@@ -706,6 +707,7 @@ def fix_variant_mess_task():
             for sp in page:
                 if not sp.variants: continue
                 
+                # Identify SKU
                 sku = sp.variants[0].sku 
                 if not sku or sku not in odoo_map:
                     for v in sp.variants:
@@ -716,30 +718,68 @@ def fix_variant_mess_task():
                 p_data = odoo_map[sku]
                 is_pack_in_odoo = p_data.get('sh_is_secondary_unit') is True
 
-                # === SCENARIO 1: SHOULD BE SIMPLE (No Variants) ===
+                # === SCENARIO: SHOULD BE SIMPLE (No Variants) ===
                 if not is_pack_in_odoo:
-                    variants_to_keep = []
-                    dirty = False
-
-                    for v in sp.variants:
-                        # Delete -UNIT
-                        if v.sku and v.sku.endswith('-UNIT'):
-                            log_event('Cleanup', 'Warning', f"Deleting extra -UNIT variant for {sku}")
-                            dirty = True
-                        else:
-                            # Reset Main to 'Default Title' (Standard for simple products)
-                            if v.option1 != 'Default Title':
-                                v.option1 = 'Default Title'
-                                dirty = True
-                            variants_to_keep.append(v)
+                    variants_to_delete = []
+                    main_variant = None
                     
-                    if not variants_to_keep and sp.variants:
-                         v = sp.variants[0]; v.option1 = 'Default Title'; variants_to_keep.append(v); dirty=True
+                    # 1. Identify which variants to kill
+                    for v in sp.variants:
+                        if v.sku and v.sku.endswith('-UNIT'):
+                            variants_to_delete.append(v)
+                        else:
+                            if main_variant is None:
+                                main_variant = v
+                            else:
+                                # If we have multiple "Main" variants (duplicates), mark extras for death
+                                variants_to_delete.append(v)
+                    
+                    # Safety: If we somehow marked everything for deletion, save the first one
+                    if not main_variant and variants_to_delete:
+                        main_variant = variants_to_delete.pop(0)
+
+                    dirty = False
+                    
+                    # 2. EXECUTE DELETIONS (Explicit Destroy)
+                    if variants_to_delete:
+                        for v in variants_to_delete:
+                            try:
+                                shopify.Variant.find(v.id).destroy()
+                                log_event('Cleanup', 'Warning', f"Destroyed extra variant {v.sku} for {sku}")
+                                dirty = True
+                            except Exception as e:
+                                print(f"Failed to destroy variant {v.id}: {e}")
+                        
+                        # REFRESH PRODUCT after deleting variants to get clean state
+                        try:
+                            sp = shopify.Product.find(sp.id)
+                            if sp.variants:
+                                main_variant = sp.variants[0]
+                        except: pass
+
+                    # 3. FIX MAIN VARIANT (Name & Options)
+                    # For simple products, Option1 MUST be 'Default Title'
+                    if main_variant and main_variant.option1 != 'Default Title':
+                        main_variant.option1 = 'Default Title'
+                        main_variant.option2 = None
+                        main_variant.option3 = None
+                        try:
+                            main_variant.save()
+                            dirty = True
+                        except Exception as e:
+                            print(f"Variant save failed {sku}: {e}")
+
+                    # 4. FIX PRODUCT OPTIONS (Hide Dropdown)
+                    # We force it to the standard "Title" / "Default Title" structure
+                    if sp.options and (len(sp.options) > 1 or sp.options[0].name != 'Title'):
+                        sp.options = [{"name": "Title", "values": ["Default Title"]}]
+                        try:
+                            sp.save()
+                            dirty = True
+                        except Exception as e:
+                            print(f"Product options save failed {sku}: {e}")
 
                     if dirty:
-                        sp.options = [] # CLEAR OPTIONS -> Removes Dropdown
-                        sp.variants = variants_to_keep
-                        sp.save()
                         fixed_count += 1
                         log_event('Cleanup', 'Success', f"Fixed {sku}: Reverted to Simple Product")
 
