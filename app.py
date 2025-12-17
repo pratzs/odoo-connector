@@ -52,39 +52,6 @@ except: pass
 
 SHOPIFY_LOCATION_ID = int(os.getenv('SHOPIFY_WAREHOUSE_ID', '0'))
 
-# --- FIX: Explicit FulfillmentOrder Import ---
-try:
-    from shopify.resources.fulfillment_order import FulfillmentOrder
-    shopify.FulfillmentOrder = FulfillmentOrder
-except ImportError:
-    pass
-# ---------------------------------------------
-
-app = Flask(__name__)
-
-# --- CONFIGURATION ---
-database_url = os.getenv('DATABASE_URL', 'sqlite:///local.db')
-if database_url:
-    if database_url.startswith("postgres://"):
-        database_url = database_url.replace("postgres://", "postgresql+pg8000://", 1)
-    elif database_url.startswith("postgresql://"):
-        database_url = database_url.replace("postgresql://", "postgresql+pg8000://", 1)
-
-app.config['SQLALCHEMY_DATABASE_URI'] = database_url
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
-# --- SSL FIX FOR RENDER/SUPABASE ---
-try:
-    ssl_ctx = ssl.create_default_context()
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
-    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-        "connect_args": {"ssl_context": ssl_ctx}
-    }
-except: pass
-
-SHOPIFY_LOCATION_ID = int(os.getenv('SHOPIFY_WAREHOUSE_ID', '0'))
-
 db.init_app(app)
 
 odoo = None
@@ -1714,7 +1681,11 @@ def maintenance_add_column():
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)})
-        
+
+@app.route('/maintenance/fix_variants', methods=['POST'])
+def trigger_fix_variants():
+    threading.Thread(target=fix_variant_mess_task).start()
+    return jsonify({"message": "Variant Cleanup Started. Check Live Logs."})
 
 # --- ADD THIS MARKER ---
 print("**************************************************")
