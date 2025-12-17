@@ -15,6 +15,16 @@ from datetime import datetime, timedelta
 import random
 import xmlrpc.client
 
+# --- ADD THIS TO TOP OF app.py AFTER IMPORTS ---
+try:
+    # Try to ensure FulfillmentOrder is available in the shopify namespace
+    if not hasattr(shopify, 'FulfillmentOrder'):
+        from shopify.resources.fulfillment_order import FulfillmentOrder
+        shopify.FulfillmentOrder = FulfillmentOrder
+except ImportError:
+    pass
+# -----------------------------------------------
+
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
