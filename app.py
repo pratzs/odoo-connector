@@ -405,11 +405,11 @@ def process_order_data(data):
 
 def sync_products_master():
     """
-    Odoo -> Shopify Product Sync (Atomic Creation).
-    Fixes "Ghost Products" (Created without SKU/Price).
-    Strategy:
-    - NEW Products: Sends Title + Variants + Prices in ONE API call.
-    - EXISTING: Updates incrementally.
+    Odoo -> Shopify Product Sync (v7.0).
+    Features:
+    1. 'Global' Scope: Publishes to POS & Online Store.
+    2. Strict Variants: Checks 'sh_is_secondary_unit' boolean.
+    3. Archive Safety: Never archives products with stock > 0.
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
@@ -429,6 +429,7 @@ def sync_products_master():
             if sku not in odoo_product_map:
                 odoo_product_map[sku] = p
             else:
+                # Active wins over Inactive
                 stored_p = odoo_product_map[sku]
                 if p.get('active', True) and not stored_p.get('active', True):
                     odoo_product_map[sku] = p
@@ -476,22 +477,32 @@ def sync_products_master():
         log_event('Product Sync', 'Info', f"Starting Sync for {total_count} Unique SKUs...")
 
         for index, p in enumerate(odoo_products):
+            # Visual Progress
             if index > 0 and index % 25 == 0: 
                 log_event('Product Sync', 'Info', f"Progress: {index}/{total_count} products processed...")
 
             sku = p.get('default_code')
             active_odoo_skus.add(sku)
             
-            # Archive Check
+            # --- ARCHIVE CHECK (WITH STOCK SAFETY) ---
             if not p.get('active', True):
                 if sku in shopify_map:
                     sp = shopify_map[sku]
-                    if getattr(sp, 'status', '') != 'archived':
-                        sp.status = 'archived'; sp.save()
+                    # Check Stock Level
+                    total_stock = sum([v.inventory_quantity for v in sp.variants]) if sp.variants else 0
+                    
+                    if total_stock > 0:
+                        # Safety: Don't archive if stock exists
+                        if getattr(sp, 'status', '') == 'archived':
+                            sp.status = 'active'; sp.save() # Revive if it has stock!
+                    else:
+                        # Safe to archive
+                        if getattr(sp, 'status', '') != 'archived':
+                            sp.status = 'archived'; sp.save()
                 continue 
 
             # ---------------------------
-            # 1. PREPARE VARIANT DATA FIRST
+            # 1. PREPARE VARIANT DATA
             # ---------------------------
             is_pack = False
             ratio = 1.0
@@ -500,8 +511,12 @@ def sync_products_master():
 
             uom_id = p.get('uom_id') 
             sec_uom_id = p.get('sh_secondary_uom') 
+            
+            # --- FIX: CHECK THE BOOLEAN ---
+            # We only create variants if the "Is Secondary Unit" checkbox is TRUE
+            has_sec_unit_enabled = p.get('sh_is_secondary_unit', False)
 
-            if sec_uom_id:
+            if has_sec_unit_enabled and sec_uom_id:
                 if sec_uom_id[0] in uom_map:
                     sec_data = uom_map[sec_uom_id[0]]
                     if sec_data['ratio'] > 1.0:
@@ -530,7 +545,6 @@ def sync_products_master():
             # V2: Pack/Unit Split
             if is_pack:
                 if base_price_is_pack:
-                    # Odoo=Carton, Make Unit
                     desired_variants.append({
                         'option1': 'Unit',
                         'price': str(round(raw_price / ratio, 2)),
@@ -539,7 +553,6 @@ def sync_products_master():
                         'cost': str(round(raw_cost / ratio, 2))
                     })
                 else:
-                    # Odoo=Unit, Make Carton
                     sec_name = sec_uom_id[1] if len(sec_uom_id) > 1 else 'Carton'
                     desired_variants.append({
                         'option1': sec_name,
@@ -555,7 +568,7 @@ def sync_products_master():
             sp = shopify_map.get(sku)
             
             try:
-                # === NEW PRODUCT (ATOMIC CREATION) ===
+                # === NEW PRODUCT ===
                 if not sp:
                     if not auto_create: continue
                     sp = shopify.Product()
@@ -564,19 +577,17 @@ def sync_products_master():
                     sp.product_type = odoo.get_public_category_name(p.get('public_categ_ids', [])) or ''
                     sp.status = 'active' if auto_publish else 'draft'
                     
-                    # Tags
+                    # --- FIX: PUBLISH TO ALL CHANNELS ---
+                    sp.published_scope = 'global'
+
                     if sync_tags:
                         odoo_tags = odoo.get_tag_names(p.get('product_tag_ids', []))
                         if odoo_tags: sp.tags = ",".join(odoo_tags)
                     
-                    # Body
                     if sync_desc: sp.body_html = p.get('description_sale') or ''
 
-                    # Options & Variants (THE FIX: Set BEFORE saving)
-                    if is_pack:
-                        sp.options = [{'name': 'Pack Size'}]
+                    if is_pack: sp.options = [{'name': 'Pack Size'}]
                     
-                    # Construct Variant Objects
                     new_variants = []
                     for des in desired_variants:
                         v = shopify.Variant()
@@ -585,47 +596,40 @@ def sync_products_master():
                         v.sku = des['sku']
                         v.weight = des['weight']
                         v.inventory_management = 'shopify'
-                        # Note: Cost cannot be set on creation, must be updated after ID exists
                         new_variants.append(v)
                     
                     sp.variants = new_variants
-                    
-                    # ATOMIC SAVE
                     sp.save()
-                    # Now reload to get IDs for Cost/Metafields
                     sp = shopify.Product.find(sp.id)
                 
-                # === EXISTING PRODUCT (UPDATE) ===
+                # === EXISTING PRODUCT ===
                 else:
                     product_changed = False
-                    # ... (Standard Field Updates) ...
+                    
+                    # Ensure Global Scope on Updates too
+                    if getattr(sp, 'published_scope', '') != 'global':
+                        sp.published_scope = 'global'; product_changed = True
+
                     if sync_title and getattr(sp, 'title', '') != p['name']:
                          sp.title = p['name']; product_changed = True
                     if sync_vendor:
                          target_v = p.get('name', '').split()[0] if p.get('name') else 'Worthy'
                          if getattr(sp, 'vendor', '') != target_v: sp.vendor = target_v; product_changed = True
                     
-                    # (Simplified for brevity - assumes logic from before for other fields)
                     if product_changed: sp.save()
 
                 # ---------------------------
-                # 3. POST-SAVE SYNC (Cost, Metafields, Image)
+                # 3. POST-SAVE SYNC
                 # ---------------------------
                 
-                # A. Sync Variants (Double Check for Existing Products)
-                # Note: For new products, this is redundant but safe.
-                # For existing, this updates prices/SKUs if they changed.
                 existing_vars = getattr(sp, 'variants', [])
                 vars_changed = False
                 final_vars = []
                 
-                # Reset Options if switching type
                 if is_pack and not sp.options: 
-                    sp.options = [{'name': 'Pack Size'}]
-                    vars_changed = True
+                    sp.options = [{'name': 'Pack Size'}]; vars_changed = True
                 elif not is_pack and sp.options:
-                    sp.options = []
-                    vars_changed = True
+                    sp.options = []; vars_changed = True
 
                 for des in desired_variants:
                     match = next((v for v in existing_vars if v.sku == des['sku']), None)
@@ -643,7 +647,7 @@ def sync_products_master():
                     sp.variants = final_vars
                     sp.save()
 
-                # B. Sync Cost (Requires InventoryItem ID)
+                # Sync Cost
                 if sp.variants:
                     for v in sp.variants:
                         d_data = next((d for d in desired_variants if d['sku'] == v.sku), None)
@@ -656,7 +660,6 @@ def sync_products_master():
                                     inv_item.save()
                             except: pass
 
-                # C. Metafield (Vendor Code)
                 if sync_meta_vendor:
                      v_code = odoo.get_vendor_product_code(p['product_tmpl_id'][0])
                      if v_code:
@@ -666,7 +669,6 @@ def sync_products_master():
 
                 synced += 1
                 
-                # Update DB Map
                 try:
                     pm = ProductMap.query.filter_by(sku=sku).first()
                     if not pm:
@@ -682,6 +684,49 @@ def sync_products_master():
 
         cleanup_shopify_products(active_odoo_skus)
         log_event('Product Sync', 'Success', f"Sync Complete. Synced: {synced}")
+
+def cleanup_shopify_products(odoo_active_skus):
+    """
+    Safely cleans up Shopify Duplicates.
+    Safety Update: Does NOT archive if stock > 0.
+    """
+    if not setup_shopify_session(): return
+    seen_skus = set()
+    
+    page = shopify.Product.find(limit=250)
+    archived_count = 0
+    
+    try:
+        while page:
+            for sp in page:
+                variant = sp.variants[0] if sp.variants else None
+                if not variant or not variant.sku: continue
+                
+                sku = variant.sku
+                needs_archive = False
+                
+                # Only archive if it's a Duplicate
+                if sku in seen_skus: 
+                    needs_archive = True
+                else:
+                    seen_skus.add(sku)
+                
+                if needs_archive:
+                    if sp.status != 'archived':
+                        # CHECK STOCK SAFETY
+                        total_stock = sum([v.inventory_quantity for v in sp.variants])
+                        if total_stock > 0:
+                             log_event('System', 'Warning', f"Skipping Archive for Duplicate {sku}: Has Stock ({total_stock})")
+                        else:
+                            sp.status = 'archived'
+                            sp.save()
+                            archived_count += 1
+                            log_event('System', 'Warning', f"Archived Duplicate in Shopify: {sku}")
+
+            if page.has_next_page(): page = page.next_page()
+            else: break
+    except Exception as e:
+        print(f"Cleanup Error: {e}")
 
 def sync_customers_master():
     """
