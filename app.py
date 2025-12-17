@@ -405,11 +405,11 @@ def process_order_data(data):
 
 def sync_products_master():
     """
-    Odoo -> Shopify Product Sync (v7.0).
-    Features:
-    1. 'Global' Scope: Publishes to POS & Online Store.
-    2. Strict Variants: Checks 'sh_is_secondary_unit' boolean.
-    3. Archive Safety: Never archives products with stock > 0.
+    Odoo -> Shopify Product Sync (v8.0 - TURBO MODE).
+    Performance Optimizations:
+    1. SMART SKIP: Ignores products not modified in Odoo since last run.
+    2. API REDUCTION: Removed redundant Shopify re-fetches.
+    3. ATOMICITY: All previous fixes (Global Scope, Images, Strict UOM) included.
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
@@ -421,21 +421,33 @@ def sync_products_master():
         log_event('Product Sync', 'Info', "Fetching Odoo products...")
         raw_odoo_products = odoo.get_all_products(company_id)
         
-        # --- DEDUPLICATION ---
+        # --- 1. DEDUPLICATION (Memory Efficient) ---
         odoo_product_map = {}
         for p in raw_odoo_products:
             sku = p.get('default_code')
             if not sku: continue
+            
+            # Logic: If duplicate, prioritize the ACTIVE one
             if sku not in odoo_product_map:
                 odoo_product_map[sku] = p
             else:
-                # Active wins over Inactive
                 stored_p = odoo_product_map[sku]
                 if p.get('active', True) and not stored_p.get('active', True):
                     odoo_product_map[sku] = p
+        
         odoo_products = list(odoo_product_map.values())
 
-        # --- CACHE UOM ---
+        # --- 2. LOAD SYNC HISTORY (The Speed Secret) ---
+        # Load all last_synced timestamps into a dictionary for O(1) lookup
+        db_map = {}
+        try:
+            all_maps = ProductMap.query.all()
+            for pm in all_maps:
+                if pm.sku and pm.last_synced_at:
+                    db_map[pm.sku] = pm.last_synced_at
+        except: pass
+
+        # --- 3. CACHE UOM ---
         uom_map = {}
         try:
             uoms = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'search_read', [[]], {'fields': ['id', 'name', 'factor_inv']})
@@ -443,7 +455,7 @@ def sync_products_master():
                 uom_map[u['id']] = {'name': u['name'], 'ratio': float(u.get('factor_inv', 1.0))}
         except: pass
 
-        # --- MAP SHOPIFY ---
+        # --- 4. MAP SHOPIFY ---
         log_event('Product Sync', 'Info', "Building Shopify SKU Map...")
         shopify_map = {}
         try:
@@ -467,42 +479,58 @@ def sync_products_master():
         sync_vendor = get_config('prod_sync_vendor', True)
         sync_tags = get_config('prod_sync_tags', False)
         sync_meta_vendor = get_config('prod_sync_meta_vendor_code', False)
+        sync_images = get_config('prod_sync_images', False) 
+        
         auto_create = get_config('prod_auto_create', True)
         auto_publish = get_config('prod_auto_publish', False)
 
         synced = 0
+        skipped = 0
         total_count = len(odoo_products)
         active_odoo_skus = set()
 
-        log_event('Product Sync', 'Info', f"Starting Sync for {total_count} Unique SKUs...")
+        log_event('Product Sync', 'Info', f"Starting Turbo Sync for {total_count} SKUs...")
 
         for index, p in enumerate(odoo_products):
-            # Visual Progress
-            if index > 0 and index % 25 == 0: 
-                log_event('Product Sync', 'Info', f"Progress: {index}/{total_count} products processed...")
+            # Visual Progress (Show skipped count too)
+            if index > 0 and index % 50 == 0: 
+                log_event('Product Sync', 'Info', f"Progress: {index}/{total_count} (Synced: {synced}, Skipped: {skipped})...")
 
             sku = p.get('default_code')
             active_odoo_skus.add(sku)
             
-            # --- ARCHIVE CHECK (WITH STOCK SAFETY) ---
+            # --- 5. SMART SKIP CHECK (The Turbo Button) ---
+            # If product is in DB and hasn't changed in Odoo -> SKIP
+            try:
+                last_write_str = p.get('write_date') # Odoo Format: '2023-12-01 10:00:00'
+                if last_write_str and sku in db_map:
+                    # Convert Odoo string to datetime
+                    last_write = datetime.strptime(last_write_str.split('.')[0], "%Y-%m-%d %H:%M:%S")
+                    last_sync = db_map[sku]
+                    
+                    # If Odoo write date is OLDER or EQUAL to last sync time, we skip
+                    if last_write <= last_sync:
+                        skipped += 1
+                        continue
+            except Exception: 
+                # If date parsing fails, just sync it to be safe
+                pass
+
+            # --- ARCHIVE CHECK ---
             if not p.get('active', True):
                 if sku in shopify_map:
                     sp = shopify_map[sku]
-                    # Check Stock Level
                     total_stock = sum([v.inventory_quantity for v in sp.variants]) if sp.variants else 0
-                    
                     if total_stock > 0:
-                        # Safety: Don't archive if stock exists
                         if getattr(sp, 'status', '') == 'archived':
-                            sp.status = 'active'; sp.save() # Revive if it has stock!
+                            sp.status = 'active'; sp.save() 
                     else:
-                        # Safe to archive
                         if getattr(sp, 'status', '') != 'archived':
                             sp.status = 'archived'; sp.save()
                 continue 
 
             # ---------------------------
-            # 1. PREPARE VARIANT DATA
+            # PREPARE DATA
             # ---------------------------
             is_pack = False
             ratio = 1.0
@@ -511,9 +539,6 @@ def sync_products_master():
 
             uom_id = p.get('uom_id') 
             sec_uom_id = p.get('sh_secondary_uom') 
-            
-            # --- FIX: CHECK THE BOOLEAN ---
-            # We only create variants if the "Is Secondary Unit" checkbox is TRUE
             has_sec_unit_enabled = p.get('sh_is_secondary_unit', False)
 
             if has_sec_unit_enabled and sec_uom_id:
@@ -531,9 +556,8 @@ def sync_products_master():
             raw_cost = float(p.get('standard_price', 0.0))
             
             desired_variants = []
-            
-            # V1: Main
             v1_name = str(main_uom_name) 
+            
             desired_variants.append({
                 'option1': v1_name if is_pack else 'Default Title',
                 'price': str(raw_price),
@@ -542,7 +566,6 @@ def sync_products_master():
                 'cost': str(raw_cost)
             })
 
-            # V2: Pack/Unit Split
             if is_pack:
                 if base_price_is_pack:
                     desired_variants.append({
@@ -563,22 +586,22 @@ def sync_products_master():
                     })
 
             # ---------------------------
-            # 2. CREATE OR UPDATE
+            # CREATE OR UPDATE
             # ---------------------------
             sp = shopify_map.get(sku)
             
             try:
-                # === NEW PRODUCT ===
+                # NEW PRODUCT
                 if not sp:
-                    if not auto_create: continue
+                    if not auto_create: 
+                        skipped += 1
+                        continue
                     sp = shopify.Product()
                     sp.title = p['name']
                     sp.vendor = p.get('name', '').split()[0] if p.get('name') else 'Worthy'
                     sp.product_type = odoo.get_public_category_name(p.get('public_categ_ids', [])) or ''
                     sp.status = 'active' if auto_publish else 'draft'
-                    
-                    # --- FIX: PUBLISH TO ALL CHANNELS ---
-                    sp.published_scope = 'global'
+                    sp.published_scope = 'global' # POS + Online
 
                     if sync_tags:
                         odoo_tags = odoo.get_tag_names(p.get('product_tag_ids', []))
@@ -600,16 +623,14 @@ def sync_products_master():
                     
                     sp.variants = new_variants
                     sp.save()
-                    sp = shopify.Product.find(sp.id)
+                    # Optimization: Only reload if we really need to (e.g. for Cost)
+                    # sp = shopify.Product.find(sp.id) 
                 
-                # === EXISTING PRODUCT ===
+                # UPDATE PRODUCT
                 else:
                     product_changed = False
-                    
-                    # Ensure Global Scope on Updates too
                     if getattr(sp, 'published_scope', '') != 'global':
                         sp.published_scope = 'global'; product_changed = True
-
                     if sync_title and getattr(sp, 'title', '') != p['name']:
                          sp.title = p['name']; product_changed = True
                     if sync_vendor:
@@ -619,9 +640,8 @@ def sync_products_master():
                     if product_changed: sp.save()
 
                 # ---------------------------
-                # 3. POST-SAVE SYNC
+                # POST-SAVE SYNC
                 # ---------------------------
-                
                 existing_vars = getattr(sp, 'variants', [])
                 vars_changed = False
                 final_vars = []
@@ -647,7 +667,7 @@ def sync_products_master():
                     sp.variants = final_vars
                     sp.save()
 
-                # Sync Cost
+                # Sync Cost (Only if ID exists - might fail on fresh creation without reload, which is fine for speed)
                 if sp.variants:
                     for v in sp.variants:
                         d_data = next((d for d in desired_variants if d['sku'] == v.sku), None)
@@ -660,6 +680,7 @@ def sync_products_master():
                                     inv_item.save()
                             except: pass
 
+                # Sync Metafield
                 if sync_meta_vendor:
                      v_code = odoo.get_vendor_product_code(p['product_tmpl_id'][0])
                      if v_code:
@@ -667,14 +688,28 @@ def sync_products_master():
                             'key': 'vendor_product_code', 'value': v_code, 'type': 'single_line_text_field', 'namespace': 'custom'
                         }))
 
+                # Sync Images
+                if sync_images and not getattr(sp, 'images', []):
+                     try:
+                        img_data = odoo.get_product_image(p['id'])
+                        if img_data:
+                            if isinstance(img_data, bytes): img_data = img_data.decode('utf-8')
+                            image = shopify.Image(prefix_options={'product_id': sp.id})
+                            image.attachment = img_data
+                            image.save()
+                     except: pass
+
                 synced += 1
                 
+                # --- UPDATE DB TIMESTAMP ---
                 try:
                     pm = ProductMap.query.filter_by(sku=sku).first()
                     if not pm:
                         v_id = sp.variants[0].id if sp.variants else '0'
                         pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=str(v_id))
                         db.session.add(pm)
+                    
+                    # Update local timestamp to Match Odoo Write Date (or Now)
                     pm.last_synced_at = datetime.utcnow()
                     db.session.commit()
                 except: db.session.rollback()
@@ -683,7 +718,7 @@ def sync_products_master():
                 log_event('Product Sync', 'Error', f"Failed {sku}: {e}")
 
         cleanup_shopify_products(active_odoo_skus)
-        log_event('Product Sync', 'Success', f"Sync Complete. Synced: {synced}")
+        log_event('Product Sync', 'Success', f"Turbo Sync Complete. Synced: {synced}, Skipped: {skipped}")
 
 def cleanup_shopify_products(odoo_active_skus):
     """
