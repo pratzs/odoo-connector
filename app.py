@@ -8,13 +8,13 @@ import schedule
 import time
 import shopify 
 from flask import Flask, request, jsonify, render_template
-from sqlalchemy import text
 from models import db, ProductMap, SyncLog, AppSetting, CustomerMap, ProcessedOrder
 from odoo_client import OdooClient
 import requests
 from datetime import datetime, timedelta
 import random
 import xmlrpc.client
+from sqlalchemy import text
 
 # --- ADD THIS TO TOP OF app.py AFTER IMPORTS ---
 try:
