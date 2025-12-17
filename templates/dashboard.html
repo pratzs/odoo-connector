@@ -52,13 +52,13 @@
                     </div>
                     <div class="mt-3 d-flex gap-2 flex-wrap">
                         <button onclick="openOrderImportModal()" class="btn btn-primary"><i class="bi bi-cloud-download"></i> Fetch Recent Shopify Orders</button>
-                        <button onclick="triggerAction('/sync/fulfillments')" class="btn btn-dark"><i class="bi bi-truck"></i> Push Fullfillment (Odoo &rarr; Shopify)</button>
-                        <button onclick="triggerAction('/sync/inventory')" class="btn btn-secondary"><i class="bi bi-box-seam"></i> Force Inventory Sync</button>
                         <button onclick="triggerAction('/sync/products/master', 'POST')" class="btn btn-warning text-dark"><i class="bi bi-arrow-repeat"></i> Sync Products (Odoo Master)</button>
+                        <button onclick="triggerAction('/sync/inventory')" class="btn btn-secondary"><i class="bi bi-box-seam"></i> Force Inventory Sync</button>
                         <button onclick="triggerAction('/sync/images/manual')" class="btn btn-primary"><i class="bi bi-images"></i> Force Update All Images</button>
+                        <button onclick="triggerAction('/sync/customers/master', 'POST')" class="btn btn-success"><i class="bi bi-people"></i> Force Customer Sync</button>
+                        <button onclick="triggerAction('/sync/fulfillments')" class="btn btn-dark"><i class="bi bi-truck"></i> Push Fullfillment (Odoo &rarr; Shopify)</button>
                         <button onclick="triggerAction('/sync/products/archive_duplicates', 'POST')" class="btn btn-danger"><i class="bi bi-trash"></i> Archive Duplicate SKUs</button>
                         <button onclick="triggerAction('/sync/categories/run_initial_import')" class="btn btn-info text-white"><i class="bi bi-tags"></i> Init Category Sync from Shopify to Odoo</button>
-                        <button onclick="triggerAction('/sync/customers/master', 'POST')" class="btn btn-success"><i class="bi bi-people"></i> Force Customer Sync</button>
                         <button onclick="triggerAction('/test/simulate_order', 'POST')" class="btn btn-outline-info"><i class="bi bi-lightning"></i> Test Connection</button>
                     </div>
                 </div>
