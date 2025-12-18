@@ -180,6 +180,25 @@ class OdooClient:
         if company_id: domain.append(['company_id', '=', int(company_id)])
         return self.models.execute_kw(self.db, self.uid, self.password, 'sale.order', 'search_read', [domain], {'fields': ['id', 'client_order_ref']})
 
+    def get_all_products(self, company_id=None):
+        # FIX: Added 'sale_ok=True' to strictly filter only Sellable products
+        domain = [
+            ('sale_ok', '=', True), 
+            ('type', 'in', ['product', 'consu']), 
+            '|', ('active', '=', True), ('active', '=', False)
+        ]
+        
+        if company_id:
+             domain.append(('company_id', '=', int(company_id)))
+        
+        # Added 'write_date' for incremental checks
+        fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 
+                  'description_sale', 'active', 'product_tmpl_id', 'qty_available', 
+                  'public_categ_ids', 'product_tag_ids', 'uom_id', 'sh_is_secondary_unit', 
+                  'sh_secondary_uom', 'write_date', 'sale_ok']
+                  
+        return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search_read', [domain], {'fields': fields})
+
     def get_product_split_info(self, product_id, product_data=None):
         try:
             if product_data:
