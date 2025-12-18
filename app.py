@@ -19,13 +19,15 @@ from sqlalchemy import text
 import ssl
 import gc 
 
-# --- FIX: Explicit FulfillmentOrder Import ---
+# --- FIX: Force Define FulfillmentOrder Resource ---
 try:
     from shopify.resources.fulfillment_order import FulfillmentOrder
-    shopify.FulfillmentOrder = FulfillmentOrder
 except ImportError:
-    pass
-# ---------------------------------------------
+    class FulfillmentOrder(shopify.ShopifyResource):
+        _prefix_source = "/orders/$order_id/"
+        _plural = "fulfillment_orders"
+shopify.FulfillmentOrder = FulfillmentOrder
+# ---------------------------------------------------
 
 app = Flask(__name__)
 
@@ -1193,13 +1195,14 @@ def perform_inventory_sync(lookback_minutes):
 
 def sync_odoo_fulfillments():
     """
-    Odoo -> Shopify Fulfillment Sync (UPDATED for API 2025-01).
-    Uses 'FulfillmentOrder' instead of legacy endpoints to fix 406 Errors.
+    Odoo -> Shopify Fulfillment Sync.
+    - If Tracking exists: Sends Tracking # + Fulfilled Status.
+    - If NO Tracking: Sends Fulfilled Status only.
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): return
 
-        # 1. Look back 2 hours
+        # 1. Look back 2 hours for 'Done' shipments
         cutoff = datetime.utcnow() - timedelta(minutes=120)
         
         domain = [
@@ -1219,7 +1222,9 @@ def sync_odoo_fulfillments():
         synced_count = 0
         for pick in pickings:
             so_name = pick['origin'] 
-            tracking_ref = pick.get('carrier_tracking_ref') or ''
+            # Handle cases where tracking is False/None
+            tracking_ref = pick.get('carrier_tracking_ref')
+            if tracking_ref is False: tracking_ref = ''
             
             if not so_name or not so_name.startswith('ONLINE_'): continue
             shopify_order_name = so_name.replace('ONLINE_', '').strip()
@@ -1232,44 +1237,47 @@ def sync_odoo_fulfillments():
 
                 if order.fulfillment_status == 'fulfilled': continue
 
-                # --- NEW LOGIC: Fulfillment Orders API (Required for 2025-01) ---
-                # Fetch all fulfillment orders associated with this transaction
+                # 3. Find the "Work Order" (FulfillmentOrder)
+                # This is the step that failed before without the fix at the top
                 fulfillment_orders = shopify.FulfillmentOrder.find(order_id=order.id)
                 
                 # Find the first one that is 'open' (needs shipping)
                 open_fo = next((fo for fo in fulfillment_orders if fo.status == 'open'), None)
                 
                 if not open_fo:
-                    continue # Nothing left to fulfill or already done
+                    continue # Nothing left to fulfill
 
-                # Prepare Payload
+                # 4. Prepare Payload
+                # We ALWAYS set notify_customer=True so they get the "Shipped" email
                 fulfillment_payload = {
                     "line_items_by_fulfillment_order": [
-                        {
-                            "fulfillment_order_id": open_fo.id
-                        }
-                    ]
+                        { "fulfillment_order_id": open_fo.id }
+                    ],
+                    "notify_customer": True 
                 }
 
-                # Add Tracking Info
+                # 5. Conditionally Add Tracking
                 if tracking_ref:
                     carrier_name = pick['carrier_id'][1] if pick['carrier_id'] else 'Other'
                     fulfillment_payload["tracking_info"] = {
                         "number": tracking_ref,
                         "company": carrier_name
                     }
-                    fulfillment_payload["notify_customer"] = True # Auto-email customer
+                    log_msg = f"Fulfilled {shopify_order_name} with Tracking: {tracking_ref}"
+                else:
+                    log_msg = f"Fulfilled {shopify_order_name} (No Tracking)"
 
-                # Create the Fulfillment
+                # 6. Execute
                 new_fulfillment = shopify.Fulfillment.create(fulfillment_payload)
                 
                 if new_fulfillment.errors:
                      log_event('Fulfillment', 'Error', f"Shopify Error {shopify_order_name}: {new_fulfillment.errors.full_messages()}")
                 else:
                      synced_count += 1
-                     log_event('Fulfillment', 'Success', f"Fulfilled {shopify_order_name} with Tracking: {tracking_ref}")
+                     log_event('Fulfillment', 'Success', log_msg)
 
             except Exception as e:
+                # Ignore 422 errors (usually means already fulfilled)
                 if "422" not in str(e): 
                     log_event('Fulfillment', 'Error', f"Failed {shopify_order_name}: {e}")
 
