@@ -851,7 +851,7 @@ def cleanup_shopify_products(odoo_active_skus):
 
 def sync_customers_master():
     """
-    Odoo -> Shopify Customer Sync (Master). 
+    Odoo -> Shopify Customer Sync (Master - Fixed 'tags' Crash). 
     - Pushes VAT and Company Name.
     - Merges Odoo Tags (Preserves existing Shopify tags).
     - Maps Odoo Salesperson -> Shopify 'custom.salesrep' Metafield.
@@ -868,15 +868,17 @@ def sync_customers_master():
             return
 
         company_id = get_config('odoo_company_id')
-        # We still use these to DECIDE if we should sync, but we will sync ALL tags found on the customer
         whitelist = [t.strip() for t in get_config('cust_whitelist_tags', '').split(',') if t.strip()]
         blacklist = [t.strip() for t in get_config('cust_blacklist_tags', '').split(',') if t.strip()]
         use_tags_filter = get_config('cust_sync_tags', False)
 
         # 2. Fetch Odoo Customers (Active Companies & Individuals)
-        # Using a far past date to simulate "Get All" for the manual trigger
         last_run = "2000-01-01 00:00:00" 
-        odoo_customers = odoo.get_changed_customers(last_run, company_id)
+        try:
+            odoo_customers = odoo.get_changed_customers(last_run, company_id)
+        except Exception as e:
+            log_event('Customer Sync', 'Error', f"Odoo Fetch Failed: {e}")
+            return
         
         log_event('Customer Sync', 'Info', f"Found {len(odoo_customers)} customers in Odoo. Processing...")
         
@@ -884,12 +886,12 @@ def sync_customers_master():
         
         for p in odoo_customers:
             email = p.get('email')
-            if not email or "@" not in email: continue # Shopify requires valid email
+            if not email or "@" not in email: continue 
 
             # Get Odoo Tags Names
             odoo_tags = odoo.get_tag_names(p.get('category_id', []))
 
-            # 3. Filter Logic (Should we sync this customer?)
+            # 3. Filter Logic
             if use_tags_filter:
                 if blacklist and any(t in odoo_tags for t in blacklist): continue
                 if whitelist and not any(t in odoo_tags for t in whitelist): continue
@@ -924,11 +926,10 @@ def sync_customers_master():
                 c.addresses = [shopify.Address(address_data)]
                 
                 # 7. TAG SYNC (Merge Strategy)
-                # Get current Shopify tags as a list
-                current_shopify_tags = [t.strip() for t in c.tags.split(',')] if c.tags else []
+                # FIX: Use getattr() to safely read tags, preventing KeyError if they don't exist
+                tags_str = getattr(c, 'tags', '')
+                current_shopify_tags = [t.strip() for t in tags_str.split(',')] if tags_str else []
                 
-                # Combine Odoo tags with existing Shopify tags (Set union removes duplicates)
-                # This ensures we add new Odoo tags without deleting manual Shopify tags
                 final_tag_list = list(set(current_shopify_tags + odoo_tags))
                 c.tags = ",".join(final_tag_list)
 
@@ -940,26 +941,18 @@ def sync_customers_master():
                 if vat:
                     c.note = f"VAT Number: {vat}"
                     metafields_to_save.append(shopify.Metafield({
-                        'key': 'vat_number',
-                        'value': vat,
-                        'type': 'single_line_text_field',
-                        'namespace': 'custom'
+                        'key': 'vat_number', 'value': vat, 'type': 'single_line_text_field', 'namespace': 'custom'
                     }))
                     c.tax_exempt = True 
 
-                # SALESPERSON Metafield (New Logic)
-                # Odoo returns user_id as [id, "Name"]
+                # SALESPERSON Metafield
                 salesperson_field = p.get('user_id')
                 if salesperson_field:
-                    rep_name = salesperson_field[1] # Get the name string
+                    rep_name = salesperson_field[1]
                     metafields_to_save.append(shopify.Metafield({
-                        'key': 'salesrep',
-                        'value': rep_name,
-                        'type': 'single_line_text_field',
-                        'namespace': 'custom'
+                        'key': 'salesrep', 'value': rep_name, 'type': 'single_line_text_field', 'namespace': 'custom'
                     }))
 
-                # Assign accumulated metafields
                 if metafields_to_save:
                     c.metafields = metafields_to_save
 
