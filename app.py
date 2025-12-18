@@ -1707,6 +1707,12 @@ def sync_images_only_manual():
 
         log_event('Image Sync', 'Success', f"Sync Complete. Updated {updates} images.")
 
+@app.route('/sync/images/manual', methods=['GET'])
+def trigger_manual_image_sync():
+    # Trigger the memory-safe image sync in the background
+    threading.Thread(target=sync_images_only_manual).start()
+    return jsonify({"message": "Image Sync Started. Check Live Logs."})
+
 @app.route('/maintenance/add_hash_column', methods=['GET'])
 def maintenance_add_column():
     """
