@@ -425,21 +425,32 @@ def process_order_data(data):
 
 def sync_products_master():
     """
-    Odoo -> Shopify Product Sync (v10.4 - DEBUGGER MODE).
-    - Disables 'Smart Skip' (Forces update).
-    - Prints detailed reason why 'is_pack' is True/False.
+    Odoo -> Shopify Product Sync (v10.5 - SAFETY LOCK ENABLED).
+    - If Company ID is missing, IT STOPS.
+    - Prevents 10,000 junk products from syncing.
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
             log_event('System', 'Error', "Sync Failed: Connection Error")
             return
 
-        # 1. Company Filter
+        # 1. READ CONFIG
         company_id = get_config('odoo_company_id')
-        domain = [['type', 'in', ['product', 'consu']]]
-        if company_id: domain.append(['company_id', '=', int(company_id)])
+        
+        # --- THE SAFETY LOCK (NEW) ---
+        if not company_id:
+            log_event('Product Sync', 'Error', "CRITICAL STOP: No Company ID detected. Aborting to prevent syncing junk data.")
+            log_event('Product Sync', 'Error', "Please go to Dashboard, select your Company, and click SAVE SETTINGS first.")
+            return
+        # -----------------------------
 
         log_event('Product Sync', 'Info', f"Fetching Odoo products (Company {company_id})...")
+        
+        # 2. STRICT FILTER
+        domain = [
+            ['type', 'in', ['product', 'consu']],
+            ['company_id', '=', int(company_id)] # <--- Strict Filter
+        ]
         
         fields = [
             'default_code', 'name', 'list_price', 'standard_price', 'weight', 
@@ -451,13 +462,14 @@ def sync_products_master():
         try:
             raw_odoo_products = odoo.models.execute_kw(
                 odoo.db, odoo.uid, odoo.password,
-                'product.product', 'search_read', [domain], {'fields': fields}
+                'product.product', 'search_read', [domain], 
+                {'fields': fields}
             )
         except Exception as e:
             log_event('Product Sync', 'Error', f"Odoo Fetch Failed: {e}")
             return
 
-        # 2. Deduplication (Same as before)
+        # 3. Deduplication
         odoo_product_map = {}
         for p in raw_odoo_products:
             sku = p.get('default_code')
@@ -469,7 +481,7 @@ def sync_products_master():
                     odoo_product_map[sku] = p
         odoo_products = list(odoo_product_map.values())
 
-        # 3. Shopify Map
+        # 4. Shopify Map
         shopify_map = {}
         try:
             page = shopify.Product.find(limit=250)
@@ -483,18 +495,14 @@ def sync_products_master():
                 else: break
         except Exception as e: return
 
-        # 4. UOM Cache (CRITICAL DEBUG)
+        # 5. UOM Cache
         uom_map = {}
         try:
-            # Fetching 'factor_inv' which is usually the ratio for bigger UOMs
             uoms = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'search_read', [[]], {'fields': ['id', 'name', 'factor_inv']})
             for u in uoms:
                 uom_map[u['id']] = {'name': u['name'], 'ratio': float(u.get('factor_inv', 1.0))}
-            
-            # LOG UOM COUNT
-            log_event('Debug', 'Info', f"Loaded {len(uom_map)} UOM definitions from Odoo.")
-        except Exception as e:
-            log_event('Debug', 'Error', f"Failed to load UOMs: {e}")
+            log_event('Debug', 'Info', f"Loaded {len(uom_map)} UOM definitions.")
+        except: pass
 
         # Configs
         sync_title = get_config('prod_sync_title', True)
@@ -509,9 +517,7 @@ def sync_products_master():
         synced = 0
         active_odoo_skus = set() 
 
-        # --- DISABLE DB MAP CHECK FOR DEBUGGING ---
-        # db_map = {} 
-        # (Commented out to force update)
+        log_event('Product Sync', 'Info', f"Processing {len(odoo_products)} products...")
 
         for p in odoo_products:
             sku = p.get('default_code')
@@ -519,30 +525,20 @@ def sync_products_master():
 
             if not p.get('active', True): continue 
 
-            # --- DEBUG VARIANT LOGIC START ---
+            # --- VARIANT LOGIC START ---
             is_pack = False
             ratio = 1.0
             
-            # RELAXED CHECK: Use bool() instead of 'is True'
+            # Use bool() to catch both True and 1
             has_sec_unit_enabled = bool(p.get('sh_is_secondary_unit'))
             sec_uom_tuple = p.get('sh_secondary_uom')
 
-            if has_sec_unit_enabled:
-                if sec_uom_tuple:
-                    uom_id = sec_uom_tuple[0]
-                    if uom_id in uom_map:
-                        ratio = uom_map[uom_id]['ratio']
-                        if ratio > 1.0:
-                            is_pack = True
-                        else:
-                            log_event('Debug', 'Warning', f"SKU {sku}: Secondary UOM found but Ratio is {ratio} (Must be > 1.0)")
-                    else:
-                        log_event('Debug', 'Error', f"SKU {sku}: UOM ID {uom_id} not found in UOM Map.")
-                else:
-                    log_event('Debug', 'Warning', f"SKU {sku}: Secondary Unit Enabled but Field is Empty.")
+            if has_sec_unit_enabled and sec_uom_tuple:
+                uom_id = sec_uom_tuple[0]
+                if uom_id in uom_map:
+                    ratio = uom_map[uom_id]['ratio']
+                    if ratio > 1.0: is_pack = True
             
-            # --- DEBUG END ---
-
             main_name = 'Outer'
             if p.get('uom_id'):
                 u_id = p['uom_id'][0]
@@ -566,7 +562,6 @@ def sync_products_master():
 
             # SCENARIO 2: PACK PRODUCT
             else:
-                log_event('Debug', 'Success', f"SKU {sku}: DETECTED AS PACK! Ratio: {ratio}")
                 desired_variants.append({
                     'option1': main_name, 
                     'price': str(raw_price),
@@ -682,8 +677,7 @@ def sync_products_master():
             except Exception as e:
                 log_event('Product Sync', 'Error', f"Failed {sku}: {e}")
 
-        # Removed Cleanup to focus on debugging
-        # cleanup_shopify_products(active_odoo_skus)
+        cleanup_shopify_products(active_odoo_skus)
         log_event('Product Sync', 'Success', f"Strict Sync Complete. Synced: {synced}")
 
 
