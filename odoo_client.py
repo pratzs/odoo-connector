@@ -109,18 +109,18 @@ class OdooClient:
         data = self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'read', [product_id], {'fields': ['image_1920']})
         return data[0]['image_1920'] if data and data[0].get('image_1920') else None
 
-    def get_all_products(self, company_id=None):
-        domain = [('type', '=', 'product'), ('default_code', '!=', False), '|', ('active', '=', True), ('active', '=', False)]
-        if company_id:
-            domain = ['&', '&', '&', ('type', '=', 'product'), ('default_code', '!=', False), '|', ('active', '=', True), ('active', '=', False), '|', ('company_id', '=', int(company_id)), ('company_id', '=', False)]
-        
-        # --- FIXED: Added 'write_date' to fields list ---
-        fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 'description_sale', 'active', 'product_tmpl_id', 'qty_available', 'public_categ_ids', 'product_tag_ids', 'uom_id', 'sh_is_secondary_unit', 'sh_secondary_uom', 'write_date']
-        return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search_read', [domain], {'fields': fields})
-
     def get_changed_products(self, time_limit_str, company_id=None):
-        domain = [('write_date', '>', time_limit_str), ('type', '=', 'product'), '|', ('active', '=', True), ('active', '=', False)]
-        if company_id: domain = ['&', '&', '&', ('write_date', '>', time_limit_str), ('type', '=', 'product'), '|', ('active', '=', True), ('active', '=', False), '|', ('company_id', '=', int(company_id)), ('company_id', '=', False)]
+        # FIX: Added 'sale_ok' filter to prevent junk from incremental syncs
+        domain = [
+            ('write_date', '>', time_limit_str), 
+            ('sale_ok', '=', True), 
+            ('type', 'in', ['product', 'consu']),
+            '|', ('active', '=', True), ('active', '=', False)
+        ]
+        
+        if company_id:
+            domain.append(('company_id', '=', int(company_id)))
+            
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search', [domain])
 
     def get_changed_customers(self, time_limit_str, company_id=None):
@@ -181,7 +181,7 @@ class OdooClient:
         return self.models.execute_kw(self.db, self.uid, self.password, 'sale.order', 'search_read', [domain], {'fields': ['id', 'client_order_ref']})
 
     def get_all_products(self, company_id=None):
-        # FIX: Added 'sale_ok=True' to strictly filter only Sellable products
+        # FIX: 'sale_ok=True' is MANDATORY to stop junk products
         domain = [
             ('sale_ok', '=', True), 
             ('type', 'in', ['product', 'consu']), 
@@ -191,11 +191,11 @@ class OdooClient:
         if company_id:
              domain.append(('company_id', '=', int(company_id)))
         
-        # Added 'write_date' for incremental checks
+        # FIX: Added 'barcode' to fields to match App requirements
         fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 
                   'description_sale', 'active', 'product_tmpl_id', 'qty_available', 
                   'public_categ_ids', 'product_tag_ids', 'uom_id', 'sh_is_secondary_unit', 
-                  'sh_secondary_uom', 'write_date', 'sale_ok']
+                  'sh_secondary_uom', 'write_date', 'sale_ok', 'barcode']
                   
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search_read', [domain], {'fields': fields})
 
