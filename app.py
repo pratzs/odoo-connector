@@ -425,22 +425,21 @@ def process_order_data(data):
 
 def sync_products_master():
     """
-    Odoo -> Shopify Product Sync (v10.3 - Fixed Filter, Crash & Option Name).
+    Odoo -> Shopify Product Sync (v10.4 - DEBUGGER MODE).
+    - Disables 'Smart Skip' (Forces update).
+    - Prints detailed reason why 'is_pack' is True/False.
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
             log_event('System', 'Error', "Sync Failed: Connection Error")
             return
 
-        # 1. FIX: STRICT COMPANY FILTER
-        # This prevents fetching 10,000+ products from other companies/demo data.
+        # 1. Company Filter
         company_id = get_config('odoo_company_id')
-        
         domain = [['type', 'in', ['product', 'consu']]]
-        if company_id:
-            domain.append(['company_id', '=', int(company_id)]) # <--- The Critical Fix
+        if company_id: domain.append(['company_id', '=', int(company_id)])
 
-        log_event('Product Sync', 'Info', f"Fetching Odoo products for Company ID {company_id}...")
+        log_event('Product Sync', 'Info', f"Fetching Odoo products (Company {company_id})...")
         
         fields = [
             'default_code', 'name', 'list_price', 'standard_price', 'weight', 
@@ -450,17 +449,15 @@ def sync_products_master():
         ]
         
         try:
-            # We pass the 'domain' here to filter the search
             raw_odoo_products = odoo.models.execute_kw(
                 odoo.db, odoo.uid, odoo.password,
-                'product.product', 'search_read', [domain], 
-                {'fields': fields}
+                'product.product', 'search_read', [domain], {'fields': fields}
             )
         except Exception as e:
             log_event('Product Sync', 'Error', f"Odoo Fetch Failed: {e}")
             return
 
-        # 2. Deduplication
+        # 2. Deduplication (Same as before)
         odoo_product_map = {}
         for p in raw_odoo_products:
             sku = p.get('default_code')
@@ -473,7 +470,6 @@ def sync_products_master():
         odoo_products = list(odoo_product_map.values())
 
         # 3. Shopify Map
-        log_event('Product Sync', 'Info', "Building Shopify SKU Map...")
         shopify_map = {}
         try:
             page = shopify.Product.find(limit=250)
@@ -487,19 +483,23 @@ def sync_products_master():
                 else: break
         except Exception as e: return
 
-        # 4. UOM Cache
+        # 4. UOM Cache (CRITICAL DEBUG)
         uom_map = {}
         try:
+            # Fetching 'factor_inv' which is usually the ratio for bigger UOMs
             uoms = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'search_read', [[]], {'fields': ['id', 'name', 'factor_inv']})
             for u in uoms:
                 uom_map[u['id']] = {'name': u['name'], 'ratio': float(u.get('factor_inv', 1.0))}
-        except: pass
+            
+            # LOG UOM COUNT
+            log_event('Debug', 'Info', f"Loaded {len(uom_map)} UOM definitions from Odoo.")
+        except Exception as e:
+            log_event('Debug', 'Error', f"Failed to load UOMs: {e}")
 
         # Configs
         sync_title = get_config('prod_sync_title', True)
         sync_desc = get_config('prod_sync_desc', True)
         sync_price = get_config('prod_sync_price', True)
-        sync_vendor = get_config('prod_sync_vendor', True)
         sync_tags = get_config('prod_sync_tags', False)
         sync_meta_vendor = get_config('prod_sync_meta_vendor_code', False)
         sync_images = get_config('prod_sync_images', False) 
@@ -507,50 +507,42 @@ def sync_products_master():
         auto_publish = get_config('prod_auto_publish', False)
 
         synced = 0
-        skipped = 0
-        
         active_odoo_skus = set() 
 
-        db_map = {}
-        try:
-            for pm in ProductMap.query.all():
-                if pm.sku: db_map[pm.sku] = pm.last_synced_at
-        except: pass
+        # --- DISABLE DB MAP CHECK FOR DEBUGGING ---
+        # db_map = {} 
+        # (Commented out to force update)
 
-        log_event('Product Sync', 'Info', f"Processing {len(odoo_products)} products...")
-
-        for index, p in enumerate(odoo_products):
-            if index > 0 and index % 50 == 0: 
-                log_event('Product Sync', 'Info', f"Processed {index}/{len(odoo_products)}...")
-
+        for p in odoo_products:
             sku = p.get('default_code')
             active_odoo_skus.add(sku)
 
             if not p.get('active', True): continue 
 
-            exists_in_shopify = sku in shopify_map
-            
-            # Smart Skip
-            if exists_in_shopify and sku in db_map:
-                try:
-                    last_write = datetime.strptime(p.get('write_date').split('.')[0], "%Y-%m-%d %H:%M:%S")
-                    if last_write <= db_map[sku]:
-                        skipped += 1
-                        continue
-                except: pass
-
-            # STRICT VARIANT LOGIC
+            # --- DEBUG VARIANT LOGIC START ---
             is_pack = False
             ratio = 1.0
             
-            has_sec_unit_enabled = p.get('sh_is_secondary_unit') is True 
+            # RELAXED CHECK: Use bool() instead of 'is True'
+            has_sec_unit_enabled = bool(p.get('sh_is_secondary_unit'))
             sec_uom_tuple = p.get('sh_secondary_uom')
 
-            if has_sec_unit_enabled and sec_uom_tuple:
-                if sec_uom_tuple[0] in uom_map:
-                    ratio = uom_map[sec_uom_tuple[0]]['ratio']
-                    if ratio > 1.0: is_pack = True
+            if has_sec_unit_enabled:
+                if sec_uom_tuple:
+                    uom_id = sec_uom_tuple[0]
+                    if uom_id in uom_map:
+                        ratio = uom_map[uom_id]['ratio']
+                        if ratio > 1.0:
+                            is_pack = True
+                        else:
+                            log_event('Debug', 'Warning', f"SKU {sku}: Secondary UOM found but Ratio is {ratio} (Must be > 1.0)")
+                    else:
+                        log_event('Debug', 'Error', f"SKU {sku}: UOM ID {uom_id} not found in UOM Map.")
+                else:
+                    log_event('Debug', 'Warning', f"SKU {sku}: Secondary Unit Enabled but Field is Empty.")
             
+            # --- DEBUG END ---
+
             main_name = 'Outer'
             if p.get('uom_id'):
                 u_id = p['uom_id'][0]
@@ -574,6 +566,7 @@ def sync_products_master():
 
             # SCENARIO 2: PACK PRODUCT
             else:
+                log_event('Debug', 'Success', f"SKU {sku}: DETECTED AS PACK! Ratio: {ratio}")
                 desired_variants.append({
                     'option1': main_name, 
                     'price': str(raw_price),
@@ -595,18 +588,13 @@ def sync_products_master():
             
             try:
                 if not sp:
-                    if not auto_create: 
-                        skipped += 1
-                        continue
+                    if not auto_create: continue
                     sp = shopify.Product()
                     sp.title = p['name']
                     sp.vendor = 'Worthy'
                     sp.product_type = odoo.get_public_category_name(p.get('public_categ_ids', [])) or ''
                     sp.status = 'active' if auto_publish else 'draft'
-                    
-                    # Force Option Name to 'Pack Size' on create
                     if is_pack: sp.options = [{'name': 'Pack Size'}]
-                    
                     if sync_tags:
                         odoo_tags = odoo.get_tag_names(p.get('product_tag_ids', []))
                         if odoo_tags: sp.tags = ",".join(odoo_tags)
@@ -617,7 +605,6 @@ def sync_products_master():
                         sp.title = p['name']; changed=True
                     
                     if is_pack:
-                        # Fixes old products: If option name is 'Format' or 'Title', force 'Pack Size'
                         if not sp.options or sp.options[0].name != 'Pack Size':
                             sp.options = [{'name': 'Pack Size'}]; changed = True
                     else:
@@ -665,16 +652,13 @@ def sync_products_master():
                             'key': 'vendor_product_code', 'value': v_code, 'type': 'single_line_text_field', 'namespace': 'custom'
                         }))
 
-                # --- FIX: SAFE IMAGE CHECK ---
-                # Prevents "NoneType object has no attribute 'get'" crash
+                # Safe Image Check
                 if sync_images:
                      has_img = sp_data.get('has_images', False) if sp_data else False
-                     
                      if not has_img:
                           try:
                             p_full = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                                 'product.product', 'read', [[p['id']]], {'fields': ['image_1920']})
-                            
                             img_data = p_full[0].get('image_1920')
                             if img_data:
                                 if isinstance(img_data, bytes): img_data = img_data.decode('utf-8')
@@ -698,8 +682,9 @@ def sync_products_master():
             except Exception as e:
                 log_event('Product Sync', 'Error', f"Failed {sku}: {e}")
 
-        cleanup_shopify_products(active_odoo_skus)
-        log_event('Product Sync', 'Success', f"Strict Sync Complete. Synced: {synced}, Skipped: {skipped}")
+        # Removed Cleanup to focus on debugging
+        # cleanup_shopify_products(active_odoo_skus)
+        log_event('Product Sync', 'Success', f"Strict Sync Complete. Synced: {synced}")
 
 
 def fix_variant_mess_task():
