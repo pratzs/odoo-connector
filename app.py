@@ -417,7 +417,7 @@ def process_order_data(data):
 
 def sync_products_master():
     """
-    Odoo -> Shopify Product Sync (v10.1 - Fixes NameError Crash).
+    Odoo -> Shopify Product Sync (v10.2 - Updated Option Name to 'Pack Size').
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
@@ -494,9 +494,7 @@ def sync_products_master():
         synced = 0
         skipped = 0
         
-        # --- FIX: Initialize the set here ---
         active_odoo_skus = set() 
-        # ------------------------------------
 
         db_map = {}
         try:
@@ -512,9 +510,7 @@ def sync_products_master():
 
             sku = p.get('default_code')
             
-            # --- FIX: Add SKU to set ---
             active_odoo_skus.add(sku)
-            # ---------------------------
 
             if not p.get('active', True): continue 
 
@@ -593,7 +589,10 @@ def sync_products_master():
                     sp.vendor = 'Worthy'
                     sp.product_type = odoo.get_public_category_name(p.get('public_categ_ids', [])) or ''
                     sp.status = 'active' if auto_publish else 'draft'
-                    if is_pack: sp.options = [{'name': 'Format'}]
+                    
+                    # --- FIX: Set name to Pack Size on Create ---
+                    if is_pack: sp.options = [{'name': 'Pack Size'}]
+                    
                     if sync_tags:
                         odoo_tags = odoo.get_tag_names(p.get('product_tag_ids', []))
                         if odoo_tags: sp.tags = ",".join(odoo_tags)
@@ -604,8 +603,10 @@ def sync_products_master():
                         sp.title = p['name']; changed=True
                     
                     if is_pack:
-                        if not sp.options or sp.options[0].name == 'Title':
-                            sp.options = [{'name': 'Format'}]; changed = True
+                        # --- FIX: Update Existing to Pack Size ---
+                        # If option name is Title, Format, or anything else, change to Pack Size
+                        if not sp.options or sp.options[0].name != 'Pack Size':
+                            sp.options = [{'name': 'Pack Size'}]; changed = True
                     else:
                         if sp.options and sp.options[0].name != 'Title':
                             sp.options = []; changed = True
@@ -645,15 +646,15 @@ def sync_products_master():
                             except: pass
 
                 if sync_meta_vendor:
-                     v_code = odoo.get_vendor_product_code(p['product_tmpl_id'][0])
-                     if v_code:
+                      v_code = odoo.get_vendor_product_code(p['product_tmpl_id'][0])
+                      if v_code:
                         sp.add_metafield(shopify.Metafield({
                             'key': 'vendor_product_code', 'value': v_code, 'type': 'single_line_text_field', 'namespace': 'custom'
                         }))
 
                 # Lightweight Image Check (Only for new products)
                 if sync_images and not sp_data.get('has_images', False):
-                     try:
+                      try:
                         p_full = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                             'product.product', 'read', [[p['id']]], {'fields': ['image_1920']})
                         
@@ -663,7 +664,7 @@ def sync_products_master():
                             image = shopify.Image(prefix_options={'product_id': sp.id})
                             image.attachment = img_data
                             image.save()
-                     except: pass
+                      except: pass
 
                 synced += 1
                 
