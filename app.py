@@ -419,17 +419,23 @@ def process_order_data(data):
 
 def sync_products_master():
     """
-    Odoo -> Shopify Product Sync (v10.2 - Updated Option Name to 'Pack Size').
+    Odoo -> Shopify Product Sync (v10.3 - Fixed Filter, Crash & Option Name).
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
             log_event('System', 'Error', "Sync Failed: Connection Error")
             return
 
+        # 1. FIX: STRICT COMPANY FILTER
+        # This prevents fetching 10,000+ products from other companies/demo data.
         company_id = get_config('odoo_company_id')
-        log_event('Product Sync', 'Info', "Fetching Odoo products (Lightweight)...")
         
-        # 1. Fetch only necessary fields
+        domain = [['type', 'in', ['product', 'consu']]]
+        if company_id:
+            domain.append(['company_id', '=', int(company_id)]) # <--- The Critical Fix
+
+        log_event('Product Sync', 'Info', f"Fetching Odoo products for Company ID {company_id}...")
+        
         fields = [
             'default_code', 'name', 'list_price', 'standard_price', 'weight', 
             'active', 'write_date', 'uom_id', 'sh_is_secondary_unit', 
@@ -438,9 +444,10 @@ def sync_products_master():
         ]
         
         try:
+            # We pass the 'domain' here to filter the search
             raw_odoo_products = odoo.models.execute_kw(
                 odoo.db, odoo.uid, odoo.password,
-                'product.product', 'search_read', [[['type', 'in', ['product', 'consu']]]], 
+                'product.product', 'search_read', [domain], 
                 {'fields': fields}
             )
         except Exception as e:
@@ -511,7 +518,6 @@ def sync_products_master():
                 log_event('Product Sync', 'Info', f"Processed {index}/{len(odoo_products)}...")
 
             sku = p.get('default_code')
-            
             active_odoo_skus.add(sku)
 
             if not p.get('active', True): continue 
@@ -592,7 +598,7 @@ def sync_products_master():
                     sp.product_type = odoo.get_public_category_name(p.get('public_categ_ids', [])) or ''
                     sp.status = 'active' if auto_publish else 'draft'
                     
-                    # --- FIX: Set name to Pack Size on Create ---
+                    # Force Option Name to 'Pack Size' on create
                     if is_pack: sp.options = [{'name': 'Pack Size'}]
                     
                     if sync_tags:
@@ -605,8 +611,7 @@ def sync_products_master():
                         sp.title = p['name']; changed=True
                     
                     if is_pack:
-                        # --- FIX: Update Existing to Pack Size ---
-                        # If option name is Title, Format, or anything else, change to Pack Size
+                        # Fixes old products: If option name is 'Format' or 'Title', force 'Pack Size'
                         if not sp.options or sp.options[0].name != 'Pack Size':
                             sp.options = [{'name': 'Pack Size'}]; changed = True
                     else:
@@ -654,19 +659,23 @@ def sync_products_master():
                             'key': 'vendor_product_code', 'value': v_code, 'type': 'single_line_text_field', 'namespace': 'custom'
                         }))
 
-                # Lightweight Image Check (Only for new products)
-                if sync_images and not sp_data.get('has_images', False):
-                      try:
-                        p_full = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                            'product.product', 'read', [[p['id']]], {'fields': ['image_1920']})
-                        
-                        img_data = p_full[0].get('image_1920')
-                        if img_data:
-                            if isinstance(img_data, bytes): img_data = img_data.decode('utf-8')
-                            image = shopify.Image(prefix_options={'product_id': sp.id})
-                            image.attachment = img_data
-                            image.save()
-                      except: pass
+                # --- FIX: SAFE IMAGE CHECK ---
+                # Prevents "NoneType object has no attribute 'get'" crash
+                if sync_images:
+                     has_img = sp_data.get('has_images', False) if sp_data else False
+                     
+                     if not has_img:
+                          try:
+                            p_full = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                                'product.product', 'read', [[p['id']]], {'fields': ['image_1920']})
+                            
+                            img_data = p_full[0].get('image_1920')
+                            if img_data:
+                                if isinstance(img_data, bytes): img_data = img_data.decode('utf-8')
+                                image = shopify.Image(prefix_options={'product_id': sp.id})
+                                image.attachment = img_data
+                                image.save()
+                          except: pass
 
                 synced += 1
                 
