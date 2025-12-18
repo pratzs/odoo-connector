@@ -425,209 +425,194 @@ def process_order_data(data):
 
 def sync_products_master():
     """
-    Odoo -> Shopify Product Sync (v10.5 - SAFETY LOCK ENABLED).
-    - If Company ID is missing, IT STOPS.
-    - Prevents 10,000 junk products from syncing.
+    Odoo -> Shopify Product Sync (STABILIZED v3.0).
+    - Features: Batching, Junk Filter, Pack Size Fix.
+    - NEW: Syncs Barcodes.
+    - NEW: Sets Vendor = First word of Product Title.
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
             log_event('System', 'Error', "Sync Failed: Connection Error")
             return
 
-        # 1. READ CONFIG
         company_id = get_config('odoo_company_id')
-        
-        # --- THE SAFETY LOCK (NEW) ---
         if not company_id:
-            log_event('Product Sync', 'Error', "CRITICAL STOP: No Company ID detected. Aborting to prevent syncing junk data.")
-            log_event('Product Sync', 'Error', "Please go to Dashboard, select your Company, and click SAVE SETTINGS first.")
+            log_event('Product Sync', 'Error', "CRITICAL: No Company ID set. Aborting.")
             return
-        # -----------------------------
 
-        log_event('Product Sync', 'Info', f"Fetching Odoo products (Company {company_id})...")
+        # --- STEP 1: GET IDs ONLY (Low Memory) ---
+        log_event('Product Sync', 'Info', "Fetching Odoo product IDs...")
         
-        # 2. STRICT FILTER
         domain = [
+            ['sale_ok', '=', True],
             ['type', 'in', ['product', 'consu']],
-            ['company_id', '=', int(company_id)] # <--- Strict Filter
-        ]
-        
-        fields = [
-            'default_code', 'name', 'list_price', 'standard_price', 'weight', 
-            'active', 'write_date', 'uom_id', 'sh_is_secondary_unit', 
-            'sh_secondary_uom', 'public_categ_ids', 'product_tag_ids', 
-            'description_sale', 'product_tmpl_id'
+            ['company_id', '=', int(company_id)]
         ]
         
         try:
-            raw_odoo_products = odoo.models.execute_kw(
-                odoo.db, odoo.uid, odoo.password,
-                'product.product', 'search_read', [domain], 
-                {'fields': fields}
-            )
+            product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'product.product', 'search', [domain])
         except Exception as e:
-            log_event('Product Sync', 'Error', f"Odoo Fetch Failed: {e}")
+            log_event('Product Sync', 'Error', f"Odoo Search Failed: {e}")
             return
 
-        # 3. Deduplication
-        odoo_product_map = {}
-        for p in raw_odoo_products:
-            sku = p.get('default_code')
-            if not sku: continue
-            if sku not in odoo_product_map:
-                odoo_product_map[sku] = p
-            else:
-                if p.get('active', True) and not odoo_product_map[sku].get('active', True):
-                    odoo_product_map[sku] = p
-        odoo_products = list(odoo_product_map.values())
+        total_count = len(product_ids)
+        log_event('Product Sync', 'Info', f"Found {total_count} sellable products. Starting Batch Sync...")
 
-        # 4. Shopify Map
-        shopify_map = {}
-        try:
-            page = shopify.Product.find(limit=250)
-            while page:
-                for sp in page:
-                    has_images = len(sp.images) > 0
-                    if sp.variants:
-                        for v in sp.variants:
-                            if v.sku: shopify_map[v.sku] = {'product': sp, 'has_images': has_images}
-                if page.has_next_page(): page = page.next_page()
-                else: break
-        except Exception as e: return
-
-        # 5. UOM Cache
+        # --- PRE-LOAD CACHES ---
         uom_map = {}
         try:
             uoms = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'search_read', [[]], {'fields': ['id', 'name', 'factor_inv']})
             for u in uoms:
                 uom_map[u['id']] = {'name': u['name'], 'ratio': float(u.get('factor_inv', 1.0))}
-            log_event('Debug', 'Info', f"Loaded {len(uom_map)} UOM definitions.")
         except: pass
 
-        # Configs
+        # --- CONFIGS ---
         sync_title = get_config('prod_sync_title', True)
-        sync_desc = get_config('prod_sync_desc', True)
         sync_price = get_config('prod_sync_price', True)
+        sync_desc = get_config('prod_sync_desc', True)
         sync_tags = get_config('prod_sync_tags', False)
-        sync_meta_vendor = get_config('prod_sync_meta_vendor_code', False)
-        sync_images = get_config('prod_sync_images', False) 
-        auto_create = get_config('prod_auto_create', True)
+        sync_images = get_config('prod_sync_images', False)
+        sync_vendor = get_config('prod_sync_vendor', True) # Check if vendor sync is enabled
+        
+        auto_create = get_config('prod_auto_create', False)
         auto_publish = get_config('prod_auto_publish', False)
 
         synced = 0
-        active_odoo_skus = set() 
+        BATCH_SIZE = 50
 
-        log_event('Product Sync', 'Info', f"Processing {len(odoo_products)} products...")
-
-        for p in odoo_products:
-            sku = p.get('default_code')
-            active_odoo_skus.add(sku)
-
-            if not p.get('active', True): continue 
-
-            # --- VARIANT LOGIC START ---
-            is_pack = False
-            ratio = 1.0
+        # --- STEP 2: BATCH LOOP ---
+        for i in range(0, total_count, BATCH_SIZE):
+            batch_ids = product_ids[i:i + BATCH_SIZE]
             
-            # Use bool() to catch both True and 1
-            has_sec_unit_enabled = bool(p.get('sh_is_secondary_unit'))
-            sec_uom_tuple = p.get('sh_secondary_uom')
-
-            if has_sec_unit_enabled and sec_uom_tuple:
-                uom_id = sec_uom_tuple[0]
-                if uom_id in uom_map:
-                    ratio = uom_map[uom_id]['ratio']
-                    if ratio > 1.0: is_pack = True
-            
-            main_name = 'Outer'
-            if p.get('uom_id'):
-                u_id = p['uom_id'][0]
-                if u_id in uom_map: main_name = uom_map[u_id]['name']
-                elif len(p['uom_id']) > 1: main_name = p['uom_id'][1]
-
-            raw_price = float(p.get('list_price', 0.0))
-            raw_cost = float(p.get('standard_price', 0.0))
-            
-            desired_variants = []
-
-            # SCENARIO 1: SIMPLE PRODUCT
-            if not is_pack:
-                desired_variants.append({
-                    'option1': 'Default Title',
-                    'price': str(raw_price),
-                    'sku': sku,
-                    'weight': p.get('weight', 0),
-                    'cost': str(raw_cost)
-                })
-
-            # SCENARIO 2: PACK PRODUCT
-            else:
-                desired_variants.append({
-                    'option1': main_name, 
-                    'price': str(raw_price),
-                    'sku': sku,
-                    'weight': p.get('weight', 0),
-                    'cost': str(raw_cost)
-                })
-                desired_variants.append({
-                    'option1': 'Unit',
-                    'price': str(round(raw_price / ratio, 2)),
-                    'sku': f"{sku}-UNIT",
-                    'weight': float(p.get('weight', 0)) / ratio,
-                    'cost': str(round(raw_cost / ratio, 2))
-                })
-
-            # SHOPIFY SYNC
-            sp_data = shopify_map.get(sku)
-            sp = sp_data['product'] if sp_data else None
+            # ADDED 'barcode' to fields list
+            fields = [
+                'default_code', 'name', 'list_price', 'standard_price', 'weight', 
+                'active', 'uom_id', 'sh_is_secondary_unit', 'sh_secondary_uom', 
+                'public_categ_ids', 'product_tag_ids', 'description_sale', 
+                'product_tmpl_id', 'image_1920', 'barcode' 
+            ]
             
             try:
+                odoo_products = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                    'product.product', 'read', [batch_ids], {'fields': fields})
+            except Exception as e:
+                log_event('Product Sync', 'Error', f"Batch Read Error: {e}")
+                continue
+
+            for p in odoo_products:
+                sku = p.get('default_code')
+                if not sku: continue
+
+                if not p.get('active', True): continue
+
+                # --- 2A. DATA PREP ---
+                # Vendor Logic: First word of the title
+                product_name = p.get('name', 'Unknown')
+                vendor_name = product_name.split(' ')[0] if product_name else "Worthy"
+                
+                # UOM / Pack Logic
+                is_pack = False
+                ratio = 1.0
+                if p.get('sh_is_secondary_unit') and p.get('sh_secondary_uom'):
+                    sec_uom_id = p['sh_secondary_uom'][0]
+                    if sec_uom_id in uom_map:
+                        ratio = uom_map[sec_uom_id]['ratio']
+                        if ratio > 1.0: is_pack = True
+                
+                main_uom_name = 'Outer'
+                if p.get('uom_id'):
+                    u_id = p['uom_id'][0]
+                    if u_id in uom_map: main_uom_name = uom_map[u_id]['name']
+
+                desired_variants = []
+                raw_price = float(p.get('list_price', 0.0))
+                raw_cost = float(p.get('standard_price', 0.0)) # Cost Price
+                barcode = p.get('barcode', '') # Barcode
+                
+                if not is_pack:
+                    # SIMPLE PRODUCT
+                    desired_variants.append({
+                        'option1': 'Default Title',
+                        'price': str(raw_price),
+                        'sku': sku,
+                        'barcode': barcode,
+                        'cost': str(raw_cost)
+                    })
+                else:
+                    # PACK PRODUCT - Only if secondary UOM is active
+                    # Variant 1: Outer (Uses Odoo Barcode)
+                    desired_variants.append({
+                        'option1': main_uom_name, 
+                        'price': str(raw_price),
+                        'sku': sku,
+                        'barcode': barcode,
+                        'cost': str(raw_cost)
+                    })
+                    # Variant 2: Unit (Calculated Price, No Barcode usually to avoid conflict)
+                    desired_variants.append({
+                        'option1': 'Unit', 
+                        'price': str(round(raw_price / ratio, 2)),
+                        'sku': f"{sku}-UNIT",
+                        'barcode': '', # Units often need different barcodes
+                        'cost': str(round(raw_cost / ratio, 2))
+                    })
+
+                # --- 2B. SHOPIFY ACTIONS ---
+                shopify_id = find_shopify_product_by_sku(sku)
+                sp = None
+                
+                if shopify_id:
+                    try: sp = shopify.Product.find(shopify_id)
+                    except: sp = None
+                
+                # CREATE NEW
                 if not sp:
                     if not auto_create: continue
                     sp = shopify.Product()
                     sp.title = p['name']
-                    sp.vendor = 'Worthy'
-                    sp.product_type = odoo.get_public_category_name(p.get('public_categ_ids', [])) or ''
+                    sp.vendor = vendor_name # Set Vendor on Create
+                    sp.product_type = odoo.get_public_category_name(p.get('public_categ_ids', [])) or '' # Set Type
                     sp.status = 'active' if auto_publish else 'draft'
-                    if is_pack: sp.options = [{'name': 'Pack Size'}]
-                    if sync_tags:
-                        odoo_tags = odoo.get_tag_names(p.get('product_tag_ids', []))
-                        if odoo_tags: sp.tags = ",".join(odoo_tags)
-                    if sync_desc: sp.body_html = p.get('description_sale') or ''
-                else:
-                    changed = False
-                    if sync_title and getattr(sp, 'title', '') != p['name']: 
-                        sp.title = p['name']; changed=True
-                    
-                    if is_pack:
-                        if not sp.options or sp.options[0].name != 'Pack Size':
-                            sp.options = [{'name': 'Pack Size'}]; changed = True
-                    else:
-                        if sp.options and sp.options[0].name != 'Title':
-                            sp.options = []; changed = True
+                
+                # UPDATE HEADER
+                if sync_title: sp.title = p['name']
+                if sync_vendor: sp.vendor = vendor_name # Update Vendor
+                if sync_desc: sp.body_html = p.get('description_sale') or ''
+                
+                # Tags
+                if sync_tags:
+                    odoo_tags = odoo.get_tag_names(p.get('product_tag_ids', []))
+                    if odoo_tags: sp.tags = ",".join(odoo_tags)
 
-                    if changed: sp.save()
+                # Pack Size Option Enforcement
+                if is_pack:
+                    sp.options = [{'name': 'Pack Size'}] 
+                elif sp.options and sp.options[0].name != 'Title':
+                    sp.options = [{'name': 'Title', 'values': ['Default Title']}]
 
-                existing_vars = getattr(sp, 'variants', [])
+                sp.save()
+
+                # UPDATE VARIANTS
+                existing_vars = sp.variants
                 final_vars = []
                 
                 for des in desired_variants:
                     match = next((v for v in existing_vars if v.sku == des['sku']), None)
-                    if not match and len(desired_variants) == 1 and len(existing_vars) == 1:
-                        match = existing_vars[0]
-
                     if not match: match = shopify.Variant({'product_id': sp.id})
-
+                    
                     match.option1 = des['option1']
                     match.sku = des['sku']
+                    if des['barcode']: match.barcode = des['barcode'] # Sync Barcode
+                    
                     if sync_price: match.price = des['price']
-                    match.weight = des['weight']
                     match.inventory_management = 'shopify'
                     final_vars.append(match)
 
                 sp.variants = final_vars
                 sp.save()
-
+                
+                # UPDATE COST PRICE (InventoryItem)
                 if sp.variants:
                     for v in sp.variants:
                         d_data = next((d for d in desired_variants if d['sku'] == v.sku), None)
@@ -635,35 +620,23 @@ def sync_products_master():
                             try:
                                 inv_item = shopify.InventoryItem.find(v.inventory_item_id)
                                 if inv_item:
-                                    inv_item.cost = d_data['cost']
+                                    inv_item.cost = d_data['cost'] # Sync Cost
                                     inv_item.tracked = True
                                     inv_item.save()
                             except: pass
 
-                if sync_meta_vendor:
-                      v_code = odoo.get_vendor_product_code(p['product_tmpl_id'][0])
-                      if v_code:
-                        sp.add_metafield(shopify.Metafield({
-                            'key': 'vendor_product_code', 'value': v_code, 'type': 'single_line_text_field', 'namespace': 'custom'
-                        }))
+                # IMAGE SYNC (Create Only or if missing)
+                if sync_images and p.get('image_1920'):
+                     if not sp.images:
+                         try:
+                            img_data = p['image_1920']
+                            if isinstance(img_data, bytes): img_data = img_data.decode('utf-8')
+                            image = shopify.Image(prefix_options={'product_id': sp.id})
+                            image.attachment = img_data
+                            image.save()
+                         except: pass
 
-                # Safe Image Check
-                if sync_images:
-                     has_img = sp_data.get('has_images', False) if sp_data else False
-                     if not has_img:
-                          try:
-                            p_full = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                                'product.product', 'read', [[p['id']]], {'fields': ['image_1920']})
-                            img_data = p_full[0].get('image_1920')
-                            if img_data:
-                                if isinstance(img_data, bytes): img_data = img_data.decode('utf-8')
-                                image = shopify.Image(prefix_options={'product_id': sp.id})
-                                image.attachment = img_data
-                                image.save()
-                          except: pass
-
-                synced += 1
-                
+                # MAP IN DB
                 try:
                     pm = ProductMap.query.filter_by(sku=sku).first()
                     if not pm:
@@ -674,11 +647,13 @@ def sync_products_master():
                     db.session.commit()
                 except: db.session.rollback()
 
-            except Exception as e:
-                log_event('Product Sync', 'Error', f"Failed {sku}: {e}")
+                synced += 1
 
-        cleanup_shopify_products(active_odoo_skus)
-        log_event('Product Sync', 'Success', f"Strict Sync Complete. Synced: {synced}")
+            del odoo_products
+            gc.collect()
+            log_event('Product Sync', 'Info', f"Processed batch {i}-{i+BATCH_SIZE}...")
+
+        log_event('Product Sync', 'Success', f"Sync Complete. Synced {synced} products.")
 
 
 def fix_variant_mess_task():
