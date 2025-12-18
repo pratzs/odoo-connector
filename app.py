@@ -1554,14 +1554,14 @@ def run_schedule():
     
     # --- High Frequency Jobs ---
     # Inventory Sync (Every 30 mins) - Timezone irrelevant
-    schedule.every(30).minutes.do(lambda: threading.Thread(target=scheduled_inventory_sync).start())
-    
+    schedule.every(10).minutes.do(lambda: threading.Thread(target=scheduled_inventory_sync).start())
+
     # --- Maintenance Job ---
     # Log Cleanup: 7:00 PM NZDT = 06:00 UTC
     schedule.every().day.at("06:00").do(lambda: threading.Thread(target=cleanup_old_logs).start())
 
     # Fulfillment Sync: Run every 15 minutes to keep customers updated
-    schedule.every(15).minutes.do(lambda: threading.Thread(target=sync_odoo_fulfillments).start())
+    schedule.every(60).minutes.do(lambda: threading.Thread(target=sync_odoo_fulfillments).start())
     
     while True:
         schedule.run_pending()
