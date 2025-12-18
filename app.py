@@ -19,14 +19,20 @@ from sqlalchemy import text
 import ssl
 import gc 
 
-# --- FIX: Force Define FulfillmentOrder Resource ---
+# --- FIX: PATCH SHOPIFY LIBRARY FOR 2025-01 API ---
 try:
     from shopify.resources.fulfillment_order import FulfillmentOrder
 except ImportError:
+    # 1. Define missing FulfillmentOrder class (Fixes "has no attribute 'FulfillmentOrder'")
     class FulfillmentOrder(shopify.ShopifyResource):
         _prefix_source = "/orders/$order_id/"
         _plural = "fulfillment_orders"
 shopify.FulfillmentOrder = FulfillmentOrder
+
+# 2. CRITICAL FIX FOR 406 ERROR:
+# The library defaults to the old URL: /orders/:id/fulfillments.json (Blocked by Shopify)
+# This line forces it to use the new URL: /fulfillments.json
+shopify.Fulfillment._prefix_source = "/"
 # ---------------------------------------------------
 
 app = Flask(__name__)
