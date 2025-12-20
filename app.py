@@ -2034,6 +2034,59 @@ def trigger_fix_variants():
     threading.Thread(target=fix_variant_mess_task).start()
     return jsonify({"message": "Variant Cleanup Started. Check Live Logs."})
 
+def check_for_corrupted_categories():
+    """
+    DIAGNOSTIC TOOL: Finds POS Categories with missing names.
+    Run this once to identify the specific ID causing the crash.
+    """
+    with app.app_context():
+        if not odoo: 
+            print("No Odoo connection.")
+            return
+
+        print("--- STARTING DIAGNOSTIC SCAN ---")
+        
+        # 1. Fetch ALL POS Categories (IDs and Names only)
+        try:
+            cats = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+                'pos.category', 'search_read', 
+                [[]],  # Empty domain = All records
+                {'fields': ['id', 'name', 'parent_id']}
+            )
+        except Exception as e:
+            print(f"Scan failed: {e}")
+            return
+
+        found_issues = 0
+        
+        for c in cats:
+            c_id = c.get('id')
+            c_name = c.get('name')
+            
+            # Check 1: Is the name completely missing?
+            if not c_name or str(c_name) == 'False':
+                print(f"🛑 FOUND CORRUPTED CATEGORY! ID: {c_id} | Name: '{c_name}' (This is the culprit)")
+                found_issues += 1
+            
+            # Check 2: Does it have a parent?
+            parent = c.get('parent_id') # returns [id, "Name"]
+            if parent and (not parent[1] or str(parent[1]) == 'False'):
+                 print(f"⚠️ Category ID {c_id} ('{c_name}') has a CORRUPTED PARENT (ID: {parent[0]})")
+                 found_issues += 1
+
+        if found_issues == 0:
+            print("✅ No obvious data corruption found in POS Categories.")
+        else:
+            print(f"❌ Found {found_issues} corrupted records. Fix these in Odoo to stop the crashes.")
+        
+        print("--- END DIAGNOSTIC SCAN ---")
+
+# --- Add a route to trigger it easily ---
+@app.route('/maintenance/diagnose_categories', methods=['GET'])
+def trigger_diagnose():
+    threading.Thread(target=check_for_corrupted_categories).start()
+    return jsonify({"message": "Diagnostic started. Check your terminal/server logs."})
+
 # --- ADD THIS MARKER ---
 print("**************************************************")
 print(">>> SYSTEM STARTUP: VERSION 6.0 - FINAL FIXES <<<")
