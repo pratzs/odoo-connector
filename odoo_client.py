@@ -191,12 +191,11 @@ class OdooClient:
         if company_id:
              domain.append(['company_id', '=', int(company_id)])
         
-        
-        # FIX: Added 'barcode' to fields to match App requirements
+        # ADDED 'qty_per_pack' to fields so we can use it in the repair tool
         fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 
                   'description_sale', 'active', 'product_tmpl_id', 'qty_available', 
                   'public_categ_ids', 'product_tag_ids', 'uom_id', 'sh_is_secondary_unit', 
-                  'sh_secondary_uom', 'write_date', 'sale_ok', 'barcode']
+                  'sh_secondary_uom', 'write_date', 'sale_ok', 'barcode', 'qty_per_pack']
                   
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search_read', [domain], {'fields': fields})
 
