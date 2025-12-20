@@ -453,10 +453,10 @@ def process_order_data(data):
 
 def sync_products_master():
     """
-    Odoo -> Shopify Product Sync (v4.0 - Qty Per Pack Priority).
-    - Features: Batching, Junk Filter, Pack Size Fix.
-    - NEW: Priority check for 'qty_per_pack' to force correct naming (e.g. "12 per pack").
-    - NEW: Loads inactive UOMs for robust ratio calculation.
+    Odoo -> Shopify Product Sync (v5.0 - STRICT MODE).
+    - Fixes "Plenty of 2 variants" issue.
+    - ONLY creates packs if 'sh_is_secondary_unit' is True in Odoo.
+    - Uses 'qty_per_pack' only for naming/ratio, not for deciding IF it is a pack.
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
@@ -468,7 +468,7 @@ def sync_products_master():
             log_event('Product Sync', 'Error', "CRITICAL: No Company ID set. Aborting.")
             return
 
-        # --- STEP 1: GET IDs ONLY (Low Memory) ---
+        # --- STEP 1: GET IDs ONLY ---
         log_event('Product Sync', 'Info', "Fetching Odoo product IDs...")
         
         domain = [
@@ -487,10 +487,9 @@ def sync_products_master():
         total_count = len(product_ids)
         log_event('Product Sync', 'Info', f"Found {total_count} sellable products. Starting Batch Sync...")
 
-        # --- PRE-LOAD CACHES (Robust: Active + Inactive) ---
+        # --- PRE-LOAD CACHES ---
         uom_map = {}
         try:
-            # Load ALL UOMs so we don't fail on archived ones
             uoms = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'search_read', 
                 [['|', ['active', '=', True], ['active', '=', False]]], 
                 {'fields': ['id', 'name', 'factor_inv']}
@@ -518,7 +517,6 @@ def sync_products_master():
         for i in range(0, total_count, BATCH_SIZE):
             batch_ids = product_ids[i:i + BATCH_SIZE]
             
-            # UPDATE: Added 'qty_per_pack' to fields
             fields = [
                 'default_code', 'name', 'list_price', 'standard_price', 'weight', 
                 'active', 'uom_id', 'sh_is_secondary_unit', 'sh_secondary_uom', 
@@ -536,38 +534,41 @@ def sync_products_master():
             for p in odoo_products:
                 sku = p.get('default_code')
                 if not sku: continue
-
                 if not p.get('active', True): continue
 
-                # --- 2A. DATA PREP ---
                 product_name = p.get('name', 'Unknown')
                 vendor_name = product_name.split(' ')[0] if product_name else "Worthy"
                 
-                # === NEW PACK LOGIC (Matches Repair Tool) ===
+                # === STRICT PACK LOGIC ===
                 is_pack = False
                 ratio = 1.0
                 main_uom_name = 'Outer'
 
-                # 1. Base UOM Name (Fallback)
-                if p.get('uom_id'):
-                    if len(p['uom_id']) > 1 and p['uom_id'][1]:
-                        main_uom_name = p['uom_id'][1] # Direct name from Odoo
-                    elif p['uom_id'][0] in uom_map: 
-                        main_uom_name = uom_map[p['uom_id'][0]]['name']
-
-                # 2. Priority: Qty Per Pack
-                qty_pack = p.get('qty_per_pack', 0.0)
-                if qty_pack and float(qty_pack) > 1.0:
-                    is_pack = True
-                    ratio = float(qty_pack)
-                    main_uom_name = f"{int(ratio)} per pack" # Forces naming like "12 per pack"
-                
-                # 3. Fallback: Secondary UOM Logic
-                elif p.get('sh_is_secondary_unit') and p.get('sh_secondary_uom'):
-                    sec_uom_id = p['sh_secondary_uom'][0]
-                    if sec_uom_id in uom_map:
-                        ratio = uom_map[sec_uom_id]['ratio']
-                        if ratio > 1.0: is_pack = True
+                # CRITICAL FIX: Only treat as pack if Odoo explicitly says so
+                if p.get('sh_is_secondary_unit') is True:
+                    
+                    # 1. Try Qty Per Pack for Naming/Ratio
+                    qty_pack = p.get('qty_per_pack', 0.0)
+                    if qty_pack and float(qty_pack) > 1.0:
+                        is_pack = True
+                        ratio = float(qty_pack)
+                        main_uom_name = f"{int(ratio)} per pack"
+                    
+                    # 2. Fallback to Secondary UOM
+                    elif p.get('sh_secondary_uom'):
+                        sec_uom_id = p['sh_secondary_uom'][0]
+                        if sec_uom_id in uom_map:
+                            ratio = uom_map[sec_uom_id]['ratio']
+                            if ratio > 1.0: is_pack = True
+                    
+                    # 3. Get Base UOM Name
+                    if p.get('uom_id'):
+                        if len(p['uom_id']) > 1 and p['uom_id'][1]:
+                            if not main_uom_name or "per pack" not in main_uom_name:
+                                main_uom_name = p['uom_id'][1]
+                        elif p['uom_id'][0] in uom_map: 
+                             if not main_uom_name or "per pack" not in main_uom_name:
+                                main_uom_name = uom_map[p['uom_id'][0]]['name']
 
                 # Safety Check
                 if main_uom_name == "Unknown (UOM)" or not main_uom_name:
@@ -579,7 +580,7 @@ def sync_products_master():
                 barcode = p.get('barcode', '') 
                 
                 if not is_pack:
-                    # SIMPLE PRODUCT
+                    # SIMPLE PRODUCT (Reverts "Plenty of 2 variants" issue)
                     desired_variants.append({
                         'option1': 'Default Title',
                         'price': str(raw_price),
@@ -588,8 +589,7 @@ def sync_products_master():
                         'cost': str(raw_cost)
                     })
                 else:
-                    # PACK PRODUCT
-                    # Variant 1: Outer
+                    # PACK PRODUCT (Only if sh_is_secondary_unit=True)
                     desired_variants.append({
                         'option1': main_uom_name, 
                         'price': str(raw_price),
@@ -597,7 +597,7 @@ def sync_products_master():
                         'barcode': barcode,
                         'cost': str(raw_cost)
                     })
-                    # Variant 2: Unit (Price calculated by Ratio)
+                    
                     unit_price = round(raw_price / ratio, 2) if ratio > 0 else 0.00
                     unit_cost = round(raw_cost / ratio, 2) if ratio > 0 else 0.00
                     
@@ -609,7 +609,7 @@ def sync_products_master():
                         'cost': str(unit_cost)
                     })
 
-                # --- 2B. SHOPIFY ACTIONS ---
+                # --- SHOPIFY ACTIONS ---
                 shopify_id = find_shopify_product_by_sku(sku)
                 sp = None
                 
@@ -617,7 +617,6 @@ def sync_products_master():
                     try: sp = shopify.Product.find(shopify_id)
                     except: sp = None
                 
-                # CREATE NEW
                 if not sp:
                     if not auto_create: continue
                     sp = shopify.Product()
@@ -626,17 +625,15 @@ def sync_products_master():
                     sp.product_type = odoo.get_public_category_name(p.get('public_categ_ids', [])) or '' 
                     sp.status = 'active' if auto_publish else 'draft'
                 
-                # UPDATE HEADER
                 if sync_title: sp.title = p['name']
                 if sync_vendor: sp.vendor = vendor_name 
                 if sync_desc: sp.body_html = p.get('description_sale') or ''
                 
-                # Tags
                 if sync_tags:
                     odoo_tags = odoo.get_tag_names(p.get('product_tag_ids', []))
                     if odoo_tags: sp.tags = ",".join(odoo_tags)
 
-                # Pack Size Option Enforcement
+                # Option Enforcement
                 if is_pack:
                     sp.options = [{'name': 'Pack Size'}] 
                 elif sp.options and sp.options[0].name != 'Title':
@@ -650,6 +647,11 @@ def sync_products_master():
                 
                 for des in desired_variants:
                     match = next((v for v in existing_vars if v.sku == des['sku']), None)
+                    
+                    # Fix for converting existing Default Title
+                    if not match and des['option1'] == 'Default Title':
+                         match = next((v for v in existing_vars), None)
+
                     if not match: match = shopify.Variant({'product_id': sp.id})
                     
                     match.option1 = des['option1']
@@ -663,7 +665,7 @@ def sync_products_master():
                 sp.variants = final_vars
                 sp.save()
                 
-                # UPDATE COST PRICE (InventoryItem)
+                # COST PRICE
                 if sp.variants:
                     for v in sp.variants:
                         d_data = next((d for d in desired_variants if d['sku'] == v.sku), None)
@@ -671,12 +673,12 @@ def sync_products_master():
                             try:
                                 inv_item = shopify.InventoryItem.find(v.inventory_item_id)
                                 if inv_item:
-                                    inv_item.cost = d_data['cost'] # Sync Cost
+                                    inv_item.cost = d_data['cost'] 
                                     inv_item.tracked = True
                                     inv_item.save()
                             except: pass
 
-                # METAFIELD SYNC: Vendor Code
+                # METAFIELD SYNC
                 if get_config('prod_sync_meta_vendor_code', False):
                     try:
                         v_code = odoo.get_vendor_product_code(p['id'])
@@ -692,9 +694,8 @@ def sync_products_master():
                             sp.add_metafield(meta)
                     except Exception as e:
                         print(f"Metafield Error {sku}: {e}")
-                        
 
-                # IMAGE SYNC (Create Only or if missing)
+                # IMAGE SYNC
                 if sync_images and p.get('image_1920'):
                      if not sp.images:
                          try:
@@ -705,7 +706,7 @@ def sync_products_master():
                             image.save()
                          except: pass
 
-                # MAP IN DB
+                # DB MAP
                 try:
                     pm = ProductMap.query.filter_by(sku=sku).first()
                     if not pm:
@@ -723,7 +724,6 @@ def sync_products_master():
             log_event('Product Sync', 'Info', f"Processed batch {i}-{i+BATCH_SIZE}...")
 
         log_event('Product Sync', 'Success', f"Sync Complete. Synced {synced} products.")
-
 
 def fix_variant_mess_task():
     """
