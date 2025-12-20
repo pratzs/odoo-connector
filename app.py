@@ -704,187 +704,180 @@ def sync_products_master():
 
 def fix_variant_mess_task():
     """
-    CLEANUP & REPAIR TOOL (Extended):
-    1. If Odoo = Simple -> Destroys extra variants, reverts to 'Default Title'.
-    2. If Odoo = Pack -> Creates missing '-UNIT' variants, sets options to 'Pack Size', calculates Unit Price.
+    DEBUG VERSION: CLEANUP & REPAIR TOOL
     """
     with app.app_context():
-        if not odoo or not setup_shopify_session(): return
-        
-        log_event('Cleanup', 'Info', "Starting Intelligent Variant Repair...")
+        if not odoo or not setup_shopify_session(): 
+            log_event('Cleanup', 'Error', "Startup Failed: No Odoo/Shopify Connection")
+            return
         
         company_id = get_config('odoo_company_id')
+        log_event('Cleanup', 'Info', f"Starting Repair Task for Company ID: {company_id}...")
         
-        # 1. Load Data & UOM Cache (Required for calculating Unit Prices)
+        # 1. Load Data & UOM Cache
         try:
+            # DEBUG: Log Odoo fetch start
             odoo_products = odoo.get_all_products(company_id)
+            log_event('Cleanup', 'Info', f"Odoo returned {len(odoo_products)} products.")
+            
+            if len(odoo_products) == 0:
+                log_event('Cleanup', 'Error', "STOPPING: Odoo returned 0 products. Check Company ID/Permissions.")
+                return
+
             odoo_map = {p.get('default_code'): p for p in odoo_products if p.get('default_code')}
+            log_event('Cleanup', 'Info', f"Mapped {len(odoo_map)} Odoo SKUs.")
             
             uom_map = {}
             uoms = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'search_read', [[]], {'fields': ['id', 'name', 'factor_inv']})
             for u in uoms:
                 uom_map[u['id']] = {'name': u['name'], 'ratio': float(u.get('factor_inv', 1.0))}
         except Exception as e:
-            log_event('Cleanup', 'Error', f"Setup Failed: {e}")
+            log_event('Cleanup', 'Error', f"Setup Data Failed: {e}")
             return
 
         fixed_count = 0
+        processed_count = 0
         
-        page = shopify.Product.find(limit=250)
+        # DEBUG: Fetch only 1 page to test first, or remove limit for full run
+        page = shopify.Product.find(limit=50) 
+        
         while page:
             for sp in page:
+                processed_count += 1
+                if processed_count % 50 == 0:
+                    log_event('Cleanup', 'Info', f"Scanned {processed_count} Shopify products...")
+
                 if not sp.variants: continue
                 
-                # Identify SKU (Try first variant, or search others if first is 'junk')
+                # Identify SKU
                 sku = sp.variants[0].sku 
-                if not sku or sku not in odoo_map:
-                    for v in sp.variants:
-                        clean_sku = v.sku.replace('-UNIT', '') if v.sku else ''
-                        if clean_sku in odoo_map: 
-                            sku = clean_sku
-                            break
                 
-                if not sku or sku not in odoo_map: continue
+                # DEBUG: Log matching failure for the first few items
+                if not sku:
+                    if processed_count < 5: print(f"DEBUG: Product {sp.title} has no SKU.")
+                    continue
+
+                # Clean SKU lookup
+                if sku not in odoo_map:
+                    # Try finding it by stripping -UNIT
+                    found = False
+                    for v in sp.variants:
+                        clean = v.sku.replace('-UNIT', '') if v.sku else ''
+                        if clean in odoo_map: 
+                            sku = clean
+                            found = True
+                            break
+                    if not found:
+                        if processed_count < 10: log_event('Cleanup', 'Warning', f"Skipping {sku}: Not found in Odoo.")
+                        continue
 
                 p_data = odoo_map[sku]
                 is_pack_in_odoo = p_data.get('sh_is_secondary_unit') is True
                 dirty = False
 
-                # === SCENARIO A: Odoo says "SIMPLE PRODUCT" ===
-                # Action: Destroy -UNIT variants, Revert to "Default Title"
-                if not is_pack_in_odoo:
-                    variants_to_delete = []
-                    main_variant = None
-                    
-                    # 1. Identify which variants to kill
-                    for v in sp.variants:
-                        if v.sku and v.sku.endswith('-UNIT'):
-                            variants_to_delete.append(v)
-                        else:
-                            if main_variant is None: main_variant = v
-                            else: variants_to_delete.append(v) # Duplicate mains
-                    
-                    if not main_variant and variants_to_delete:
-                        main_variant = variants_to_delete.pop(0)
+                try:
+                    # === SCENARIO A: Odoo says "SIMPLE PRODUCT" ===
+                    if not is_pack_in_odoo:
+                        variants_to_delete = []
+                        main_variant = None
+                        
+                        for v in sp.variants:
+                            if v.sku and v.sku.endswith('-UNIT'):
+                                variants_to_delete.append(v)
+                            else:
+                                if main_variant is None: main_variant = v
+                                else: variants_to_delete.append(v)
+                        
+                        if not main_variant and variants_to_delete:
+                            main_variant = variants_to_delete.pop(0)
 
-                    # 2. EXECUTE DELETIONS
-                    if variants_to_delete:
-                        for v in variants_to_delete:
-                            try:
+                        if variants_to_delete:
+                            for v in variants_to_delete:
                                 shopify.Variant.find(v.id).destroy()
                                 dirty = True
-                            except: pass
-                        
-                        # Refresh product to get clean state
-                        try:
+                            # Refresh
                             sp = shopify.Product.find(sp.id)
                             if sp.variants: main_variant = sp.variants[0]
-                        except: pass
 
-                    # 3. FIX MAIN VARIANT (Name & Options)
-                    if main_variant and main_variant.option1 != 'Default Title':
-                        main_variant.option1 = 'Default Title'
-                        main_variant.option2 = None
-                        main_variant.option3 = None
-                        dirty = True
+                        # Fix Options
+                        if sp.options and (len(sp.options) > 1 or sp.options[0].name != 'Title'):
+                            sp.options = [{"name": "Title", "values": ["Default Title"]}]
+                            dirty = True
+                        
+                        # Fix Main Variant
+                        if main_variant and main_variant.option1 != 'Default Title':
+                            main_variant.option1 = 'Default Title'
+                            dirty = True
 
-                    # 4. FIX PRODUCT OPTIONS (Remove dropdown)
-                    if sp.options and (len(sp.options) > 1 or sp.options[0].name != 'Title'):
-                        sp.options = [{"name": "Title", "values": ["Default Title"]}]
-                        dirty = True
-
-                    if dirty:
-                        try:
+                        if dirty:
                             sp.save()
                             if main_variant: main_variant.save()
                             fixed_count += 1
-                            log_event('Cleanup', 'Success', f"Fixed {sku}: Reverted to Simple Product")
-                        except Exception as e:
-                            print(f"Simple Fix Error {sku}: {e}")
+                            log_event('Cleanup', 'Success', f"Fixed Simple: {sku}")
 
-                # === SCENARIO B: Odoo says "PACK PRODUCT" (Has Secondary Unit) ===
-                # Action: Ensure "Pack Size" option, Create Outer + Unit variants
-                else:
-                    # 1. Calculate Ratios & Prices
-                    ratio = 1.0
-                    if p_data.get('sh_secondary_uom'):
-                        sid = p_data['sh_secondary_uom'][0]
-                        if sid in uom_map: ratio = uom_map[sid]['ratio']
-                    
-                    main_uom_name = 'Outer'
-                    if p_data.get('uom_id'):
-                        uid = p_data['uom_id'][0]
-                        if uid in uom_map: main_uom_name = uom_map[uid]['name']
-
-                    raw_price = float(p_data.get('list_price', 0.0))
-                    
-                    # 2. Fix Options Header (Must be 'Pack Size')
-                    if not sp.options or sp.options[0].name != 'Pack Size':
-                        sp.options = [{"name": "Pack Size"}]
-                        try: sp.save() 
-                        except: pass
-                        dirty = True
-
-                    # 3. Define the Ideal State
-                    desired = [
-                        {
-                            'sku': sku,
-                            'option1': main_uom_name, # e.g. "Outer" or "Box"
-                            'price': str(raw_price)
-                        },
-                        {
-                            'sku': f"{sku}-UNIT",
-                            'option1': 'Unit',
-                            'price': str(round(raw_price / ratio, 2)) if ratio else '0.00'
-                        }
-                    ]
-
-                    # 4. Sync Variants (Create Missing / Update Existing)
-                    current_variants = sp.variants
-                    final_variants = []
-                    
-                    for d in desired:
-                        # Find existing variant by SKU
-                        match = next((v for v in current_variants if v.sku == d['sku']), None)
+                    # === SCENARIO B: Odoo says "PACK PRODUCT" ===
+                    else:
+                        ratio = 1.0
+                        if p_data.get('sh_secondary_uom'):
+                            sid = p_data['sh_secondary_uom'][0]
+                            if sid in uom_map: ratio = uom_map[sid]['ratio']
                         
-                        # Fallback: If no match, check if we have a "Default Title" variant we can convert
-                        if not match and d['sku'] == sku:
-                             match = next((v for v in current_variants if v.option1 == 'Default Title'), None)
+                        main_uom_name = 'Outer'
+                        if p_data.get('uom_id'):
+                            uid = p_data['uom_id'][0]
+                            if uid in uom_map: main_uom_name = uom_map[uid]['name']
 
-                        if not match:
-                            # Create NEW variant
-                            match = shopify.Variant({'product_id': sp.id})
-                            dirty = True
+                        raw_price = float(p_data.get('list_price', 0.0))
                         
-                        # Update fields
-                        if match.option1 != d['option1']:
-                            match.option1 = d['option1']
+                        # Ensure Option Header
+                        if not sp.options or sp.options[0].name != 'Pack Size':
+                            sp.options = [{"name": "Pack Size"}]
+                            sp.save()
                             dirty = True
-                        if match.sku != d['sku']:
-                            match.sku = d['sku']
-                            dirty = True
-                        # Only update price if it's vastly different (avoids small float updates)
-                        if abs(float(match.price or 0) - float(d['price'])) > 0.02:
-                             match.price = d['price']
-                             dirty = True
+
+                        desired = [
+                            {'sku': sku, 'option1': main_uom_name, 'price': str(raw_price)},
+                            {'sku': f"{sku}-UNIT", 'option1': 'Unit', 'price': str(round(raw_price / ratio, 2))}
+                        ]
+
+                        current_variants = sp.variants
+                        final_variants = []
                         
-                        match.inventory_management = 'shopify'
-                        final_variants.append(match)
-                    
-                    # Save if changes detected or if count mismatches (e.g. we added a variant)
-                    if dirty or len(current_variants) != len(final_variants):
-                        try:
+                        for d in desired:
+                            match = next((v for v in current_variants if v.sku == d['sku']), None)
+                            if not match and d['sku'] == sku:
+                                 match = next((v for v in current_variants if v.option1 == 'Default Title'), None)
+
+                            if not match:
+                                match = shopify.Variant({'product_id': sp.id})
+                                dirty = True
+                            
+                            if match.option1 != d['option1'] or match.sku != d['sku']:
+                                match.option1 = d['option1']
+                                match.sku = d['sku']
+                                dirty = True
+                            
+                            match.inventory_management = 'shopify'
+                            final_variants.append(match)
+                        
+                        if dirty or len(current_variants) != len(final_variants):
                             sp.variants = final_variants
                             sp.save()
                             fixed_count += 1
-                            log_event('Cleanup', 'Success', f"Fixed {sku}: Converted to Pack (Outer + Unit)")
-                        except Exception as e:
-                            print(f"Pack Fix Error {sku}: {e}")
+                            log_event('Cleanup', 'Success', f"Fixed Pack: {sku}")
 
-            if page.has_next_page(): page = page.next_page()
-            else: break
+                except Exception as e:
+                    log_event('Cleanup', 'Error', f"Crash on {sku}: {e}")
+
+            if page.has_next_page(): 
+                try:
+                    page = page.next_page()
+                except:
+                    break
+            else: 
+                break
             
-        log_event('Cleanup', 'Success', f"Repair Task Finished. Modified {fixed_count} products.")
+        log_event('Cleanup', 'Success', f"Repair Finished. Checked {processed_count}, Fixed {fixed_count}.")
 
 def cleanup_shopify_products(odoo_active_skus):
     """
