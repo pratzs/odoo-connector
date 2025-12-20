@@ -183,13 +183,14 @@ class OdooClient:
     def get_all_products(self, company_id=None):
         # FIX: 'sale_ok=True' is MANDATORY to stop junk products
         domain = [
-            ('sale_ok', '=', True), 
-            ('type', 'in', ['product', 'consu']), 
-            '|', ('active', '=', True), ('active', '=', False)
+            ['sale_ok', '=', True], 
+            ['type', 'in', ['product', 'consu']], 
+            '|', ['active', '=', True], ['active', '=', False]
         ]
         
         if company_id:
-             domain.append(('company_id', '=', int(company_id)))
+             domain.append(['company_id', '=', int(company_id)])
+        
         
         # FIX: Added 'barcode' to fields to match App requirements
         fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 
