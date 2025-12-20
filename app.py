@@ -704,7 +704,10 @@ def sync_products_master():
 
 def fix_variant_mess_task():
     """
-    ROBUST CLEANUP TOOL (Fixed KeyError & Price Logic)
+    REPAIR TOOL V4 (Final Fixes):
+    1. Fixes "False" Name: Uses direct name from Product Data.
+    2. Fixes Prices: Loads ARCHIVED UOMs to calculate correct Ratio.
+    3. Fixes Inventory: Pushes stock immediately after repair.
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
@@ -712,6 +715,8 @@ def fix_variant_mess_task():
             return
         
         company_id = get_config('odoo_company_id')
+        location_id = os.getenv('SHOPIFY_WAREHOUSE_ID') # Needed for stock push
+        
         log_event('Cleanup', 'Info', f"Starting Repair Task for Company ID: {company_id}...")
         
         # 1. Load Data
@@ -722,12 +727,21 @@ def fix_variant_mess_task():
                 return
 
             odoo_map = {p.get('default_code'): p for p in odoo_products if p.get('default_code')}
-            log_event('Cleanup', 'Info', f"Mapped {len(odoo_map)} Odoo SKUs.")
+            
+            # FIX 2: Fetch ALL UOMs (Active AND Archived) to ensure we find the ratios
+            # This fixes the "Price not calculated" issue
+            uoms = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'search_read', 
+                [['|', ['active', '=', True], ['active', '=', False]]], 
+                {'fields': ['id', 'name', 'factor_inv']}
+            )
             
             uom_map = {}
-            uoms = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'search_read', [[]], {'fields': ['id', 'name', 'factor_inv']})
             for u in uoms:
-                uom_map[u['id']] = {'name': u['name'], 'ratio': float(u.get('factor_inv', 1.0))}
+                safe_name = u['name'] if u['name'] else "Unknown UOM"
+                uom_map[u['id']] = {'name': safe_name, 'ratio': float(u.get('factor_inv', 1.0))}
+                
+            log_event('Cleanup', 'Info', f"Mapped {len(odoo_map)} Odoo SKUs and {len(uom_map)} UOMs.")
+
         except Exception as e:
             log_event('Cleanup', 'Error', f"Setup Data Failed: {e}")
             return
@@ -744,12 +758,10 @@ def fix_variant_mess_task():
                     log_event('Cleanup', 'Info', f"Scanned {processed_count} Shopify products...")
 
                 if not sp.variants: continue
-                
-                # Identify SKU (Safely)
                 sku = sp.variants[0].sku 
                 if not sku: continue
 
-                # Clean SKU lookup (Handle -UNIT suffix in Shopify)
+                # Clean SKU lookup
                 if sku not in odoo_map:
                     found = False
                     for v in sp.variants:
@@ -764,41 +776,151 @@ def fix_variant_mess_task():
                 p_data = odoo_map[sku]
                 is_pack_in_odoo = p_data.get('sh_is_secondary_unit') is True
                 dirty = False
+                
+                # We will track IDs to push stock later
+                unit_variant_item_id = None 
+                outer_variant_item_id = None
 
                 try:
-                    # === SCENARIO A: Odoo says "SIMPLE PRODUCT" ===
-                    if not is_pack_in_odoo:
+                    # === SCENARIO: PACK PRODUCT (This is what you need fixed) ===
+                    if is_pack_in_odoo:
+                        # 1. Calculate Ratio (With Deep Search)
+                        ratio = 1.0
+                        if p_data.get('sh_secondary_uom'):
+                            sid = p_data['sh_secondary_uom'][0]
+                            if sid in uom_map: 
+                                ratio = uom_map[sid]['ratio']
+                            else:
+                                print(f"WARNING: SKU {sku} has secondary UOM ID {sid} but not found in UOM Map.")
+
+                        # 2. Get Main UOM Name (FIX 1: Direct Lookup)
+                        # Instead of using the map (which might be missing the ID), use the name Odoo gave us directly
+                        main_uom_name = 'Outer'
+                        if p_data.get('uom_id'):
+                            # uom_id is usually [ID, "Name"]
+                            direct_name = p_data['uom_id'][1]
+                            if direct_name: 
+                                main_uom_name = str(direct_name) # Forces "CTNX16" or "CTNX12"
+                            else:
+                                # Fallback if direct name is missing
+                                uid = p_data['uom_id'][0]
+                                if uid in uom_map: main_uom_name = uom_map[uid]['name']
+
+                        raw_price = float(p_data.get('list_price', 0.0))
+                        
+                        # 3. Ensure Option Header
+                        if not sp.options or sp.options[0].name != 'Pack Size':
+                            sp.options = [{"name": "Pack Size"}]
+                            sp.save()
+                            dirty = True
+
+                        # 4. Define Ideal State
+                        unit_price = round(raw_price / ratio, 2) if ratio > 0 else 0.00
+                        
+                        desired = [
+                            {'sku': sku, 'option1': main_uom_name, 'price': str(raw_price)},
+                            {'sku': f"{sku}-UNIT", 'option1': 'Unit', 'price': str(unit_price)}
+                        ]
+
+                        current_variants = sp.variants
+                        final_variants = []
+                        
+                        for d in desired:
+                            match = next((v for v in current_variants if v.sku == d['sku']), None)
+                            if not match and d['sku'] == sku:
+                                 match = next((v for v in current_variants if getattr(v, 'option1', '') == 'Default Title'), None)
+
+                            if not match:
+                                match = shopify.Variant({'product_id': sp.id})
+                                dirty = True
+                            
+                            # Safely check fields
+                            current_opt1 = getattr(match, 'option1', '')
+                            current_sku = getattr(match, 'sku', '')
+                            current_price = float(getattr(match, 'price', 0.0) or 0.0)
+                            
+                            if current_opt1 != d['option1']:
+                                match.option1 = d['option1']
+                                dirty = True
+                            if current_sku != d['sku']:
+                                match.sku = d['sku']
+                                dirty = True
+                            
+                            # Price Update
+                            if abs(current_price - float(d['price'])) > 0.02:
+                                match.price = d['price']
+                                dirty = True
+                            
+                            match.inventory_management = 'shopify'
+                            final_variants.append(match)
+
+                        # Save Changes
+                        if dirty or len(current_variants) != len(final_variants):
+                            sp.variants = final_variants
+                            sp.save()
+                            fixed_count += 1
+                            log_event('Cleanup', 'Success', f"Fixed Pack: {sku} (Name: {main_uom_name}, Ratio: {ratio})")
+                            
+                            # Reload variants to get IDs for Stock Push
+                            sp = shopify.Product.find(sp.id)
+                            for v in sp.variants:
+                                if v.sku == sku: outer_variant_item_id = v.inventory_item_id
+                                if v.sku == f"{sku}-UNIT": unit_variant_item_id = v.inventory_item_id
+
+                        else:
+                            # Even if not dirty, grab IDs to ensure stock is correct
+                            for v in sp.variants:
+                                if v.sku == sku: outer_variant_item_id = v.inventory_item_id
+                                if v.sku == f"{sku}-UNIT": unit_variant_item_id = v.inventory_item_id
+
+                        # === 5. IMMEDIATE STOCK FIX ===
+                        # This solves "Inventory didn't get calculated"
+                        if location_id and (outer_variant_item_id or unit_variant_item_id):
+                            try:
+                                # Get Odoo Stock
+                                locations = get_config('inventory_locations', [])
+                                field = get_config('inventory_field', 'qty_available')
+                                total_odoo = odoo.get_total_qty_for_locations(p_data['id'], locations, field)
+                                
+                                # Push Outer
+                                if outer_variant_item_id:
+                                    shopify.InventoryLevel.set(location_id=location_id, inventory_item_id=outer_variant_item_id, available=int(total_odoo))
+                                
+                                # Push Unit (Calculated)
+                                if unit_variant_item_id and ratio > 0:
+                                    unit_qty = int(total_odoo * ratio)
+                                    shopify.InventoryLevel.set(location_id=location_id, inventory_item_id=unit_variant_item_id, available=unit_qty)
+                                    
+                            except Exception as stk_err:
+                                print(f"Stock Push Error {sku}: {stk_err}")
+
+                    # === SCENARIO: SIMPLE PRODUCT ===
+                    else:
+                        # (Simplified logic for non-packs)
                         variants_to_delete = []
                         main_variant = None
-                        
                         for v in sp.variants:
-                            if v.sku and v.sku.endswith('-UNIT'):
-                                variants_to_delete.append(v)
+                            if v.sku and v.sku.endswith('-UNIT'): variants_to_delete.append(v)
                             else:
                                 if main_variant is None: main_variant = v
                                 else: variants_to_delete.append(v)
                         
-                        if not main_variant and variants_to_delete:
-                            main_variant = variants_to_delete.pop(0)
+                        if not main_variant and variants_to_delete: main_variant = variants_to_delete.pop(0)
 
-                        # Delete wrong variants
                         if variants_to_delete:
                             for v in variants_to_delete:
                                 try: shopify.Variant.find(v.id).destroy()
                                 except: pass
                                 dirty = True
-                            # Refresh
                             try:
                                 sp = shopify.Product.find(sp.id)
                                 if sp.variants: main_variant = sp.variants[0]
                             except: pass
 
-                        # Fix Options
                         if sp.options and (len(sp.options) > 1 or sp.options[0].name != 'Title'):
                             sp.options = [{"name": "Title", "values": ["Default Title"]}]
                             dirty = True
                         
-                        # Fix Main Variant
                         current_opt1 = getattr(main_variant, 'option1', '')
                         if main_variant and current_opt1 != 'Default Title':
                             main_variant.option1 = 'Default Title'
@@ -810,75 +932,6 @@ def fix_variant_mess_task():
                             fixed_count += 1
                             log_event('Cleanup', 'Success', f"Fixed Simple: {sku}")
 
-                    # === SCENARIO B: Odoo says "PACK PRODUCT" ===
-                    else:
-                        ratio = 1.0
-                        if p_data.get('sh_secondary_uom'):
-                            sid = p_data['sh_secondary_uom'][0]
-                            if sid in uom_map: ratio = uom_map[sid]['ratio']
-                        
-                        main_uom_name = 'Outer'
-                        if p_data.get('uom_id'):
-                            uid = p_data['uom_id'][0]
-                            if uid in uom_map: main_uom_name = uom_map[uid]['name']
-
-                        raw_price = float(p_data.get('list_price', 0.0))
-                        
-                        # Ensure Option Header is "Pack Size"
-                        if not sp.options or sp.options[0].name != 'Pack Size':
-                            sp.options = [{"name": "Pack Size"}]
-                            sp.save()
-                            dirty = True
-
-                        desired = [
-                            {'sku': sku, 'option1': main_uom_name, 'price': str(raw_price)},
-                            {'sku': f"{sku}-UNIT", 'option1': 'Unit', 'price': str(round(raw_price / ratio, 2))}
-                        ]
-
-                        current_variants = sp.variants
-                        final_variants = []
-                        
-                        for d in desired:
-                            # 1. Find existing variant
-                            match = next((v for v in current_variants if v.sku == d['sku']), None)
-                            
-                            # 2. Fallback: Check if we have a "Default Title" variant we can convert
-                            if not match and d['sku'] == sku:
-                                 match = next((v for v in current_variants if getattr(v, 'option1', '') == 'Default Title'), None)
-
-                            # 3. Create if missing
-                            if not match:
-                                match = shopify.Variant({'product_id': sp.id})
-                                dirty = True
-                            
-                            # 4. Update Fields (Safe Access)
-                            current_opt1 = getattr(match, 'option1', '')
-                            current_sku = getattr(match, 'sku', '')
-                            current_price = float(getattr(match, 'price', 0.0) or 0.0)
-                            
-                            if current_opt1 != d['option1']:
-                                match.option1 = d['option1']
-                                dirty = True
-                                
-                            if current_sku != d['sku']:
-                                match.sku = d['sku']
-                                dirty = True
-                                
-                            # Price Check (Only if > 2 cents diff)
-                            if abs(current_price - float(d['price'])) > 0.02:
-                                match.price = d['price']
-                                dirty = True
-                            
-                            match.inventory_management = 'shopify'
-                            final_variants.append(match)
-                        
-                        # Save if modified or if variant count is wrong (e.g. we added one)
-                        if dirty or len(current_variants) != len(final_variants):
-                            sp.variants = final_variants
-                            sp.save()
-                            fixed_count += 1
-                            log_event('Cleanup', 'Success', f"Fixed Pack: {sku}")
-
                 except Exception as e:
                     log_event('Cleanup', 'Error', f"Crash on {sku}: {e}")
 
@@ -889,6 +942,7 @@ def fix_variant_mess_task():
                 break
             
         log_event('Cleanup', 'Success', f"Repair Finished. Checked {processed_count}, Fixed {fixed_count}.")
+
 
 def cleanup_shopify_products(odoo_active_skus):
     """
