@@ -704,7 +704,7 @@ def sync_products_master():
 
 def fix_variant_mess_task():
     """
-    DEBUG VERSION: CLEANUP & REPAIR TOOL
+    ROBUST CLEANUP TOOL (Fixed KeyError & Price Logic)
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
@@ -714,14 +714,11 @@ def fix_variant_mess_task():
         company_id = get_config('odoo_company_id')
         log_event('Cleanup', 'Info', f"Starting Repair Task for Company ID: {company_id}...")
         
-        # 1. Load Data & UOM Cache
+        # 1. Load Data
         try:
-            # DEBUG: Log Odoo fetch start
             odoo_products = odoo.get_all_products(company_id)
-            log_event('Cleanup', 'Info', f"Odoo returned {len(odoo_products)} products.")
-            
-            if len(odoo_products) == 0:
-                log_event('Cleanup', 'Error', "STOPPING: Odoo returned 0 products. Check Company ID/Permissions.")
+            if not odoo_products:
+                log_event('Cleanup', 'Error', "STOPPING: Odoo returned 0 products.")
                 return
 
             odoo_map = {p.get('default_code'): p for p in odoo_products if p.get('default_code')}
@@ -738,7 +735,6 @@ def fix_variant_mess_task():
         fixed_count = 0
         processed_count = 0
         
-        # DEBUG: Fetch only 1 page to test first, or remove limit for full run
         page = shopify.Product.find(limit=50) 
         
         while page:
@@ -749,27 +745,21 @@ def fix_variant_mess_task():
 
                 if not sp.variants: continue
                 
-                # Identify SKU
+                # Identify SKU (Safely)
                 sku = sp.variants[0].sku 
-                
-                # DEBUG: Log matching failure for the first few items
-                if not sku:
-                    if processed_count < 5: print(f"DEBUG: Product {sp.title} has no SKU.")
-                    continue
+                if not sku: continue
 
-                # Clean SKU lookup
+                # Clean SKU lookup (Handle -UNIT suffix in Shopify)
                 if sku not in odoo_map:
-                    # Try finding it by stripping -UNIT
                     found = False
                     for v in sp.variants:
-                        clean = v.sku.replace('-UNIT', '') if v.sku else ''
+                        if not v.sku: continue
+                        clean = v.sku.replace('-UNIT', '')
                         if clean in odoo_map: 
                             sku = clean
                             found = True
                             break
-                    if not found:
-                        if processed_count < 10: log_event('Cleanup', 'Warning', f"Skipping {sku}: Not found in Odoo.")
-                        continue
+                    if not found: continue
 
                 p_data = odoo_map[sku]
                 is_pack_in_odoo = p_data.get('sh_is_secondary_unit') is True
@@ -791,13 +781,17 @@ def fix_variant_mess_task():
                         if not main_variant and variants_to_delete:
                             main_variant = variants_to_delete.pop(0)
 
+                        # Delete wrong variants
                         if variants_to_delete:
                             for v in variants_to_delete:
-                                shopify.Variant.find(v.id).destroy()
+                                try: shopify.Variant.find(v.id).destroy()
+                                except: pass
                                 dirty = True
                             # Refresh
-                            sp = shopify.Product.find(sp.id)
-                            if sp.variants: main_variant = sp.variants[0]
+                            try:
+                                sp = shopify.Product.find(sp.id)
+                                if sp.variants: main_variant = sp.variants[0]
+                            except: pass
 
                         # Fix Options
                         if sp.options and (len(sp.options) > 1 or sp.options[0].name != 'Title'):
@@ -805,7 +799,8 @@ def fix_variant_mess_task():
                             dirty = True
                         
                         # Fix Main Variant
-                        if main_variant and main_variant.option1 != 'Default Title':
+                        current_opt1 = getattr(main_variant, 'option1', '')
+                        if main_variant and current_opt1 != 'Default Title':
                             main_variant.option1 = 'Default Title'
                             dirty = True
 
@@ -829,7 +824,7 @@ def fix_variant_mess_task():
 
                         raw_price = float(p_data.get('list_price', 0.0))
                         
-                        # Ensure Option Header
+                        # Ensure Option Header is "Pack Size"
                         if not sp.options or sp.options[0].name != 'Pack Size':
                             sp.options = [{"name": "Pack Size"}]
                             sp.save()
@@ -844,22 +839,40 @@ def fix_variant_mess_task():
                         final_variants = []
                         
                         for d in desired:
+                            # 1. Find existing variant
                             match = next((v for v in current_variants if v.sku == d['sku']), None)
+                            
+                            # 2. Fallback: Check if we have a "Default Title" variant we can convert
                             if not match and d['sku'] == sku:
-                                 match = next((v for v in current_variants if v.option1 == 'Default Title'), None)
+                                 match = next((v for v in current_variants if getattr(v, 'option1', '') == 'Default Title'), None)
 
+                            # 3. Create if missing
                             if not match:
                                 match = shopify.Variant({'product_id': sp.id})
                                 dirty = True
                             
-                            if match.option1 != d['option1'] or match.sku != d['sku']:
+                            # 4. Update Fields (Safe Access)
+                            current_opt1 = getattr(match, 'option1', '')
+                            current_sku = getattr(match, 'sku', '')
+                            current_price = float(getattr(match, 'price', 0.0) or 0.0)
+                            
+                            if current_opt1 != d['option1']:
                                 match.option1 = d['option1']
+                                dirty = True
+                                
+                            if current_sku != d['sku']:
                                 match.sku = d['sku']
+                                dirty = True
+                                
+                            # Price Check (Only if > 2 cents diff)
+                            if abs(current_price - float(d['price'])) > 0.02:
+                                match.price = d['price']
                                 dirty = True
                             
                             match.inventory_management = 'shopify'
                             final_variants.append(match)
                         
+                        # Save if modified or if variant count is wrong (e.g. we added one)
                         if dirty or len(current_variants) != len(final_variants):
                             sp.variants = final_variants
                             sp.save()
@@ -870,10 +883,8 @@ def fix_variant_mess_task():
                     log_event('Cleanup', 'Error', f"Crash on {sku}: {e}")
 
             if page.has_next_page(): 
-                try:
-                    page = page.next_page()
-                except:
-                    break
+                try: page = page.next_page()
+                except: break
             else: 
                 break
             
