@@ -722,7 +722,7 @@ def sync_products_master():
             gc.collect()
             log_event('Product Sync', 'Info', f"Processed batch {i}-{i+BATCH_SIZE}...")
 
-        log_event('Product Sync', 'Success', f"Sync Complete. Synced {synced} products.")} products.")
+        log_event('Product Sync', 'Success', f"Sync Complete. Synced {synced} products.")
 
 
 def fix_variant_mess_task():
