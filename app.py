@@ -23,8 +23,30 @@ import gc
 # --- PUBLIC APP CONFIG ---
 SHOPIFY_API_KEY = os.getenv('SHOPIFY_API_KEY')
 SHOPIFY_API_SECRET = os.getenv('SHOPIFY_API_SECRET')
-APP_URL = os.getenv('HOST')  # You must add this to Render Env Vars (e.g. https://your-app.onrender.com)
-SCOPES = 'write_products,read_products,write_orders,read_orders,write_inventory,read_inventory'
+APP_URL = os.getenv('HOST') 
+# Updated Scopes to match your Partner Dashboard selection
+SCOPES = (
+    "read_products,write_products,"
+    "read_product_listings,write_product_listings,"
+    "read_customers,write_customers,"
+    "read_orders,write_orders,"
+    "read_draft_orders,write_draft_orders,"
+    "read_inventory,write_inventory,"
+    "read_locations,write_locations,"
+    "read_shipping,write_shipping,"
+    "read_assigned_fulfillment_orders,write_assigned_fulfillment_orders,"
+    "read_merchant_managed_fulfillment_orders,write_merchant_managed_fulfillment_orders,"
+    "read_third_party_fulfillment_orders,write_third_party_fulfillment_orders,"
+    "read_companies,write_companies,"  # Crucial for B2B
+    "read_files,write_files,"          # Crucial for Images
+    "read_reports,write_reports,"
+    "read_price_rules,write_price_rules,"
+    "read_discounts,write_discounts,"
+    "read_returns,write_returns"
+)
+
+# [ADD THIS BLOCK] -> This tells the library your keys globally
+shopify.Session.setup(api_key=SHOPIFY_API_KEY, secret=SHOPIFY_API_SECRET)
 
 # --- FIX: PATCH SHOPIFY LIBRARY FOR 2025-01 API ---
 try:
@@ -1600,22 +1622,27 @@ def install():
 
 @app.route('/auth/callback')
 def auth_callback():
-    """Step 2: Handle the callback, get token, save to DB."""
     shop_url = request.args.get('shop')
-    code = request.args.get('code')
     
-    # Exchange Code for Permanent Token
+    # 1. Convert Flask params to a standard dictionary (Fixes HMAC format issues)
+    params = dict(request.args)
+    
+    # 2. Security Check: Validate the request actually came from Shopify
+    # Note: shopify.Session.setup() at the top of the file makes this work
+    try:
+        if not shopify.Session.validate_params(params):
+            return "Auth Failed: Invalid HMAC (Signature Mismatch). Check Client Secret.", 400
+    except Exception as e:
+        return f"Validation Error: {e}", 400
+
+    # 3. Exchange Code for Token
     try:
         session = shopify.Session(shop_url, '2024-01')
-        access_token = session.request_token({
-            'code': code,
-            'client_id': SHOPIFY_API_KEY,
-            'client_secret': SHOPIFY_API_SECRET
-        })
+        access_token = session.request_token(params) # Pass the full params dict
     except Exception as e:
-        return f"Auth Failed: {e}", 400
+        return f"Token Exchange Failed: {e}", 400
 
-    # Save to Database
+    # 4. Save to Database
     existing_shop = Shop.query.filter_by(shop_url=shop_url).first()
     if not existing_shop:
         new_shop = Shop(shop_url=shop_url, access_token=access_token)
@@ -1626,7 +1653,7 @@ def auth_callback():
     
     db.session.commit()
 
-    # Redirect to Embedded Dashboard
+    # 5. Redirect to Dashboard
     return redirect(f"https://{shop_url}/admin/apps/{SHOPIFY_API_KEY}")
 
 @app.route('/save_settings', methods=['POST'])
