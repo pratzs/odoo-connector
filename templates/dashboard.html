@@ -22,6 +22,17 @@
         .section-header { font-weight: 600; font-size: 1.1rem; color: #343a40; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;}
         .form-label-sm { font-size: 0.85rem; font-weight: 600; color: #6c757d; }
     </style>
+    
+    <script src="https://unpkg.com/@shopify/app-bridge-utils"></script>
+<script>
+    // Initialize the bridge so Shopify knows this iframe is safe
+    var AppBridge = window['app-bridge'];
+    var createApp = AppBridge.default;
+    var app = createApp({
+        apiKey: '{{ api_key }}',   // Passed from your new Python route
+        shopOrigin: '{{ shop_url }}' // Passed from your new Python route
+    });
+</script>
 </head>
 <body>
 
