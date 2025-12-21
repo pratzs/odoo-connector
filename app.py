@@ -8,7 +8,8 @@ import schedule
 import time
 import shopify
 import concurrent.futures
-from flask import Flask, request, jsonify, render_template
+# UPDATE: Added session, url_for, render_template_string
+from flask import Flask, request, jsonify, render_template, session, url_for, render_template_string, redirect
 from models import db, ProductMap, SyncLog, AppSetting, CustomerMap, ProcessedOrder
 from odoo_client import OdooClient
 import requests
@@ -18,6 +19,12 @@ import xmlrpc.client
 from sqlalchemy import text
 import ssl
 import gc 
+
+# --- PUBLIC APP CONFIG ---
+SHOPIFY_API_KEY = os.getenv('SHOPIFY_API_KEY')
+SHOPIFY_API_SECRET = os.getenv('SHOPIFY_API_SECRET')
+APP_URL = os.getenv('HOST')  # You must add this to Render Env Vars (e.g. https://your-app.onrender.com)
+SCOPES = 'write_products,read_products,write_orders,read_orders,write_inventory,read_inventory'
 
 # --- FIX: PATCH SHOPIFY LIBRARY FOR 2025-01 API ---
 try:
@@ -109,6 +116,24 @@ except: pass
 SHOPIFY_LOCATION_ID = int(os.getenv('SHOPIFY_WAREHOUSE_ID', '0'))
 
 db.init_app(app)
+
+# ==========================================
+# PUBLIC APP DATABASE MODEL
+# ==========================================
+class Shop(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    shop_url = db.Column(db.String(255), unique=True, nullable=False)
+    access_token = db.Column(db.String(255), nullable=False)
+    
+    # Credentials per merchant
+    odoo_url = db.Column(db.String(255))
+    odoo_db = db.Column(db.String(255))
+    odoo_username = db.Column(db.String(255))
+    odoo_password = db.Column(db.String(255)) 
+    odoo_company_id = db.Column(db.Integer, default=1)
+    
+    is_active = db.Column(db.Boolean, default=True)
+    install_date = db.Column(db.DateTime, default=datetime.utcnow)
 
 odoo = None
 try:
@@ -1538,8 +1563,143 @@ def scheduled_inventory_sync():
         c, u = perform_inventory_sync(lookback_minutes=35)
         if u > 0: log_event('Inventory', 'Success', f"Auto-Sync: Checked {c}, Updated {u}")
 
+# ==========================================
+# SHOPIFY OAUTH ROUTES
+# ==========================================
+@app.route('/install')
+def install():
+    """Step 1: Redirect merchant to Shopify Permissions Screen."""
+    shop = request.args.get('shop')
+    if not shop:
+        return "Missing 'shop' parameter. Launch this app from Shopify Admin.", 400
+    
+    auth_url = (f"https://{shop}/admin/oauth/authorize?"
+                f"client_id={SHOPIFY_API_KEY}&"
+                f"scope={SCOPES}&"
+                f"redirect_uri={APP_URL}/auth/callback")
+    return redirect(auth_url)
+
+@app.route('/auth/callback')
+def auth_callback():
+    """Step 2: Handle the callback, get token, save to DB."""
+    shop_url = request.args.get('shop')
+    code = request.args.get('code')
+    
+    # Exchange Code for Permanent Token
+    try:
+        session = shopify.Session(shop_url, '2024-01')
+        access_token = session.request_token({
+            'code': code,
+            'client_id': SHOPIFY_API_KEY,
+            'client_secret': SHOPIFY_API_SECRET
+        })
+    except Exception as e:
+        return f"Auth Failed: {e}", 400
+
+    # Save to Database
+    existing_shop = Shop.query.filter_by(shop_url=shop_url).first()
+    if not existing_shop:
+        new_shop = Shop(shop_url=shop_url, access_token=access_token)
+        db.session.add(new_shop)
+    else:
+        existing_shop.access_token = access_token
+        existing_shop.is_active = True
+    
+    db.session.commit()
+
+    # Redirect to Embedded Dashboard
+    return redirect(f"https://{shop_url}/admin/apps/{SHOPIFY_API_KEY}")
+
+@app.route('/save_settings', methods=['POST'])
+def save_public_settings():
+    """Step 3: Save the Odoo credentials entered by the user."""
+    shop_url = request.form.get('shop_url')
+    shop = Shop.query.filter_by(shop_url=shop_url).first()
+    
+    if shop:
+        shop.odoo_url = request.form.get('odoo_url')
+        shop.odoo_db = request.form.get('odoo_db')
+        shop.odoo_username = request.form.get('odoo_user')
+        shop.odoo_password = request.form.get('odoo_pass')
+        db.session.commit()
+        return f"✅ Settings Saved! <a href='/?shop={shop_url}'>Back to Dashboard</a>"
+    return "Error: Shop not found."
+
 @app.route('/')
-def dashboard():
+@app.route('/')
+def home():
+    """
+    Hybrid Dashboard:
+    1. Checks if shop is installed/authorized.
+    2. If missing credentials -> Shows 'Connect Form'.
+    3. If connected -> Shows your full 'Dashboard'.
+    """
+    shop_url = request.args.get('shop')
+    
+    # --- GATEKEEPER: AUTH CHECK ---
+    if not shop_url: 
+        return "No shop provided. Please open via Shopify Admin."
+    
+    shop = Shop.query.filter_by(shop_url=shop_url).first()
+    
+    # If shop not in DB, force install flow
+    if not shop: 
+        return redirect(url_for('install', shop=shop_url))
+        
+    # --- SCENARIO 1: NEW USER (Show Connect Form) ---
+    # If they haven't saved their Odoo details yet, show the simple setup form
+    if not shop.odoo_url or not shop.odoo_password:
+        html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Connect Odoo</title>
+            <script src="https://unpkg.com/@shopify/app-bridge-utils"></script>
+            <style>
+                body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 40px; background: #f4f6f8; }
+                .card { background: white; border: 1px solid #dfe3e8; padding: 30px; border-radius: 8px; max-width: 500px; margin: 0 auto; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+                input { width: 100%; padding: 12px; margin: 8px 0; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+                button { background: #008060; color: white; border: none; padding: 12px 24px; border-radius: 4px; cursor: pointer; font-size: 16px; margin-top: 15px; width: 100%; font-weight: bold; }
+                button:hover { background: #004c3f; }
+                label { font-weight: 600; display: block; margin-top: 15px; color: #202223; }
+                h2 { text-align: center; color: #202223; margin-top: 0; }
+            </style>
+            <script>
+                var AppBridge = window['app-bridge'];
+                var createApp = AppBridge.default;
+                var app = createApp({ apiKey: '{{ api_key }}', shopOrigin: '{{ shop_url }}' });
+            </script>
+        </head>
+        <body>
+            <div class="card">
+                <h2>🔌 Connect Odoo to Shopify</h2>
+                <p style="text-align: center; color: #6d7175;">Enter your Odoo credentials to enable the sync.</p>
+                <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
+                
+                <form action="/save_settings" method="POST">
+                    <input type="hidden" name="shop_url" value="{{ shop_url }}">
+                    
+                    <label>Odoo URL</label>
+                    <input type="text" name="odoo_url" placeholder="https://my-odoo-instance.com" required>
+                    
+                    <label>Database Name</label>
+                    <input type="text" name="odoo_db" placeholder="e.g. odoo_prod_db" required>
+                    
+                    <label>Username (Email)</label>
+                    <input type="text" name="odoo_user" placeholder="admin@example.com" required>
+                    
+                    <label>Password (or API Key)</label>
+                    <input type="password" name="odoo_pass" required>
+                    
+                    <button type="submit">Save & Connect</button>
+                </form>
+            </div>
+        </body>
+        </html>
+        """
+        return render_template_string(html, api_key=SHOPIFY_API_KEY, shop_url=shop.shop_url)
+
+    # --- SCENARIO 2: CONNECTED USER (Show YOUR Original Dashboard) ---
     try:
         logs_orders = SyncLog.query.filter(SyncLog.entity.in_(['Order', 'Order Cancel'])).order_by(SyncLog.timestamp.desc()).limit(20).all()
         logs_inventory = SyncLog.query.filter_by(entity='Inventory').order_by(SyncLog.timestamp.desc()).limit(20).all()
@@ -1560,26 +1720,27 @@ def dashboard():
         "cust_sync_tags": get_config('cust_sync_tags', False),
         "cust_whitelist_tags": get_config('cust_whitelist_tags', ''),
         "cust_blacklist_tags": get_config('cust_blacklist_tags', ''),
-        
         "prod_auto_create": get_config('prod_auto_create', False),
         "prod_auto_publish": get_config('prod_auto_publish', False),
         "prod_sync_images": get_config('prod_sync_images', False),
         "prod_sync_tags": get_config('prod_sync_tags', False),
         "prod_sync_meta_vendor_code": get_config('prod_sync_meta_vendor_code', False),
         "order_sync_tax": get_config('order_sync_tax', False),
-        
         "prod_sync_price": get_config('prod_sync_price', True),
         "prod_sync_title": get_config('prod_sync_title', True),
         "prod_sync_desc": get_config('prod_sync_desc', True),
         "prod_sync_type": get_config('prod_sync_type', True),
         "prod_sync_vendor": get_config('prod_sync_vendor', True)
     }
+    
+    # Pass 'shop_url' and 'api_key' to your dashboard template too!
+    # (You might need to update dashboard.html later to include the App Bridge script)
     odoo_status = True if odoo else False
     return render_template('dashboard.html', 
                            logs_orders=logs_orders, logs_inventory=logs_inventory, logs_products=logs_products,
                            logs_customers=logs_customers, logs_system=logs_system,
-                           odoo_status=odoo_status, current_settings=current_settings)
-
+                           odoo_status=odoo_status, current_settings=current_settings,
+                           shop_url=shop_url, api_key=SHOPIFY_API_KEY)
 @app.route('/live_logs')
 def live_logs():
     return render_template('live_logs.html')
