@@ -330,6 +330,7 @@
     <script>
         // --- Global Config ---
         const SAVED_SETTINGS = {{ current_settings | tojson if current_settings else '{}' }};
+        const CURRENT_SHOP_URL = "{{ shop_url }}";
         const modal = new bootstrap.Modal(document.getElementById('orderImportModal'));
 
         // --- Helpers ---
@@ -538,9 +539,26 @@
                 setTimeout(() => location.reload(), 2000); 
             });
         }
+        
         function triggerAction(url, method='GET') {
-            fetch(url, { method: method }).then(r => r.json()).then(data => showToast(data.message)).catch(e => showToast("Error"));
-        }
+    // Automatically append the shop parameter to the URL
+    const separator = url.includes('?') ? '&' : '?';
+    const finalUrl = `${url}${separator}shop=${CURRENT_SHOP_URL}`;
+
+    // Visual Feedback (Button Loading State could be added here later)
+    showToast("Request sent...");
+
+    fetch(finalUrl, { method: method })
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) {
+                showToast("❌ Error: " + data.error);
+            } else {
+                showToast("✅ " + data.message);
+            }
+        })
+        .catch(e => showToast("❌ Network Error"));
+}
         document.getElementById('selectAllOrders').addEventListener('change', function() {
             document.querySelectorAll('.order-select').forEach(cb => cb.checked = this.checked);
         });
