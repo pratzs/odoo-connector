@@ -2037,24 +2037,24 @@ def trigger_fix_variants():
 def check_for_corrupted_categories():
     """
     DIAGNOSTIC TOOL: Finds POS Categories with missing names.
-    Run this once to identify the specific ID causing the crash.
+    OUTPUT: Writes directly to the Live Logs dashboard.
     """
     with app.app_context():
         if not odoo: 
-            print("No Odoo connection.")
+            log_event('Diagnostic', 'Error', "No Odoo connection.")
             return
 
-        print("--- STARTING DIAGNOSTIC SCAN ---")
+        log_event('Diagnostic', 'Info', "--- STARTING SCAN ---")
         
-        # 1. Fetch ALL POS Categories (IDs and Names only)
         try:
+            # Fetch all POS categories
             cats = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
                 'pos.category', 'search_read', 
-                [[]],  # Empty domain = All records
+                [[]], 
                 {'fields': ['id', 'name', 'parent_id']}
             )
         except Exception as e:
-            print(f"Scan failed: {e}")
+            log_event('Diagnostic', 'Error', f"Scan failed: {e}")
             return
 
         found_issues = 0
@@ -2063,29 +2063,21 @@ def check_for_corrupted_categories():
             c_id = c.get('id')
             c_name = c.get('name')
             
-            # Check 1: Is the name completely missing?
+            # Check 1: Missing Name
             if not c_name or str(c_name) == 'False':
-                print(f"🛑 FOUND CORRUPTED CATEGORY! ID: {c_id} | Name: '{c_name}' (This is the culprit)")
+                log_event('Diagnostic', 'Error', f"CORRUPTED: ID {c_id} has NO NAME.")
                 found_issues += 1
             
-            # Check 2: Does it have a parent?
-            parent = c.get('parent_id') # returns [id, "Name"]
+            # Check 2: Corrupted Parent
+            parent = c.get('parent_id')
             if parent and (not parent[1] or str(parent[1]) == 'False'):
-                 print(f"⚠️ Category ID {c_id} ('{c_name}') has a CORRUPTED PARENT (ID: {parent[0]})")
+                 log_event('Diagnostic', 'Error', f"CORRUPTED PARENT: Category '{c_name}' (ID {c_id}) has a bad parent (ID {parent[0]})")
                  found_issues += 1
 
         if found_issues == 0:
-            print("✅ No obvious data corruption found in POS Categories.")
+            log_event('Diagnostic', 'Success', "✅ No corruption found in POS Categories.")
         else:
-            print(f"❌ Found {found_issues} corrupted records. Fix these in Odoo to stop the crashes.")
-        
-        print("--- END DIAGNOSTIC SCAN ---")
-
-# --- Add a route to trigger it easily ---
-@app.route('/maintenance/diagnose_categories', methods=['GET'])
-def trigger_diagnose():
-    threading.Thread(target=check_for_corrupted_categories).start()
-    return jsonify({"message": "Diagnostic started. Check your terminal/server logs."})
+            log_event('Diagnostic', 'Warning', f"❌ Found {found_issues} corrupted records. See errors above.")
 
 # --- ADD THIS MARKER ---
 print("**************************************************")
