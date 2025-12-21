@@ -37,6 +37,54 @@ shopify.Fulfillment._prefix_source = "/"
 
 app = Flask(__name__)
 
+# ==========================================
+# DIAGNOSTIC TOOL (Paste right after app = Flask...)
+# ==========================================
+def check_for_corrupted_categories():
+    with app.app_context():
+        if not odoo: 
+            log_event('Diagnostic', 'Error', "No Odoo connection.")
+            return
+
+        log_event('Diagnostic', 'Info', "--- STARTING SCAN ---")
+        try:
+            # Fetch all POS categories
+            cats = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+                'pos.category', 'search_read', 
+                [[]], 
+                {'fields': ['id', 'name', 'parent_id']}
+            )
+        except Exception as e:
+            log_event('Diagnostic', 'Error', f"Scan failed: {e}")
+            return
+
+        found_issues = 0
+        for c in cats:
+            c_id = c.get('id')
+            c_name = c.get('name')
+            
+            # Check 1: Missing Name
+            if not c_name or str(c_name) == 'False':
+                log_event('Diagnostic', 'Error', f"CORRUPTED: ID {c_id} has NO NAME.")
+                found_issues += 1
+            
+            # Check 2: Corrupted Parent
+            parent = c.get('parent_id')
+            if parent and (not parent[1] or str(parent[1]) == 'False'):
+                 log_event('Diagnostic', 'Error', f"CORRUPTED PARENT: Category '{c_name}' (ID {c_id}) has a bad parent (ID {parent[0]})")
+                 found_issues += 1
+
+        if found_issues == 0:
+            log_event('Diagnostic', 'Success', "✅ No corruption found in POS Categories.")
+        else:
+            log_event('Diagnostic', 'Warning', f"❌ Found {found_issues} corrupted records. See errors above.")
+
+@app.route('/maintenance/diagnose_categories', methods=['GET'])
+def trigger_diagnose():
+    threading.Thread(target=check_for_corrupted_categories).start()
+    return jsonify({"message": "Diagnostic started. Check Live Logs."})
+# ==========================================
+
 # --- CONFIGURATION ---
 database_url = os.getenv('DATABASE_URL', 'sqlite:///local.db')
 if database_url:
@@ -2034,50 +2082,7 @@ def trigger_fix_variants():
     threading.Thread(target=fix_variant_mess_task).start()
     return jsonify({"message": "Variant Cleanup Started. Check Live Logs."})
 
-def check_for_corrupted_categories():
-    """
-    DIAGNOSTIC TOOL: Finds POS Categories with missing names.
-    OUTPUT: Writes directly to the Live Logs dashboard.
-    """
-    with app.app_context():
-        if not odoo: 
-            log_event('Diagnostic', 'Error', "No Odoo connection.")
-            return
 
-        log_event('Diagnostic', 'Info', "--- STARTING SCAN ---")
-        
-        try:
-            # Fetch all POS categories
-            cats = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
-                'pos.category', 'search_read', 
-                [[]], 
-                {'fields': ['id', 'name', 'parent_id']}
-            )
-        except Exception as e:
-            log_event('Diagnostic', 'Error', f"Scan failed: {e}")
-            return
-
-        found_issues = 0
-        
-        for c in cats:
-            c_id = c.get('id')
-            c_name = c.get('name')
-            
-            # Check 1: Missing Name
-            if not c_name or str(c_name) == 'False':
-                log_event('Diagnostic', 'Error', f"CORRUPTED: ID {c_id} has NO NAME.")
-                found_issues += 1
-            
-            # Check 2: Corrupted Parent
-            parent = c.get('parent_id')
-            if parent and (not parent[1] or str(parent[1]) == 'False'):
-                 log_event('Diagnostic', 'Error', f"CORRUPTED PARENT: Category '{c_name}' (ID {c_id}) has a bad parent (ID {parent[0]})")
-                 found_issues += 1
-
-        if found_issues == 0:
-            log_event('Diagnostic', 'Success', "✅ No corruption found in POS Categories.")
-        else:
-            log_event('Diagnostic', 'Warning', f"❌ Found {found_issues} corrupted records. See errors above.")
 
 # --- ADD THIS MARKER ---
 print("**************************************************")
