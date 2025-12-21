@@ -1221,24 +1221,28 @@ def archive_shopify_duplicates():
 def sync_categories_only():
     """
     Optimized ONE-TIME import of Categories from Shopify to Odoo.
-    Targets: 'product.public.category' (eCommerce/Website Categories).
-    Source: Shopify 'product_type'.
+    STRATEGY: Reverse-Linking.
+    Updates the 'Category' to include the product, instead of updating the 'Product'.
+    This bypasses the Product-level POS crash.
     """
     with app.app_context():
         if not odoo or not setup_shopify_session(): 
             log_event('System', 'Error', "Category Sync Failed: Connection Error")
             return
 
-        log_event('System', 'Info', "Starting eCommerce Category Sync...")
+        log_event('System', 'Info', "Starting eCommerce Category Sync (Reverse-Link Mode)...")
         company_id = get_config('odoo_company_id')
         
         # 1. Load Odoo Data
         try:
-            # Fetch Products
-            odoo_prods = odoo.get_all_products(company_id)
+            # We need product_tmpl_id for the reverse link
+            odoo_prods = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'product.product', 'search_read',
+                [[['active', '=', True], ['company_id', '=', int(company_id)]]],
+                {'fields': ['default_code', 'product_tmpl_id', 'public_categ_ids']}
+            )
             odoo_map = {p['default_code']: p for p in odoo_prods if p.get('default_code')}
             
-            # Fetch Existing eCommerce Categories (product.public.category)
             cat_map = {}
             cats = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
                 'product.public.category', 'search_read', [[]], {'fields': ['id', 'name']})
@@ -1260,28 +1264,23 @@ def sync_categories_only():
                 if processed_count % 50 == 0:
                     log_event('System', 'Info', f"Scanned {processed_count} Shopify products...")
 
-                # Skip if Shopify has no Type set
                 if not sp.product_type: continue
                 
-                # Get SKU
                 variant = sp.variants[0] if sp.variants else None
                 if not variant or not variant.sku: continue
                 sku = variant.sku
                 if sku.endswith('-UNIT'): sku = sku.replace('-UNIT', '')
 
-                # Find Odoo Product
                 odoo_prod = odoo_map.get(sku)
                 
-                # Validation: Must exist, be active, and NOT have a category yet
                 if not odoo_prod: continue
-                if not odoo_prod.get('active', True): continue
-                if odoo_prod.get('public_categ_ids'): continue # Already has a category
+                if odoo_prod.get('public_categ_ids'): continue # Already has category
 
                 try:
                     cat_name = sp.product_type.strip()
                     if not cat_name: continue
 
-                    # 2. Find or Create Category
+                    # Find or Create Category
                     cat_id = cat_map.get(cat_name)
                     if not cat_id:
                         log_event('System', 'Info', f"Creating new eCommerce Category: '{cat_name}'")
@@ -1289,30 +1288,31 @@ def sync_categories_only():
                             'product.public.category', 'create', [{'name': cat_name}])
                         cat_map[cat_name] = cat_id
                     
-                    # 3. Write to Odoo (Targeting ONLY public_categ_ids)
+                    # --- THE FIX: Write to the CATEGORY, not the Product ---
+                    # This adds the product template to the category's list.
+                    # It achieves the same result but often bypasses Product-level triggers.
+                    
+                    tmpl_id = odoo_prod['product_tmpl_id'][0]
+                    
                     odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
-                        'product.product', 'write', [[odoo_prod['id']], {'public_categ_ids': [(4, cat_id)]}])
+                        'product.public.category', 'write', 
+                        [[cat_id], {'product_tmpl_ids': [(4, tmpl_id)]}]
+                    )
                     
                     updated_count += 1
-                    odoo_prod['public_categ_ids'] = [cat_id] # Update local cache
-                    
-                    log_event('System', 'Success', f"Linked {sku} -> eCommerce Category '{cat_name}'")
-                    
-                except xmlrpc.client.Fault as fault:
-                    # Ignore the Odoo POS crash so the sync continues
-                    if 'pos_category' in str(fault):
-                        log_event('System', 'Warning', f"Linked {sku} but Odoo POS Module crashed (Ignored).")
-                    else:
-                        print(f"Odoo Error {sku}: {fault}")
+                    odoo_prod['public_categ_ids'] = [cat_id]
+                    log_event('System', 'Success', f"Linked {sku} -> '{cat_name}' (via Category)")
+
                 except Exception as e:
-                    print(f"Script Error {sku}: {e}")
+                    # If even this fails, we just log it and move on. We DO NOT delete POS data.
+                    log_event('System', 'Warning', f"Skipped {sku} due to Odoo Lock: {e}")
 
             if page.has_next_page(): 
                 try: page = page.next_page()
                 except: break
             else: break
         
-        log_event('System', 'Success', f"Category Sync Finished. Populated {updated_count} products.")
+        log_event('System', 'Success', f"Category Sync Finished. Updated {updated_count} products.")
 
 def cleanup_shopify_products(odoo_active_skus):
     """
