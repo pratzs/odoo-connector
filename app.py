@@ -193,6 +193,29 @@ def verify_shopify(data, hmac_header):
     digest = hmac.new(secret.encode('utf-8'), data, hashlib.sha256).digest()
     return hmac.compare_digest(base64.b64encode(digest).decode(), hmac_header)
 
+def get_odoo_connection(shop_url):
+    """
+    Factory Function: Creates a dynamic Odoo connection for a specific shop.
+    """
+    with app.app_context():
+        shop = Shop.query.filter_by(shop_url=shop_url).first()
+        if not shop:
+            print(f"Error: No credentials found for {shop_url}")
+            return None
+        
+        try:
+            # Create a fresh client using the DB credentials
+            client = OdooClient(
+                url=shop.odoo_url,
+                db=shop.odoo_db,
+                username=shop.odoo_username,
+                password=shop.odoo_password
+            )
+            return client
+        except Exception as e:
+            log_event('System', 'Error', f"Connection failed for {shop_url}: {e}")
+            return None
+
 def log_event(entity, status, message):
     try:
         log = SyncLog(entity=entity, status=status, message=message, timestamp=datetime.utcnow())
@@ -524,25 +547,39 @@ def process_order_data(data):
         except: pass
         return False, str(e)
 
-def sync_products_master():
+def sync_products_master(shop_url):
     """
-    Odoo -> Shopify Product Sync (v5.0 - STRICT MODE).
-    - Fixes "Plenty of 2 variants" issue.
-    - ONLY creates packs if 'sh_is_secondary_unit' is True in Odoo.
-    - Uses 'qty_per_pack' only for naming/ratio, not for deciding IF it is a pack.
+    DYNAMIC Odoo -> Shopify Product Sync (v6.0 - Public App).
     """
     with app.app_context():
-        if not odoo or not setup_shopify_session(): 
-            log_event('System', 'Error', "Sync Failed: Connection Error")
+        # 1. Load Shop Data from DB
+        shop = Shop.query.filter_by(shop_url=shop_url).first()
+        if not shop:
+            log_event('System', 'Error', f"Sync Failed: Shop {shop_url} not found in DB.")
             return
 
-        company_id = get_config('odoo_company_id')
+        # 2. Connect to Odoo (Dynamic)
+        odoo = get_odoo_connection(shop_url)
+        if not odoo:
+            log_event('System', 'Error', f"Sync Failed: Could not connect to Odoo for {shop_url}")
+            return
+
+        # 3. Connect to Shopify (Dynamic)
+        try:
+            session = shopify.Session(shop.shop_url, '2024-01', shop.access_token)
+            shopify.ShopifyResource.activate_session(session)
+        except Exception as e:
+            log_event('System', 'Error', f"Shopify Auth Failed: {e}")
+            return
+
+        # 4. Get Company ID (From DB, not Config)
+        company_id = shop.odoo_company_id
         if not company_id:
-            log_event('Product Sync', 'Error', "CRITICAL: No Company ID set. Aborting.")
+            log_event('Product Sync', 'Error', "CRITICAL: No Odoo Company ID set for this shop.")
             return
 
         # --- STEP 1: GET IDs ONLY ---
-        log_event('Product Sync', 'Info', "Fetching Odoo product IDs...")
+        log_event('Product Sync', 'Info', f"Fetching Odoo product IDs for {shop_url}...")
         
         domain = [
             ['sale_ok', '=', True],
@@ -572,7 +609,7 @@ def sync_products_master():
                 uom_map[u['id']] = {'name': safe_name, 'ratio': float(u.get('factor_inv', 1.0))}
         except: pass
 
-        # --- CONFIGS ---
+        # --- CONFIGS (Fallback to defaults if not per-shop yet) ---
         sync_title = get_config('prod_sync_title', True)
         sync_price = get_config('prod_sync_price', True)
         sync_desc = get_config('prod_sync_desc', True)
@@ -617,10 +654,8 @@ def sync_products_master():
                 ratio = 1.0
                 main_uom_name = 'Outer'
 
-                # CRITICAL FIX: Only treat as pack if Odoo explicitly says so
                 if p.get('sh_is_secondary_unit') is True:
-                    
-                    # 1. Try Qty Per Pack for Naming/Ratio
+                    # 1. Try Qty Per Pack
                     qty_pack = p.get('qty_per_pack', 0.0)
                     if qty_pack and float(qty_pack) > 1.0:
                         is_pack = True
@@ -634,7 +669,7 @@ def sync_products_master():
                             ratio = uom_map[sec_uom_id]['ratio']
                             if ratio > 1.0: is_pack = True
                     
-                    # 3. Get Base UOM Name
+                    # 3. Base UOM Name
                     if p.get('uom_id'):
                         if len(p['uom_id']) > 1 and p['uom_id'][1]:
                             if not main_uom_name or "per pack" not in main_uom_name:
@@ -643,7 +678,6 @@ def sync_products_master():
                              if not main_uom_name or "per pack" not in main_uom_name:
                                 main_uom_name = uom_map[p['uom_id'][0]]['name']
 
-                # Safety Check
                 if main_uom_name == "Unknown (UOM)" or not main_uom_name:
                     main_uom_name = "Outer"
 
@@ -653,7 +687,6 @@ def sync_products_master():
                 barcode = p.get('barcode', '') 
                 
                 if not is_pack:
-                    # SIMPLE PRODUCT (Reverts "Plenty of 2 variants" issue)
                     desired_variants.append({
                         'option1': 'Default Title',
                         'price': str(raw_price),
@@ -662,7 +695,6 @@ def sync_products_master():
                         'cost': str(raw_cost)
                     })
                 else:
-                    # PACK PRODUCT (Only if sh_is_secondary_unit=True)
                     desired_variants.append({
                         'option1': main_uom_name, 
                         'price': str(raw_price),
@@ -670,10 +702,8 @@ def sync_products_master():
                         'barcode': barcode,
                         'cost': str(raw_cost)
                     })
-                    
                     unit_price = round(raw_price / ratio, 2) if ratio > 0 else 0.00
                     unit_cost = round(raw_cost / ratio, 2) if ratio > 0 else 0.00
-                    
                     desired_variants.append({
                         'option1': 'Unit', 
                         'price': str(unit_price),
@@ -706,7 +736,6 @@ def sync_products_master():
                     odoo_tags = odoo.get_tag_names(p.get('product_tag_ids', []))
                     if odoo_tags: sp.tags = ",".join(odoo_tags)
 
-                # Option Enforcement
                 if is_pack:
                     sp.options = [{'name': 'Pack Size'}] 
                 elif sp.options and sp.options[0].name != 'Title':
@@ -714,23 +743,18 @@ def sync_products_master():
 
                 sp.save()
 
-                # UPDATE VARIANTS
                 existing_vars = sp.variants
                 final_vars = []
                 
                 for des in desired_variants:
                     match = next((v for v in existing_vars if v.sku == des['sku']), None)
-                    
-                    # Fix for converting existing Default Title
                     if not match and des['option1'] == 'Default Title':
                          match = next((v for v in existing_vars), None)
-
                     if not match: match = shopify.Variant({'product_id': sp.id})
                     
                     match.option1 = des['option1']
                     match.sku = des['sku']
                     if des['barcode']: match.barcode = des['barcode'] 
-                    
                     if sync_price: match.price = des['price']
                     match.inventory_management = 'shopify'
                     final_vars.append(match)
@@ -738,7 +762,6 @@ def sync_products_master():
                 sp.variants = final_vars
                 sp.save()
                 
-                # COST PRICE
                 if sp.variants:
                     for v in sp.variants:
                         d_data = next((d for d in desired_variants if d['sku'] == v.sku), None)
@@ -751,7 +774,6 @@ def sync_products_master():
                                     inv_item.save()
                             except: pass
 
-                # METAFIELD SYNC
                 if get_config('prod_sync_meta_vendor_code', False):
                     try:
                         v_code = odoo.get_vendor_product_code(p['id'])
@@ -765,10 +787,8 @@ def sync_products_master():
                                 'owner_id': sp.id
                             })
                             sp.add_metafield(meta)
-                    except Exception as e:
-                        print(f"Metafield Error {sku}: {e}")
+                    except: pass
 
-                # IMAGE SYNC
                 if sync_images and p.get('image_1920'):
                      if not sp.images:
                          try:
@@ -779,7 +799,6 @@ def sync_products_master():
                             image.save()
                          except: pass
 
-                # DB MAP
                 try:
                     pm = ProductMap.query.filter_by(sku=sku).first()
                     if not pm:
@@ -1802,8 +1821,16 @@ def product_webhook():
 
 @app.route('/sync/products/master', methods=['POST'])
 def trigger_master_sync():
-    threading.Thread(target=sync_products_master).start()
-    return jsonify({"message": "Started"})
+    # 1. Identify who is asking
+    shop_url = request.args.get('shop') # Passed from dashboard URL params
+    if not shop_url:
+        # Fallback: Try to get from referrer or form data if needed
+        return jsonify({"message": "Error: Missing shop parameter"}), 400
+
+    # 2. Start Thread with the shop_url
+    threading.Thread(target=sync_products_master, args=(shop_url,)).start()
+    
+    return jsonify({"message": f"Started Sync for {shop_url}"})
 
 @app.route('/sync/customers/master', methods=['POST'])
 def trigger_customer_master_sync():
