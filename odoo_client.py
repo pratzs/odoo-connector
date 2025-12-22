@@ -144,7 +144,7 @@ class OdooClient:
         """Fetches all allowed companies for the user."""
         try:
             # Fetch companies the user has access to
-            # We use 'res.company' search
+            # We use 'res.company' search with empty domain to get all allowed for user context
             ids = self.models.execute_kw(self.db, self.uid, self.password,
                 'res.company', 'search', [[]])
             
@@ -165,8 +165,11 @@ class OdooClient:
             
             # 2. Filter by Company if provided
             if company_id:
-                # IMPORTANT: Odoo expects an integer, ensuring we cast it fixes the "ignored filter" bug
+                # IMPORTANT: Odoo expects an integer for Many2one fields
+                # Also allow locations with no company (shared locations)
+                domain.append('|')
                 domain.append(['company_id', '=', int(company_id)])
+                domain.append(['company_id', '=', False])
             
             # 3. Execute Search
             ids = self.models.execute_kw(self.db, self.uid, self.password,
