@@ -1160,85 +1160,101 @@ def cleanup_shopify_products(shop_url):
     if archived_count > 0: 
         log_event('System', 'Success', f"Cleanup Complete. Archived {archived_count} duplicates.")
         
-def perform_inventory_sync(shop_url, lookback_minutes):
+def perform_inventory_sync(shop_url, lookback_minutes=60):
     """
-    Features: 
-    - Checks 'sync_zero_stock'
-    - Checks 'combine_committed'
-    - Updates Cartons & Units
+    Scheduled Inventory Sync: Fetches products modified in the last X minutes.
+    FIX: Now uses Auto-Detect Location + Correct Company ID + GraphQL Lookup.
     """
-    odoo = get_odoo_connection(shop_url)
-    if not odoo or not setup_shopify_session(shop_url): return 0, 0
-    
-    # PASS shop_url explicitly to get_config!
-    target_locations = get_config('inventory_locations', [], shop_url=shop_url)
-    target_field = get_config('inventory_field', 'qty_available', shop_url=shop_url)
-    sync_zero = get_config('sync_zero_stock', False, shop_url=shop_url)
-    combine_committed = get_config('combine_committed', False, shop_url=shop_url)
-    company_id = get_config('odoo_company_id', None, shop_url=shop_url) # <--- IMPORTANT
-
-
-    last_run = datetime.utcnow() - timedelta(minutes=lookback_minutes)
-    try: 
-        product_ids = odoo.get_product_ids_with_recent_stock_moves(str(last_run), company_id)
-    except Exception as e: 
-        print(f"Inventory Crawl Error: {e}")
-        return 0, 0
-    
-    count = 0
-    updates = 0
-    
-    for p_id in product_ids:
-        # 1. Get Odoo Stock
-        total_odoo = odoo.get_total_qty_for_locations(p_id, target_locations, field_name=target_field)
-        if sync_zero and total_odoo <= 0: continue
+    with app.app_context():
+        # 1. Setup Connections
+        shop_record = Shop.query.filter_by(shop_url=shop_url).first()
+        if not shop_record: return 0, 0
         
-        p_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
-            'product.product', 'read', [p_id], {'fields': ['default_code', 'uom_id', 'sh_is_secondary_unit']})
-        
-        if not p_data: continue
-        sku = p_data[0].get('default_code')
-        if not sku: continue
+        odoo = get_odoo_connection(shop_url)
+        if not odoo or not setup_shopify_session(shop_url): return 0, 0
 
-        # 2. Get Shopify Stock Data
-        # We need GraphQL to reliably get 'committed' for a specific location
-        committed_qty = 0
-        if combine_committed:
+        # 2. FIX: Auto-Detect Shopify Location
+        location_id = SHOPIFY_LOCATION_ID
+        try:
+            if not location_id or location_id == 0:
+                locs = shopify.Location.find()
+                if locs: location_id = locs[0].id
+        except: pass
+        
+        if not location_id:
+             log_event('Inventory', 'Error', "Scheduler: No Location ID found.", shop_url=shop_url)
+             return 0, 0
+
+        # 3. Settings & Company ID
+        company_id = shop_record.odoo_company_id
+        target_locations = get_config('inventory_locations', [], shop_url=shop_url)
+        target_field = get_config('inventory_field', 'qty_available', shop_url=shop_url)
+        sync_zero = get_config('sync_zero_stock', False, shop_url=shop_url)
+
+        # 4. Search for Recently Modified Products
+        time_limit = (datetime.utcnow() - timedelta(minutes=lookback_minutes)).strftime('%Y-%m-%d %H:%M:%S')
+        
+        domain = [
+            ['type', 'in', ['product', 'consu']], 
+            ['active', '=', True], 
+            ['sale_ok', '=', True],
+            ['write_date', '>=', time_limit]  # <--- The "Recent" Filter
+        ]
+        if company_id: domain.append(['company_id', '=', int(company_id)])
+
+        try:
+            product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search', [domain])
+        except Exception as e:
+            log_event('Inventory', 'Error', f"Scheduler Search Failed: {e}", shop_url=shop_url)
+            return 0, 0
+
+        if not product_ids:
+            # Log nothing if 0 items found (keeps logs clean)
+            return 0, 0
+
+        log_event('Inventory', 'Info', f"Scheduler: Found {len(product_ids)} items changed in last {lookback_minutes}m.", shop_url=shop_url)
+
+        # 5. Process Items
+        count = 0
+        updates = 0
+        
+        # Batch Read
+        BATCH_SIZE = 50
+        for i in range(0, len(product_ids), BATCH_SIZE):
+            batch = product_ids[i:i + BATCH_SIZE]
             try:
-                # GraphQL query specifically for committed stock
-                gid_query = '{ productVariants(first: 1, query: "sku:%s") { edges { node { inventoryItem { inventoryLevel(locationId: "gid://shopify/Location/%s") { quantities(names: ["committed"]) { quantity } } } } } } }' % (sku, os.getenv('SHOPIFY_WAREHOUSE_ID', ''))
-                client = shopify.GraphQL()
-                res = json.loads(client.execute(gid_query))
-                qs = res['data']['productVariants']['edges'][0]['node']['inventoryItem']['inventoryLevel']['quantities']
-                if qs: committed_qty = int(qs[0]['quantity'])
-            except: 
-                pass # Fail silently, assume 0 committed
+                data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'read', [batch], {'fields': ['default_code']})
+            except: continue
 
-        # 3. Calculate Final Push Quantity
-        # Logic: If we want Shopify Available to match Odoo, we must push (Odoo + Committed)
-        carton_qty = int(total_odoo)
-        final_carton_qty = carton_qty + committed_qty if combine_committed else carton_qty
+            for p in data:
+                sku = p.get('default_code')
+                p_id = p['id']
+                if not sku: continue
 
-        # 4. Push to Shopify (Carton)
-        shopify_info = get_shopify_variant_inv_by_sku(sku)
-        if shopify_info:
-            # We compare against 'qty' (Available)
-            # If combining committed, we compare (Available + Committed) vs Target? 
-            # Easier: Just check if Shopify Available != Odoo Available
-            current_shopify_avail = int(shopify_info['qty'])
-            
-            if current_shopify_avail != carton_qty:
-                try:
-                    shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=shopify_info['inventory_item_id'], available=final_carton_qty)
-                    updates += 1
-                    log_event('Inventory', 'Info', f"Updated {sku}: Odoo({carton_qty}) + Commit({committed_qty}) -> Shopify({final_carton_qty})")
-                except Exception as e: print(f"Inv Error {sku}: {e}")
+                total_odoo = odoo.get_total_qty_for_locations(p_id, target_locations, field_name=target_field)
+                if sync_zero and total_odoo <= 0: continue
 
-        # 5. Handle Units (Split) logic...
-        # (Keep your existing unit split logic here, applying the same committed math if needed)
+                # FIX: Use the GraphQL Helper we fixed earlier
+                shopify_info = get_shopify_variant_inv_by_sku(sku, shop_url=shop_url)
+                if not shopify_info: continue
+
+                if int(shopify_info['qty']) != int(total_odoo):
+                    try:
+                        shopify.InventoryLevel.set(
+                            location_id=location_id,
+                            inventory_item_id=shopify_info['inventory_item_id'], 
+                            available=int(total_odoo)
+                        )
+                        updates += 1
+                    except Exception as e:
+                        print(f"Scheduler Update Fail {sku}: {e}")
+                
+                count += 1
+
+        if updates > 0:
+            log_event('Inventory', 'Success', f"Scheduler Run: Checked {count} items, Updated {updates} items.", shop_url=shop_url)
         
-        count += 1
-    return count, updates
+        return count, updates
 
 
 def sync_odoo_fulfillments(shop_url):
