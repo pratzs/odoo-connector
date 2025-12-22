@@ -2102,15 +2102,6 @@ print("**************************************************")
 # Start scheduler thread
 t = threading.Thread(target=run_schedule, daemon=True)
 t.start()
-
-# --- CRITICAL SECURITY HEADERS (Fixes "Refused to Connect") ---
-@app.after_request
-def add_security_headers(response):
-    # Allow this app to be embedded in the Shopify Admin
-    response.headers['Content-Security-Policy'] = "frame-ancestors https://admin.shopify.com https://*.myshopify.com;"
-    # Allow this app to be embedded in iframes (like the Live Logs window)
-    response.headers['X-Frame-Options'] = 'ALLOWALL' 
-    return response
     
 if __name__ == '__main__':
     app.run(debug=True)
