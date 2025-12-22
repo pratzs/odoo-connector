@@ -126,7 +126,7 @@ class OdooClient:
 
     def get_changed_customers(self, time_limit_str, company_id=None):
         """
-        FIX: Removed 'is_company' and 'customer_rank' checks.
+        FIX 4: Removed 'is_company' and 'customer_rank' checks.
         Now fetches ALL contacts/customers modified recently.
         """
         domain = [
@@ -136,13 +136,15 @@ class OdooClient:
         ]
         
         if company_id:
-             # Basic company ID filter
+             # Basic company ID filter (allow False for shared contacts)
              domain.append('|')
              domain.append(('company_id', '=', int(company_id)))
              domain.append(('company_id', '=', False))
 
         fields = ['id', 'name', 'email', 'phone', 'street', 'city', 'zip', 'country_id', 'vat', 'category_id', 'user_id', 'is_company', 'parent_id']
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search_read', [domain], {'fields': fields})
+
+    
     def get_product_ids_with_recent_stock_moves(self, time_limit_str, company_id=None):
         domain = [['date', '>', time_limit_str], ['state', '=', 'done']]
         if company_id: domain.append(['company_id', '=', int(company_id)])
