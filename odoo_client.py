@@ -158,40 +158,42 @@ class OdooClient:
             return []
 
     def get_locations(self, company_id=None):
-        """Fetches stock locations, forcing the specific company context."""
+        """Fetches locations with aggressive context switching and debug logging."""
         try:
-            # 1. Base Domain
-            # We removed ['usage', '=', 'internal'] to ensure we see ALL locations first.
-            # You can add it back later if the list is too messy.
-            domain = []
-            
-            # 2. Context setup (Critical for Multi-Company)
+            domain = [['usage', '=', 'internal']]
             kwargs = {}
-            
+
             if company_id:
                 cid = int(company_id)
-                # Filter: Locations for this company OR Shared locations (False)
+                # 1. Domain: Allow locations for this company OR shared locations (False)
                 domain.append('|')
                 domain.append(['company_id', '=', cid])
                 domain.append(['company_id', '=', False])
                 
-                # TELL ODOO TO SWITCH COMPANIES FOR THIS REQUEST
-                kwargs['context'] = {'allowed_company_ids': [cid]}
-            
-            # 3. Execute Search with Context
+                # 2. Context: FORCE Odoo to switch companies
+                # We pass both keys to support different Odoo versions
+                kwargs['context'] = {
+                    'allowed_company_ids': [cid], 
+                    'company_id': cid
+                }
+                print(f"DEBUG: Fetching locations for Company ID {cid}...")
+
+            # 3. Execute Search
             ids = self.models.execute_kw(self.db, self.uid, self.password,
                 'stock.location', 'search', [domain], kwargs)
             
+            print(f"DEBUG: Found {len(ids)} locations.")
+
             if not ids: return []
             
-            # 4. Read Names
+            # 4. Read Data
             locs = self.models.execute_kw(self.db, self.uid, self.password,
                 'stock.location', 'read', [ids], {'fields': ['id', 'display_name', 'company_id']}, kwargs)
             
             return [{'id': l['id'], 'name': l['display_name']} for l in locs]
             
         except Exception as e:
-            print(f"Odoo Get Locations Error: {e}")
+            print(f"CRITICAL ERROR in get_locations: {e}")
             return []
 
     def get_total_qty_for_locations(self, product_id, location_ids, field_name='qty_available'):
