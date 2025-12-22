@@ -1608,8 +1608,8 @@ def manual_order_fetch():
     shop = Shop.query.filter_by(shop_url=shop_url).first()
     if not shop: return jsonify({"error": "Shop not found"})
 
-    # UPDATED: Use 2025-10 and status=any
-    url = f"https://{shop_url}/admin/api/2025-10/orders.json?limit=10&status=any"
+    # UPDATED: Use the global SHOPIFY_API_VERSION constant + status=any
+    url = f"https://{shop_url}/admin/api/{SHOPIFY_API_VERSION}/orders.json?limit=10&status=any"
     headers = {"X-Shopify-Access-Token": shop.access_token}
     
     try:
@@ -1775,7 +1775,7 @@ def api_save_settings():
                 else:
                     setting.value = val_str
 
-        # 3. Commit ALL changes in one atomic transaction
+        # 3. Commit ALL changes in ONE atomic transaction (Fixes "Not Saved" issue)
         db.session.commit()
         return jsonify({"message": "Settings Saved Successfully"})
     except Exception as e:
