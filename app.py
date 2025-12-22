@@ -23,6 +23,7 @@ import gc
 SHOPIFY_API_KEY = os.getenv('SHOPIFY_API_KEY')
 SHOPIFY_API_SECRET = os.getenv('SHOPIFY_API_SECRET')
 APP_URL = os.getenv('HOST')
+SHOPIFY_API_VERSION = '2025-10'  # UNIFIED VERSION
 
 # Updated Scopes to match your Partner Dashboard selection
 SCOPES = (
@@ -204,8 +205,8 @@ def setup_shopify_session(shop_url=None):
         shop = Shop.query.filter_by(shop_url=shop_url).first()
         if not shop: return False
         
-        # UPDATED: Use 2025-10
-        session = shopify.Session(shop.shop_url, '2025-10', shop.access_token)
+        # UPDATED: Use Unified Version
+        session = shopify.Session(shop.shop_url, SHOPIFY_API_VERSION, shop.access_token)
         shopify.ShopifyResource.activate_session(session)
         return True
 
@@ -1314,8 +1315,8 @@ def auth_callback():
 
    # 3. Exchange Code for Token
     try:
-        # UPDATED: Use 2025-10
-        session = shopify.Session(shop_url, '2025-10')
+        # UPDATED: Use Unified Version
+        session = shopify.Session(shop_url, SHOPIFY_API_VERSION)
         access_token = session.request_token(params) 
     except Exception as e:
         return f"Token Exchange Failed: {e}", 400
@@ -1609,19 +1610,20 @@ def manual_order_fetch():
     shop = Shop.query.filter_by(shop_url=shop_url).first()
     if not shop: return jsonify({"error": "Shop not found"})
 
-    # UPDATE: Changed API version to 2025-01 to ensure compatibility
+    # UPDATED: Added status=any to find all orders (Open, Archived, etc.)
+    # Using 2025-01 as it is currently the most stable version for orders
     url = f"https://{shop_url}/admin/api/2025-01/orders.json?limit=10&status=any"
     headers = {"X-Shopify-Access-Token": shop.access_token}
     
     try:
         res = requests.get(url, headers=headers)
         if res.status_code != 200:
-            return jsonify({"orders": [], "error": f"Shopify API Error: {res.status_code} {res.text}"})
+            return jsonify({"orders": [], "error": f"Shopify Error: {res.status_code} {res.text}"})
         orders = res.json().get('orders', [])
     except Exception as e:
         return jsonify({"orders": [], "error": str(e)})
     
-    mapped_orders = []
+    mapped = []
     for o in orders:
         status = "Not Synced"
         try:
@@ -1632,14 +1634,11 @@ def manual_order_fetch():
         except: pass
         if o.get('cancelled_at'): status = "Cancelled"
         
-        mapped_orders.append({
-            'id': o['id'], 
-            'name': o['name'], 
-            'date': o['created_at'], 
-            'total': o['total_price'], 
-            'odoo_status': status
+        mapped.append({
+            'id': o['id'], 'name': o['name'], 'date': o['created_at'], 
+            'total': o['total_price'], 'odoo_status': status
         })
-    return jsonify({"orders": mapped_orders})
+    return jsonify({"orders": mapped})
     
 
 @app.route('/sync/orders/import_batch', methods=['POST'])
@@ -1656,7 +1655,7 @@ def import_selected_orders():
     synced = 0
     log_event('System', 'Info', f"Manual Trigger: Importing {len(ids)} orders...")
     for oid in ids:
-        res = requests.get(f"https://{shop_url}/admin/api/2025-10/orders/{oid}.json", headers=headers)
+        res = requests.get(f"https://{shop_url}/admin/api/{SHOPIFY_API_VERSION}/orders/{oid}.json", headers=headers)
         if res.status_code == 200:
             success, _ = process_order_data(res.json().get('order'), odoo)
             if success: synced += 1
@@ -1744,49 +1743,55 @@ def api_get_locations():
 
 @app.route('/api/settings/save', methods=['POST'])
 def api_save_settings():
+    shop_url = request.args.get('shop')
     data = request.json
-    shop_url = request.args.get('shop') # Get shop from URL param
     
+    # Safety Check
+    if not shop_url:
+        return jsonify({"message": "Error: Missing shop parameter"}), 400
+
     try:
-        # 1. Update the Shop Table (Critical for Company ID)
+        # 1. Update Core Shop Settings (Company ID)
         shop = Shop.query.filter_by(shop_url=shop_url).first()
         if shop and 'company_id' in data:
             shop.odoo_company_id = int(data['company_id'])
             db.session.add(shop)
-            db.session.commit() # Save the company ID change immediately
 
-        # 2. Update AppSettings (For everything else)
-        set_config('inventory_locations', data.get('locations', []))
-        set_config('inventory_field', data.get('field', 'qty_available'))
-        set_config('sync_zero_stock', data.get('sync_zero', False))
-        set_config('combine_committed', data.get('combine_committed', False))
+        # 2. Update App Settings (Bulk Transaction)
+        # List of all keys we expect from the frontend
+        configs = [
+            'inventory_locations', 'inventory_field', 'sync_zero_stock', 'combine_committed',
+            'cust_direction', 'cust_auto_sync', 'cust_sync_tags', 'cust_whitelist_tags', 'cust_blacklist_tags',
+            'prod_auto_create', 'prod_auto_publish', 'prod_sync_images', 'prod_sync_tags', 'prod_sync_meta_vendor_code',
+            'prod_sync_price', 'prod_sync_title', 'prod_sync_desc', 'prod_sync_type', 'prod_sync_vendor',
+            'order_sync_tax'
+        ]
         
-        # Note: We do NOT use set_config for 'odoo_company_id' anymore
-        
-        set_config('cust_direction', data.get('cust_direction'))
-        set_config('cust_auto_sync', data.get('cust_auto_sync'))
-        set_config('cust_sync_tags', data.get('cust_sync_tags'))
-        set_config('cust_whitelist_tags', data.get('cust_whitelist_tags', ''))
-        set_config('cust_blacklist_tags', data.get('cust_blacklist_tags', ''))
-        
-        set_config('prod_auto_create', data.get('prod_auto_create', False))
-        set_config('prod_auto_publish', data.get('prod_auto_publish', False))
-        set_config('prod_sync_images', data.get('prod_sync_images', False))
-        set_config('prod_sync_tags', data.get('prod_sync_tags', False))
-        set_config('prod_sync_meta_vendor_code', data.get('prod_sync_meta_vendor_code', False))
-        
-        set_config('prod_sync_price', data.get('prod_sync_price', True))
-        set_config('prod_sync_title', data.get('prod_sync_title', True))
-        set_config('prod_sync_desc', data.get('prod_sync_desc', True))
-        set_config('prod_sync_type', data.get('prod_sync_type', True))
-        set_config('prod_sync_vendor', data.get('prod_sync_vendor', True))
+        for key in configs:
+            if key in data:
+                # Convert value to JSON string for storage
+                val_str = json.dumps(data[key])
+                
+                # Check if setting exists
+                setting = AppSetting.query.filter_by(shop_url=shop_url, key=key).first()
+                
+                if not setting:
+                    # Create new
+                    setting = AppSetting(shop_url=shop_url, key=key, value=val_str)
+                    db.session.add(setting)
+                else:
+                    # Update existing
+                    setting.value = val_str
 
-        set_config('order_sync_tax', data.get('order_sync_tax', False))
+        # 3. Commit ALL changes in one atomic transaction
+        db.session.commit()
         
-        return jsonify({"message": "Saved"})
+        return jsonify({"message": "Settings Saved Successfully"})
+        
     except Exception as e:
         db.session.rollback()
-        return jsonify({"message": str(e)}), 500
+        # Return the specific error so you can see it in the Toast notification
+        return jsonify({"message": f"Save Error: {str(e)}"}), 500
 
 
 def process_cancellation(data):
