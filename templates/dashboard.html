@@ -70,6 +70,7 @@
                         <button onclick="triggerAction('/sync/categories/run_initial_import')" class="btn btn-info text-white"><i class="bi bi-tags"></i> Init Category Sync from Shopify to Odoo</button>
                         <button onclick="triggerAction('/test/simulate_order', 'POST')" class="btn btn-outline-info"><i class="bi bi-lightning"></i> Test Connection</button>
                         <button onclick="triggerAction('/maintenance/fix_variants', 'POST')" class="btn btn-danger"><i class="bi bi-bandaid"></i> Fix/Reset Variants</button>
+                        <a href="/install?shop={{ shop_url }}" class="btn btn-outline-danger" target="_top"><i class="bi bi-shield-lock"></i> Re-Authenticate Shopify</a>
                     </div>
                 </div>
             </div>
