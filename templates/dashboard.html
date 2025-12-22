@@ -82,15 +82,20 @@
         .tab-content-area { display: none; }
         .tab-content-area.active { display: block; }
 
-        /* --- BUTTONS --- */
+        /* --- BUTTONS (Shopify Style) --- */
         .btn { border-radius: 4px; font-weight: 500; font-size: 13px; padding: 8px 16px; border: 1px solid transparent; }
-        .btn-primary { background-color: #303030; border-color: #303030; }
+        
+        .btn-primary { background-color: #303030; border-color: #303030; } /* Shopify Black */
         .btn-primary:hover { background-color: #1a1a1a; border-color: #1a1a1a; }
+
         .btn-secondary { background-color: white; color: var(--p-text); border-color: var(--p-border); box-shadow: 0 1px 0 rgba(0,0,0,0.05); }
         .btn-secondary:hover { background-color: #f6f6f7; color: var(--p-text); border-color: #c9cccf; }
+
         .btn-success { background-color: var(--p-primary); border-color: var(--p-primary); }
         .btn-success:hover { background-color: var(--p-primary-hover); border-color: var(--p-primary-hover); }
 
+        .btn-danger, .btn-critical { background-color: #d82c0d; border-color: #d82c0d; color: white; }
+        
         /* --- FORMS --- */
         .form-label-sm { font-weight: 500; margin-bottom: 4px; display: block; }
         .form-control, .form-select { border-color: var(--p-border); font-size: 14px; }
@@ -148,7 +153,7 @@
                             <i class="bi bi-images me-2"></i> Force Image Sync
                         </button>
                         <button onclick="triggerAction('/sync/fulfillments')" class="btn btn-secondary text-start">
-                            <i class="bi bi-truck me-2"></i> Push Fulfillment
+                            <i class="bi bi-truck me-2"></i> Push Fulfillment (Odoo -> Shopify)
                         </button>
                     </div>
                 </div>
