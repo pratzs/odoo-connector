@@ -406,29 +406,44 @@
         });
 
         function fetchCompanies() {
-            // UPDATED: Pass the shop URL to the API
+            const sel = document.getElementById('companySelect');
+            sel.innerHTML = '<option value="">Loading...</option>';
+
             fetch(`/api/odoo/companies?shop=${CURRENT_SHOP_URL}`)
                 .then(r => r.json())
                 .then(data => {
-                    const sel = document.getElementById('companySelect');
-                    sel.innerHTML = '<option value="">Select Company</option>';
+                    // 1. Handle Error Sent from Backend
                     if(data.error) {
-                        console.error(data.error);
+                        console.error("Backend Error:", data.error);
+                        sel.innerHTML = `<option value="">❌ Error: ${data.error}</option>`;
+                        showToast("Connection Error: " + data.error);
                         return;
                     }
                     
+                    // 2. Handle Empty List (Connected, but no companies found)
+                    if (data.length === 0) {
+                        sel.innerHTML = '<option value="">⚠️ Connected, but 0 Companies found.</option>';
+                        return;
+                    }
+
+                    // 3. Success
+                    sel.innerHTML = '<option value="">Select Company</option>';
                     data.forEach(c => {
                         const isSel = (SAVED_SETTINGS.odoo_company_id == c.id) ? 'selected' : '';
                         sel.innerHTML += `<option value="${c.id}" ${isSel}>${c.name}</option>`;
                     });
-                    if (SAVED_SETTINGS.odoo_company_id) fetchLocations(SAVED_SETTINGS.odoo_company_id);
-                })
-                .catch(e => console.error("Failed to load companies"));
-        }
 
-        document.getElementById('companySelect').addEventListener('change', function() {
-            fetchLocations(this.value);
-        });
+                    // Trigger location fetch if a company is already saved
+                    if (SAVED_SETTINGS.odoo_company_id) {
+                        fetchLocations(SAVED_SETTINGS.odoo_company_id);
+                    }
+                })
+                .catch(e => {
+                    console.error("Network/JS Error:", e);
+                    sel.innerHTML = `<option value="">❌ Network Error (Check Console)</option>`;
+                    showToast("Failed to reach Odoo.");
+                });
+        }
 
         function fetchLocations(companyId) {
             if(!companyId) return;
