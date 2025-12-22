@@ -1547,15 +1547,93 @@ def sync_inventory_endpoint():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
     
-    # WRAPPER FOR MANUAL SYNC
-    def run_manual_inventory():
+    def run_full_force_sync():
         with app.app_context():
-            log_event('Inventory', 'Info', "Starting Manual Force Sync (Looking back 30 days)...", shop_url=shop_url)
-            # Look back 43200 minutes (30 Days) instead of 35 minutes
-            c, u = perform_inventory_sync(shop_url, lookback_minutes=43200) 
-            log_event('Inventory', 'Success', f"Manual Sync: Checked {c} items, Updated {u} items.", shop_url=shop_url)
+            log_event('Inventory', 'Info', "Starting TRUE Force Sync (Scanning ALL Storable Products)...", shop_url=shop_url)
+            
+            odoo = get_odoo_connection(shop_url)
+            if not odoo or not setup_shopify_session(shop_url): return
 
-    threading.Thread(target=run_manual_inventory).start()
+            company_id = get_config('odoo_company_id', shop_url=shop_url)
+            target_locations = get_config('inventory_locations', [], shop_url=shop_url)
+            target_field = get_config('inventory_field', 'qty_available', shop_url=shop_url)
+            sync_zero = get_config('sync_zero_stock', False, shop_url=shop_url)
+            combine_committed = get_config('combine_committed', False, shop_url=shop_url)
+
+            # 1. Fetch ALL Storable Products (Not just recent moves)
+            domain = [['type', 'in', ['product', 'consu']], ['active', '=', True]]
+            if company_id: domain.append(['company_id', '=', int(company_id)])
+            
+            try:
+                # We fetch IDs of ALL storable products
+                all_product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                    'product.product', 'search', [domain])
+            except Exception as e:
+                log_event('Inventory', 'Error', f"Odoo Search Failed: {e}", shop_url=shop_url)
+                return
+
+            total_items = len(all_product_ids)
+            log_event('Inventory', 'Info', f"Found {total_items} storable products. Syncing...", shop_url=shop_url)
+            
+            count = 0
+            updates = 0
+            
+            # 2. Process in batches to handle 10k items smoothly
+            BATCH_SIZE = 50
+            for i in range(0, total_items, BATCH_SIZE):
+                batch_ids = all_product_ids[i:i + BATCH_SIZE]
+                
+                # Pre-fetch Odoo Data
+                try:
+                    p_data_list = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+                        'product.product', 'read', [batch_ids], {'fields': ['default_code', 'uom_id', 'sh_is_secondary_unit']})
+                except: continue
+
+                for p_data in p_data_list:
+                    p_id = p_data['id']
+                    sku = p_data.get('default_code')
+                    if not sku: continue
+
+                    # Get Odoo Qty
+                    total_odoo = odoo.get_total_qty_for_locations(p_id, target_locations, field_name=target_field)
+                    if sync_zero and total_odoo <= 0: continue
+
+                    # Get Shopify Qty
+                    shopify_info = get_shopify_variant_inv_by_sku(sku)
+                    if not shopify_info: continue
+
+                    # Calculate Committed (Optional)
+                    committed_qty = 0
+                    if combine_committed:
+                        try:
+                            # Simple GraphQL check for committed
+                            gid_query = '{ productVariants(first: 1, query: "sku:%s") { edges { node { inventoryItem { inventoryLevel(locationId: "gid://shopify/Location/%s") { quantities(names: ["committed"]) { quantity } } } } } } }' % (sku, os.getenv('SHOPIFY_WAREHOUSE_ID', ''))
+                            client = shopify.GraphQL()
+                            res = json.loads(client.execute(gid_query))
+                            qs = res['data']['productVariants']['edges'][0]['node']['inventoryItem']['inventoryLevel']['quantities']
+                            if qs: committed_qty = int(qs[0]['quantity'])
+                        except: pass
+
+                    # Push if different
+                    final_qty = int(total_odoo) + (committed_qty if combine_committed else 0)
+                    current_shopify = int(shopify_info['qty'])
+
+                    if current_shopify != final_qty:
+                        try:
+                            shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=shopify_info['inventory_item_id'], available=final_qty)
+                            updates += 1
+                        except Exception as e: 
+                            print(f"Update failed for {sku}: {e}")
+                    
+                    count += 1
+                
+                # Log progress every 500 items
+                if count % 500 == 0:
+                    log_event('Inventory', 'Info', f"Processed {count}/{total_items} items...", shop_url=shop_url)
+
+            log_event('Inventory', 'Success', f"Force Sync Complete: Checked {count} items, Updated {updates} items.", shop_url=shop_url)
+
+    threading.Thread(target=run_full_force_sync).start()
     return jsonify({"message": f"Full Inventory Sync Started for {shop_url}"})
 
 @app.route('/sync/fulfillments', methods=['GET'])
