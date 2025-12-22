@@ -402,234 +402,243 @@
             event.target.classList.add('active');
         }
 
-        // --- GLOBAL CONFIG (Fixed: Uses 'config' now) ---
-        const SAVED_SETTINGS = {{ config | tojson | safe if config else '{}' }};
-        const CURRENT_SHOP_URL = "{{ shop_url }}";
-        const modalElement = document.getElementById('orderImportModal');
-        const modal = modalElement ? new bootstrap.Modal(modalElement) : null;
+        // --- Global Config ---
+// Using SAVED_SETTINGS which is populated from 'config' now
+const SAVED_SETTINGS = {{ config | tojson | safe if config else '{}' }};
 
-        // --- HELPERS ---
-        function showToast(msg) {
-            const toastEl = document.getElementById('liveToast');
-            if(toastEl) {
-                document.getElementById('toastMessage').innerText = msg;
-                new bootstrap.Toast(toastEl).show();
-            } else { alert(msg); }
-        }
+// CLEANUP FIX: Ensure the shop URL doesn't have a #hash attached to it
+const CURRENT_SHOP_URL = "{{ shop_url }}".split('#')[0]; 
 
-        function formatLocalTime(utcString) {
-            if (!utcString) return '';
-            try {
-                const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-                return new Date(utcString).toLocaleString(undefined, {
-                    timeZone: userTimezone,
-                    year: 'numeric', month: '2-digit', day: '2-digit',
-                    hour: '2-digit', minute: '2-digit', second: '2-digit',
-                    hour12: true
-                });
-            } catch (e) { return utcString; }
-        }
+const modalElement = document.getElementById('orderImportModal');
+const modal = modalElement ? new bootstrap.Modal(modalElement) : null;
 
-        document.addEventListener("DOMContentLoaded", function() {
-            // Restore Settings
-            const setCheck = (id, val) => { const el = document.getElementById(id); if(el) el.checked = !!val; };
-            const setVal = (id, val) => { const el = document.getElementById(id); if(el) el.value = val; };
+// --- HELPERS ---
+function showToast(msg) {
+    const toastEl = document.getElementById('liveToast');
+    if(toastEl) {
+        document.getElementById('toastMessage').innerText = msg;
+        new bootstrap.Toast(toastEl).show();
+    } else { alert(msg); }
+}
 
-            // Using SAVED_SETTINGS which is populated from 'config' now
-            setCheck('prodAutoCreate', SAVED_SETTINGS.prod_auto_create);
-            setCheck('prodAutoPublish', SAVED_SETTINGS.prod_auto_publish);
-            setCheck('prodSyncImages', SAVED_SETTINGS.prod_sync_images);
-            setCheck('fieldTags', SAVED_SETTINGS.prod_sync_tags);
-            setCheck('fieldMetaVendorCode', SAVED_SETTINGS.prod_sync_meta_vendor_code);
-            setCheck('fieldPrice', SAVED_SETTINGS.prod_sync_price);
-            setCheck('fieldTitle', SAVED_SETTINGS.prod_sync_title);
-            setCheck('fieldDesc', SAVED_SETTINGS.prod_sync_desc);
-            setCheck('fieldProductType', SAVED_SETTINGS.prod_sync_type);
-            setCheck('fieldVendor', SAVED_SETTINGS.prod_sync_vendor);
-            setCheck('orderSyncTax', SAVED_SETTINGS.order_sync_tax);
-            setCheck('checkZeroStock', SAVED_SETTINGS.sync_zero);
-            setCheck('checkCommitted', SAVED_SETTINGS.combine_committed);
-            setVal('invType', SAVED_SETTINGS.field || 'qty_available');
-            setVal('custSyncDirection', SAVED_SETTINGS.cust_direction || 'bidirectional');
-            setCheck('custAutoSync', SAVED_SETTINGS.cust_auto_sync);
-            setCheck('custSyncTagsSwitch', SAVED_SETTINGS.cust_sync_tags);
-            setVal('custWhitelistTags', SAVED_SETTINGS.cust_whitelist_tags || '');
-            setVal('custBlacklistTags', SAVED_SETTINGS.cust_blacklist_tags || '');
-
-            toggleTagFields();
-            
-            if(CURRENT_SHOP_URL) fetchCompanies();
+function formatLocalTime(utcString) {
+    if (!utcString) return '';
+    try {
+        const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        return new Date(utcString).toLocaleString(undefined, {
+            timeZone: userTimezone,
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit',
+            hour12: true
         });
+    } catch (e) { return utcString; }
+}
 
-        function toggleTagFields() {
-            const toggle = document.getElementById('custSyncTagsSwitch');
-            const fields = document.getElementById('tagFilterFields');
-            if(toggle && fields) fields.style.display = toggle.checked ? 'block' : 'none';
-        }
+// --- INITIALIZATION ---
+document.addEventListener("DOMContentLoaded", function() {
+    const setCheck = (id, val) => { const el = document.getElementById(id); if(el) el.checked = !!val; };
+    const setVal = (id, val) => { const el = document.getElementById(id); if(el) el.value = val; };
 
-        // --- DATA FETCHING ---
-        function fetchCompanies() {
-            const sel = document.getElementById('companySelect');
-            if(!sel) return;
-            sel.innerHTML = '<option value="">Loading...</option>';
-            fetch(`/api/odoo/companies?shop=${CURRENT_SHOP_URL}`)
-                .then(r => r.json())
-                .then(data => {
-                    if(data.error) { sel.innerHTML = `<option value="">Error: ${data.error}</option>`; return; }
-                    sel.innerHTML = '<option value="">Select Company</option>';
-                    if (Array.isArray(data)) {
-                        data.forEach(c => {
-                            const isSel = (SAVED_SETTINGS.odoo_company_id == c.id) ? 'selected' : '';
-                            sel.innerHTML += `<option value="${c.id}" ${isSel}>${c.name}</option>`;
-                        });
-                    }
-                    if (SAVED_SETTINGS.odoo_company_id) fetchLocations(SAVED_SETTINGS.odoo_company_id);
-                })
-                .catch(e => sel.innerHTML = `<option value="">Network Error</option>`);
-        }
+    setCheck('prodAutoCreate', SAVED_SETTINGS.prod_auto_create);
+    setCheck('prodAutoPublish', SAVED_SETTINGS.prod_auto_publish);
+    setCheck('prodSyncImages', SAVED_SETTINGS.prod_sync_images);
+    setCheck('fieldTags', SAVED_SETTINGS.prod_sync_tags);
+    setCheck('fieldMetaVendorCode', SAVED_SETTINGS.prod_sync_meta_vendor_code);
+    setCheck('fieldPrice', SAVED_SETTINGS.prod_sync_price);
+    setCheck('fieldTitle', SAVED_SETTINGS.prod_sync_title);
+    setCheck('fieldDesc', SAVED_SETTINGS.prod_sync_desc);
+    setCheck('fieldProductType', SAVED_SETTINGS.prod_sync_type);
+    setCheck('fieldVendor', SAVED_SETTINGS.prod_sync_vendor);
+    setCheck('orderSyncTax', SAVED_SETTINGS.order_sync_tax);
+    setCheck('checkZeroStock', SAVED_SETTINGS.sync_zero);
+    setCheck('checkCommitted', SAVED_SETTINGS.combine_committed);
+    setVal('invType', SAVED_SETTINGS.field || 'qty_available');
+    setVal('custSyncDirection', SAVED_SETTINGS.cust_direction || 'bidirectional');
+    setCheck('custAutoSync', SAVED_SETTINGS.cust_auto_sync);
+    setCheck('custSyncTagsSwitch', SAVED_SETTINGS.cust_sync_tags);
+    setVal('custWhitelistTags', SAVED_SETTINGS.cust_whitelist_tags || '');
+    setVal('custBlacklistTags', SAVED_SETTINGS.cust_blacklist_tags || '');
 
-        const companySelect = document.getElementById('companySelect');
-        if(companySelect) {
-            companySelect.addEventListener('change', function() {
-                const companyId = this.value;
-                if(companyId) fetchLocations(companyId);
-                else document.getElementById('locationList').innerHTML = '';
-            });
-        }
+    toggleTagFields();
+    
+    if(CURRENT_SHOP_URL) fetchCompanies();
+    handleSidebarNavigation(); // Run once on load
+});
 
-        function fetchLocations(companyId) {
-            const list = document.getElementById('locationList');
-            if(!list) return;
-            list.innerHTML = '<div class="spinner-border spinner-border-sm"></div> Loading...';
-            fetch(`/api/odoo/locations?company_id=${companyId}&shop=${CURRENT_SHOP_URL}`)
-                .then(r => r.json())
-                .then(data => {
-                    if(data.error) { list.innerHTML = `<span class="text-danger">${data.error}</span>`; return; }
-                    if (!Array.isArray(data) || data.length === 0) { list.innerHTML = '<span class="text-warning">No locations found.</span>'; return; }
-                    
-                    const savedLocs = SAVED_SETTINGS.locations || [];
-                    const items = data.map(loc => {
-                        const isChecked = savedLocs.includes(loc.id) ? 'checked' : '';
-                        return `<div class="form-check"><input class="form-check-input loc-check" type="checkbox" value="${loc.id}" id="loc_${loc.id}" ${isChecked}><label class="form-check-label small" for="loc_${loc.id}">${loc.name}</label></div>`;
-                    });
-                    list.innerHTML = items.join('');
+function toggleTagFields() {
+    const toggle = document.getElementById('custSyncTagsSwitch');
+    const fields = document.getElementById('tagFilterFields');
+    if(toggle && fields) fields.style.display = toggle.checked ? 'block' : 'none';
+}
+
+// --- DATA FETCHING ---
+function fetchCompanies() {
+    const sel = document.getElementById('companySelect');
+    if(!sel) return;
+    sel.innerHTML = '<option value="">Loading...</option>';
+    fetch(`/api/odoo/companies?shop=${CURRENT_SHOP_URL}`)
+        .then(r => r.json())
+        .then(data => {
+            if(data.error) { sel.innerHTML = `<option value="">Error: ${data.error}</option>`; return; }
+            sel.innerHTML = '<option value="">Select Company</option>';
+            if (Array.isArray(data)) {
+                data.forEach(c => {
+                    const isSel = (SAVED_SETTINGS.odoo_company_id == c.id) ? 'selected' : '';
+                    sel.innerHTML += `<option value="${c.id}" ${isSel}>${c.name}</option>`;
                 });
-        }
+            }
+            if (SAVED_SETTINGS.odoo_company_id) fetchLocations(SAVED_SETTINGS.odoo_company_id);
+        })
+        .catch(e => sel.innerHTML = `<option value="">Network Error</option>`);
+}
 
-        function saveSettings() {
-            const companyId = document.getElementById('companySelect').value;
-            if (!companyId) { alert("Please select a Company first."); return; }
+const companySelect = document.getElementById('companySelect');
+if(companySelect) {
+    companySelect.addEventListener('change', function() {
+        const companyId = this.value;
+        if(companyId) fetchLocations(companyId);
+        else document.getElementById('locationList').innerHTML = '';
+    });
+}
 
-            const payload = {
-                odoo_company_id: companyId,
-                inventory_field: document.querySelector('#invType').value,
-                sync_zero_stock: document.getElementById('checkZeroStock').checked,
-                combine_committed: document.getElementById('checkCommitted').checked,
-                inventory_locations: Array.from(document.querySelectorAll('.loc-check:checked')).map(cb => parseInt(cb.value)),
-                prod_auto_create: document.getElementById('prodAutoCreate').checked,
-                prod_auto_publish: document.getElementById('prodAutoPublish').checked,
-                prod_sync_images: document.getElementById('prodSyncImages').checked,
-                prod_sync_tags: document.getElementById('fieldTags').checked,
-                prod_sync_meta_vendor_code: document.getElementById('fieldMetaVendorCode').checked,
-                prod_sync_price: document.getElementById('fieldPrice').checked,
-                prod_sync_title: document.getElementById('fieldTitle').checked,
-                prod_sync_desc: document.getElementById('fieldDesc').checked,
-                prod_sync_type: document.getElementById('fieldProductType').checked,
-                prod_sync_vendor: document.getElementById('fieldVendor').checked,
-                order_sync_tax: document.getElementById('orderSyncTax').checked,
-                cust_direction: document.getElementById('custSyncDirection').value,
-                cust_auto_sync: document.getElementById('custAutoSync').checked,
-                cust_sync_tags: document.getElementById('custSyncTagsSwitch').checked,
-                cust_whitelist_tags: document.getElementById('custWhitelistTags').value,
-                cust_blacklist_tags: document.getElementById('custBlacklistTags').value
-            };
-
-            showToast("Saving...");
-            fetch(`/api/settings/save?shop=${CURRENT_SHOP_URL}`, { 
-                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
-            }).then(r => r.json()).then(data => showToast("Saved!")).catch(err => showToast("Save Failed"));
-        }
-
-        // --- MANUAL ACTIONS ---
-        function triggerAction(url, method='GET') {
-            const separator = url.includes('?') ? '&' : '?';
-            const finalUrl = `${url}${separator}shop=${CURRENT_SHOP_URL}`;
-            showToast("Request sent...");
-            fetch(finalUrl, { method: method })
-                .then(r => r.json())
-                .then(data => showToast(data.message || data.error))
-                .catch(e => showToast("Network Error"));
-        }
-
-        function openOrderImportModal() {
-            if(modal) modal.show();
-            const tbody = document.getElementById('importTableBody');
-            tbody.innerHTML = '<tr><td colspan="5" class="text-center"><div class="spinner-border spinner-border-sm"></div> Fetching...</td></tr>';
-            fetch(`/sync/orders/manual?shop=${CURRENT_SHOP_URL}`)
-                .then(r => r.json())
-                .then(data => {
-                    tbody.innerHTML = '';
-                    if (data.error) { tbody.innerHTML = `<tr><td colspan="5" class="text-danger">${data.error}</td></tr>`; return; }
-                    if (data.orders && data.orders.length > 0) {
-                        data.orders.forEach(order => {
-                            let badgeClass = order.odoo_status.includes('Not Synced') ? 'bg-danger' : 'bg-success';
-                            tbody.innerHTML += `<tr><td><input type="checkbox" class="order-select" value="${order.id}"></td><td>${order.name}</td><td>${formatLocalTime(order.date)}</td><td>${order.total}</td><td><span class="badge ${badgeClass}">${order.odoo_status}</span></td></tr>`;
-                        });
-                    } else { tbody.innerHTML = '<tr><td colspan="5" class="text-center">No recent orders found.</td></tr>'; }
-                });
-        }
-
-        function runBatchImport() {
-            const selected = Array.from(document.querySelectorAll('.order-select:checked')).map(cb => cb.value);
-            if (selected.length === 0) { showToast("Select an order first."); return; }
-            document.getElementById('importTableBody').innerHTML = '<tr><td colspan="5" class="text-center">Importing...</td></tr>';
-            fetch('/sync/orders/import_batch', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ order_ids: selected, shop_url: CURRENT_SHOP_URL })
-            }).then(r => r.json()).then(data => {
-                if(modal) modal.hide(); showToast(data.message); setTimeout(() => location.reload(), 2000);
+function fetchLocations(companyId) {
+    const list = document.getElementById('locationList');
+    if(!list) return;
+    list.innerHTML = '<div class="spinner-border spinner-border-sm"></div> Loading...';
+    fetch(`/api/odoo/locations?company_id=${companyId}&shop=${CURRENT_SHOP_URL}`)
+        .then(r => r.json())
+        .then(data => {
+            if(data.error) { list.innerHTML = `<span class="text-danger">${data.error}</span>`; return; }
+            if (!Array.isArray(data) || data.length === 0) { list.innerHTML = '<span class="text-warning">No locations found.</span>'; return; }
+            
+            const savedLocs = SAVED_SETTINGS.locations || [];
+            const items = data.map(loc => {
+                const isChecked = savedLocs.includes(loc.id) ? 'checked' : '';
+                return `<div class="form-check"><input class="form-check-input loc-check" type="checkbox" value="${loc.id}" id="loc_${loc.id}" ${isChecked}><label class="form-check-label small" for="loc_${loc.id}">${loc.name}</label></div>`;
             });
-        }
+            list.innerHTML = items.join('');
+        });
+}
 
-        const selectAll = document.getElementById('selectAllOrders');
-        if(selectAll) selectAll.addEventListener('change', function() { document.querySelectorAll('.order-select').forEach(cb => cb.checked = this.checked); });
+// --- SAVE SETTINGS ---
+function saveSettings() {
+    const companyId = document.getElementById('companySelect').value;
+    if (!companyId) { alert("Please select a Company first."); return; }
 
-        /**
- * SIDEBAR NAVIGATION HANDLER
- * This listens for the URL #hash and opens the correct Bootstrap tab.
- */
+    const payload = {
+        odoo_company_id: companyId,
+        inventory_field: document.querySelector('#invType').value,
+        sync_zero_stock: document.getElementById('checkZeroStock').checked,
+        combine_committed: document.getElementById('checkCommitted').checked,
+        inventory_locations: Array.from(document.querySelectorAll('.loc-check:checked')).map(cb => parseInt(cb.value)),
+        prod_auto_create: document.getElementById('prodAutoCreate').checked,
+        prod_auto_publish: document.getElementById('prodAutoPublish').checked,
+        prod_sync_images: document.getElementById('prodSyncImages').checked,
+        prod_sync_tags: document.getElementById('fieldTags').checked,
+        prod_sync_meta_vendor_code: document.getElementById('fieldMetaVendorCode').checked,
+        prod_sync_price: document.getElementById('fieldPrice').checked,
+        prod_sync_title: document.getElementById('fieldTitle').checked,
+        prod_sync_desc: document.getElementById('fieldDesc').checked,
+        prod_sync_type: document.getElementById('fieldProductType').checked,
+        prod_sync_vendor: document.getElementById('fieldVendor').checked,
+        order_sync_tax: document.getElementById('orderSyncTax').checked,
+        cust_direction: document.getElementById('custSyncDirection').value,
+        cust_auto_sync: document.getElementById('custAutoSync').checked,
+        cust_sync_tags: document.getElementById('custSyncTagsSwitch').checked,
+        cust_whitelist_tags: document.getElementById('custWhitelistTags').value,
+        cust_blacklist_tags: document.getElementById('custBlacklistTags').value
+    };
+
+    showToast("Saving...");
+    fetch(`/api/settings/save?shop=${CURRENT_SHOP_URL}`, { 
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    }).then(r => r.json()).then(data => showToast("Saved!")).catch(err => showToast("Save Failed"));
+}
+
+// --- MANUAL ACTIONS & MODALS ---
+function triggerAction(url, method='GET') {
+    const separator = url.includes('?') ? '&' : '?';
+    const finalUrl = `${url}${separator}shop=${CURRENT_SHOP_URL}`;
+    showToast("Request sent...");
+    fetch(finalUrl, { method: method })
+        .then(r => r.json())
+        .then(data => showToast(data.message || data.error))
+        .catch(e => showToast("Network Error"));
+}
+
+function openOrderImportModal() {
+    if(modal) modal.show();
+    const tbody = document.getElementById('importTableBody');
+    tbody.innerHTML = '<tr><td colspan="5" class="text-center"><div class="spinner-border spinner-border-sm"></div> Fetching...</td></tr>';
+    fetch(`/sync/orders/manual?shop=${CURRENT_SHOP_URL}`)
+        .then(r => r.json())
+        .then(data => {
+            tbody.innerHTML = '';
+            if (data.error) { tbody.innerHTML = `<tr><td colspan="5" class="text-danger">${data.error}</td></tr>`; return; }
+            if (data.orders && data.orders.length > 0) {
+                data.orders.forEach(order => {
+                    let badgeClass = order.odoo_status.includes('Not Synced') ? 'bg-danger' : 'bg-success';
+                    tbody.innerHTML += `<tr><td><input type="checkbox" class="order-select" value="${order.id}"></td><td>${order.name}</td><td>${formatLocalTime(order.date)}</td><td>${order.total}</td><td><span class="badge ${badgeClass}">${order.odoo_status}</span></td></tr>`;
+                });
+            } else { tbody.innerHTML = '<tr><td colspan="5" class="text-center">No recent orders found.</td></tr>'; }
+        });
+}
+
+function runBatchImport() {
+    const selected = Array.from(document.querySelectorAll('.order-select:checked')).map(cb => cb.value);
+    if (selected.length === 0) { showToast("Select an order first."); return; }
+    document.getElementById('importTableBody').innerHTML = '<tr><td colspan="5" class="text-center">Importing...</td></tr>';
+    fetch('/sync/orders/import_batch', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ order_ids: selected, shop_url: CURRENT_SHOP_URL })
+    }).then(r => r.json()).then(data => {
+        if(modal) modal.hide(); showToast(data.message); setTimeout(() => location.reload(), 2000);
+    });
+}
+
+// --- SIDEBAR & HASH NAVIGATION ---
 function handleSidebarNavigation() {
     const hash = window.location.hash;
     
+    // Deactivate all custom tab contents (for Polaris-style tabs if used)
+    document.querySelectorAll('.tab-content-area').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+
     if (hash === '#settings') {
-        // Find the "Configuration" tab link and click it using Bootstrap's logic
         const settingsTab = document.querySelector('a[href="#settings"]');
         if (settingsTab) {
-            const tab = new bootstrap.Tab(settingsTab);
-            tab.show();
+            new bootstrap.Tab(settingsTab).show();
+            // Also update the custom Polaris tab styling
+            const polarisBtn = Array.from(document.querySelectorAll('.tab-btn')).find(b => b.innerText.includes('Config'));
+            if(polarisBtn) polarisBtn.classList.add('active');
+            const targetContent = document.getElementById('tab-settings');
+            if(targetContent) targetContent.classList.add('active');
         }
     } else if (hash === '#maintenance') {
-        // Since Maintenance is likely part of your third tab
         const maintenanceTab = document.querySelector('a[href="#maintenance"]');
         if (maintenanceTab) {
-            const tab = new bootstrap.Tab(maintenanceTab);
-            tab.show();
+            new bootstrap.Tab(maintenanceTab).show();
+            const polarisBtn = Array.from(document.querySelectorAll('.tab-btn')).find(b => b.innerText.includes('Maint'));
+            if(polarisBtn) polarisBtn.classList.add('active');
+            const targetContent = document.getElementById('tab-maintenance');
+            if(targetContent) targetContent.classList.add('active');
         }
     } else {
-        // Default to Live Logs / Overview
         const overviewTab = document.querySelector('a[href="#live-logs"]');
         if (overviewTab) {
-            const tab = new bootstrap.Tab(overviewTab);
-            tab.show();
+            new bootstrap.Tab(overviewTab).show();
+            const polarisBtn = Array.from(document.querySelectorAll('.tab-btn')).find(b => b.innerText.includes('Over'));
+            if(polarisBtn) polarisBtn.classList.add('active');
+            const targetContent = document.getElementById('tab-overview');
+            if(targetContent) targetContent.classList.add('active');
         }
     }
 }
 
-// Listen for hash changes (when user clicks sidebar)
 window.addEventListener('hashchange', handleSidebarNavigation);
 
-// Check on initial page load
-window.addEventListener('load', handleSidebarNavigation);
+const selectAll = document.getElementById('selectAllOrders');
+if(selectAll) selectAll.addEventListener('change', function() { document.querySelectorAll('.order-select').forEach(cb => cb.checked = this.checked); });
         
     </script>
 </body>
