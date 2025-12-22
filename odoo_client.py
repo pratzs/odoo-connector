@@ -158,28 +158,52 @@ class OdooClient:
             return []
 
     def get_locations(self, company_id=None):
+        """Fetches ALL locations for the company (Internal, View, Transit, etc)."""
         try:
-            domain = [['usage', '=', 'internal']] # You can remove this line to see ALL locations if still empty
+            # 1. EMPTY DOMAIN: Do not filter by usage type. Show everything.
+            domain = []
+            
+            # 2. Context & Company Logic
             context_dict = {}
             if company_id:
                 cid = int(company_id)
+                # Allow locations for this specific company OR shared locations
                 domain.append('|')
                 domain.append(['company_id', '=', cid])
                 domain.append(['company_id', '=', False])
-                context_dict = {'allowed_company_ids': [cid], 'company_id': cid}
+                
+                # Force context switch so Odoo lets us see them
+                context_dict = {
+                    'allowed_company_ids': [cid],
+                    'company_id': cid
+                }
 
-            kw_args = {'fields': ['id', 'display_name', 'company_id']}
-            if context_dict: kw_args['context'] = context_dict
-
-            # USE SEARCH_READ (This fixes the TypeError in your logs)
-            locs = self.models.execute_kw(self.db, self.uid, self.password,
-                'stock.location', 'search_read', [domain], kw_args)
+            # 3. Setup Arguments
+            # We fetch 'usage' so we can label them in the dropdown
+            fields = ['id', 'display_name', 'company_id', 'usage']
+            kw_args = {'fields': fields, 'limit': 100}
             
-            return [{'id': l['id'], 'name': l['display_name']} for l in locs]
-        except Exception as e:
-            print(f"Odoo Locations Error: {e}")
-            return []
+            if context_dict:
+                kw_args['context'] = context_dict
 
+            # 4. Execute SAFE Search Read
+            locs = self.models.execute_kw(
+                self.db, self.uid, self.password,
+                'stock.location', 'search_read',
+                [domain], 
+                kw_args
+            )
+            
+            # 5. Format Output with Type Label
+            # Example: "Warehouse A [internal]" or "Partner Locations [customer]"
+            return [{'id': l['id'], 'name': f"{l['display_name']} [{l.get('usage', 'unknown')}]"} for l in locs]
+            
+        except Exception as e:
+            print(f"CRITICAL ERROR in get_locations: {e}")
+            # Return error as a dropdown item so you see it on screen
+            return [{'id': 0, 'name': f"Error: {str(e)}"}]
+
+    
     def get_total_qty_for_locations(self, product_id, location_ids, field_name='qty_available'):
         total_qty = 0
         for loc_id in location_ids:
