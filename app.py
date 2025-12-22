@@ -243,30 +243,58 @@ def find_shopify_product_by_sku(sku, shop_url=None):
                 return node['product']['legacyResourceId']
     except Exception as e: print(f"GraphQL Error: {e}")
     return None
+
+
 def get_shopify_variant_inv_by_sku(sku, shop_url=None):
     """
-    FIX: Added shop_url param so it works in background threads.
+    FIX: Uses GraphQL because REST API 'Variant.find(sku=...)' is NOT supported 
+    and returns the wrong product (A0001) every time.
     """
-    # If session is not active, try to activate it using the passed shop_url
+    # Ensure session is active
     try:
         if not shopify.ShopifyResource.site:
             if not setup_shopify_session(shop_url): return None
     except:
         if not setup_shopify_session(shop_url): return None
 
-    try:
-        variants = shopify.Variant.find(sku=sku)
-        if variants:
-            v = variants[0]
-            return {
-                'variant_id': v.id,
-                'inventory_item_id': v.inventory_item_id,
-                'qty': v.inventory_quantity,
-                'old_inventory_quantity': v.old_inventory_quantity
+    # Use GraphQL for precise SKU lookup
+    # Escape quotes in SKU just in case
+    safe_sku = sku.replace('"', '\\"')
+    
+    query = """
+    {
+      productVariants(first: 1, query: "sku:%s") {
+        edges {
+          node {
+            legacyResourceId
+            inventoryQuantity
+            inventoryItem {
+              legacyResourceId
             }
-    except Exception as e: 
-        print(f"Inv Lookup Error: {e}")
-    return None
+          }
+        }
+      }
+    }
+    """ % safe_sku
+    
+    try:
+        client = shopify.GraphQL()
+        result = client.execute(query)
+        data = json.loads(result)
+        edges = data.get('data', {}).get('productVariants', {}).get('edges', [])
+        
+        if not edges: return None
+        
+        node = edges[0]['node']
+        
+        return {
+            'variant_id': node['legacyResourceId'],
+            'inventory_item_id': node['inventoryItem']['legacyResourceId'],
+            'qty': node['inventoryQuantity']
+        }
+    except Exception as e:
+        print(f"GraphQL Inv Lookup Error for {sku}: {e}")
+        return None
 
 
 def process_product_data(data, odoo_client):
