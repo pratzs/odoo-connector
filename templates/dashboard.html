@@ -551,19 +551,34 @@
         // --- Manual Import ---
         function openOrderImportModal() {
             if(modal) modal.show();
-            document.getElementById('importTableBody').innerHTML = '<tr><td colspan="5" class="text-center"><div class="spinner-border spinner-border-sm"></div> Fetching...</td></tr>';
+            const tbody = document.getElementById('importTableBody');
+            
+            // Show loading spinner
+            tbody.innerHTML = '<tr><td colspan="5" class="text-center"><div class="spinner-border spinner-border-sm"></div> Fetching...</td></tr>';
             
             fetch(`/sync/orders/manual?shop=${CURRENT_SHOP_URL}`)
                 .then(r => r.json())
                 .then(data => {
-                    const tbody = document.getElementById('importTableBody');
-                    tbody.innerHTML = '';
+                    tbody.innerHTML = ''; // Clear loading spinner
+                    
+                    // --- THE FIX: Check for specific backend errors ---
+                    if (data.error) {
+                        tbody.innerHTML = `<tr><td colspan="5" class="text-center text-danger"><strong>Error:</strong> ${data.error}</td></tr>`;
+                        return;
+                    }
+                    // --------------------------------------------------
+
                     if (data.orders && data.orders.length > 0) {
                         data.orders.forEach(order => {
                             let badgeClass = order.odoo_status.includes('Not Synced') ? 'bg-danger' : 'bg-success';
                             tbody.innerHTML += `<tr><td><input type="checkbox" class="order-select" value="${order.id}"></td><td>${order.name}</td><td>${formatLocalTime(order.date)}</td><td>${order.total}</td><td><span class="badge ${badgeClass}">${order.odoo_status}</span></td></tr>`;
                         });
-                    } else { tbody.innerHTML = '<tr><td colspan="5" class="text-center">No orders found.</td></tr>'; }
+                    } else { 
+                        tbody.innerHTML = '<tr><td colspan="5" class="text-center">No orders found (List is empty).</td></tr>'; 
+                    }
+                })
+                .catch(err => {
+                    tbody.innerHTML = `<tr><td colspan="5" class="text-center text-danger">Network Error: ${err.message}</td></tr>`;
                 });
         }
 
