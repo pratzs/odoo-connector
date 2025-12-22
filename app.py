@@ -234,50 +234,31 @@ def find_shopify_product_by_sku(sku):
     except Exception as e: print(f"GraphQL Error: {e}")
     return None
 
-def get_shopify_variant_inv_by_sku(sku):
-    if not setup_shopify_session(): return None
-    # Updated Query: Fetches 'committed' quantity
-    query = """{ 
-        productVariants(first: 5, query: "sku:%s") { 
-            edges { 
-                node { 
-                    sku 
-                    legacyResourceId 
-                    inventoryItem { 
-                        legacyResourceId 
-                        inventoryLevel(locationId: "gid://shopify/Location/%s") {
-                            quantities(names: ["committed"]) { name quantity }
-                        }
-                    } 
-                    inventoryQuantity 
-                } 
-            } 
-        } 
-    }""" % (sku, os.getenv('SHOPIFY_WAREHOUSE_ID', '')) # We need the Location GID here really, but this is a patch.
-    
-    # SIMPLIFIED FALLBACK if Location GID is hard to get dynamically in string format:
-    # We will stick to the standard query but grab the item ID to fetch committed later if needed?
-    # BETTER STRATEGY: Standard API doesn't expose 'committed' easily in one go without proper Location GID.
-    # Let's use the REST Admin API which you already have loaded.
-    
+def get_shopify_variant_inv_by_sku(sku, shop_url=None):
+    """
+    FIX: Added shop_url param so it works in background threads.
+    """
+    # If session is not active, try to activate it using the passed shop_url
     try:
-        # Standard REST search to get IDs
+        if not shopify.ShopifyResource.site:
+            if not setup_shopify_session(shop_url): return None
+    except:
+        if not setup_shopify_session(shop_url): return None
+
+    try:
         variants = shopify.Variant.find(sku=sku)
         if variants:
             v = variants[0]
-            # Fetch InventoryItem to get detailed counts
-            ii = shopify.InventoryItem.find(v.inventory_item_id)
             return {
                 'variant_id': v.id,
                 'inventory_item_id': v.inventory_item_id,
-                'qty': v.inventory_quantity, # "Available" in REST
-                'old_inventory_quantity': v.old_inventory_quantity # Sometimes useful
+                'qty': v.inventory_quantity,
+                'old_inventory_quantity': v.old_inventory_quantity
             }
     except Exception as e: 
         print(f"Inv Lookup Error: {e}")
     return None
 
-# --- CORE LOGIC ---
 
 def process_product_data(data, odoo_client):
     """
@@ -1554,7 +1535,6 @@ def sync_inventory_endpoint():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
     
-    # FIX: Logic was unreachable before. Now defined correctly.
     def run_full_force_sync():
         with app.app_context():
             log_event('Inventory', 'Info', "Starting TRUE Force Sync (Scanning ALL Storable Products)...", shop_url=shop_url)
@@ -1562,18 +1542,22 @@ def sync_inventory_endpoint():
             odoo = get_odoo_connection(shop_url)
             if not odoo or not setup_shopify_session(shop_url): return
 
-            company_id = get_config('odoo_company_id', shop_url=shop_url)
+            # FIX 1: Get Company ID directly from Shop Table (not generic config)
+            shop_record = Shop.query.filter_by(shop_url=shop_url).first()
+            company_id = shop_record.odoo_company_id if shop_record else None
+
+            # Get other settings
             target_locations = get_config('inventory_locations', [], shop_url=shop_url)
             target_field = get_config('inventory_field', 'qty_available', shop_url=shop_url)
             sync_zero = get_config('sync_zero_stock', False, shop_url=shop_url)
             combine_committed = get_config('combine_committed', False, shop_url=shop_url)
 
-            # 1. Fetch ALL Storable Products (Not just recent moves)
+            # 1. Fetch ALL Storable Products
+            # FIX 2: Ensure Company ID is applied if it exists
             domain = [['type', 'in', ['product', 'consu']], ['active', '=', True], ['sale_ok', '=', True]]
             if company_id: domain.append(['company_id', '=', int(company_id)])
             
             try:
-                # We fetch IDs of ALL storable products
                 all_product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                     'product.product', 'search', [domain])
             except Exception as e:
@@ -1581,7 +1565,7 @@ def sync_inventory_endpoint():
                 return
 
             total_items = len(all_product_ids)
-            log_event('Inventory', 'Info', f"Found {total_items} storable products. Syncing...", shop_url=shop_url)
+            log_event('Inventory', 'Info', f"Found {total_items} storable products (Company {company_id}). Syncing...", shop_url=shop_url)
             
             count = 0
             updates = 0
@@ -1604,7 +1588,8 @@ def sync_inventory_endpoint():
                     total_odoo = odoo.get_total_qty_for_locations(p_id, target_locations, field_name=target_field)
                     if sync_zero and total_odoo <= 0: continue
 
-                    shopify_info = get_shopify_variant_inv_by_sku(sku)
+                    # FIX 3: Pass shop_url to the helper so it works in the thread
+                    shopify_info = get_shopify_variant_inv_by_sku(sku, shop_url=shop_url)
                     if not shopify_info: continue
 
                     committed_qty = 0
@@ -1637,6 +1622,7 @@ def sync_inventory_endpoint():
 
     threading.Thread(target=run_full_force_sync).start()
     return jsonify({"message": f"Full Inventory Sync Started for {shop_url}"})
+
     
     def run_full_force_sync():
         with app.app_context():
