@@ -89,15 +89,10 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# --- SSL FIX FOR RENDER/SUPABASE ---
-try:
-    ssl_ctx = ssl.create_default_context()
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
-    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-        "connect_args": {"ssl_context": ssl_ctx}
-    }
-except: pass
+# FIX: Use 'sslmode' for psycopg2 (This fixes the 500 Crash)
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    "connect_args": {"sslmode": "require"}
+}
 
 SHOPIFY_LOCATION_ID = int(os.getenv('SHOPIFY_WAREHOUSE_ID', '0'))
 
