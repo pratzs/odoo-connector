@@ -918,8 +918,15 @@ def sync_customers_master(shop_url):
                 c.save()
                 
                 # 9. Link in DB
-                if not CustomerMap.query.filter_by(shopify_customer_id=str(c.id)).first():
-                    new_map = CustomerMap(shopify_customer_id=str(c.id), odoo_partner_id=p['id'], email=email)
+               # FIX: Check existence by shop_url too
+                if not CustomerMap.query.filter_by(shopify_customer_id=str(c.id), shop_url=shop_url).first():
+                    # FIX: Pass 'shop_url' to the model to prevent NotNullViolation
+                    new_map = CustomerMap(
+                        shop_url=shop_url, 
+                        shopify_customer_id=str(c.id), 
+                        odoo_partner_id=p['id'], 
+                        email=email
+                    )
                     db.session.add(new_map)
                     db.session.commit()
                 
@@ -1547,6 +1554,21 @@ def sync_inventory_endpoint():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
     
+    # WRAPPER FOR MANUAL FORCE SYNC
+    def run_manual_inventory():
+        with app.app_context():
+            log_event('Inventory', 'Info', "Starting FULL Force Sync (Scanning ALL products)...", shop_url=shop_url)
+            
+            # Use a massive lookback window (10 years) to effectively scan everything
+            # The 'perform_inventory_sync' function uses date_updated search logic.
+            # Passing a huge lookback forces it to find ALL products.
+            c, u = perform_inventory_sync(shop_url, lookback_minutes=5256000) 
+            
+            log_event('Inventory', 'Success', f"Manual Sync Complete: Checked {c} items, Updated {u} items.", shop_url=shop_url)
+
+    threading.Thread(target=run_manual_inventory).start()
+    return jsonify({"message": f"Full Inventory Sync Started for {shop_url}"})
+    
     def run_full_force_sync():
         with app.app_context():
             log_event('Inventory', 'Info', "Starting TRUE Force Sync (Scanning ALL Storable Products)...", shop_url=shop_url)
@@ -1948,87 +1970,106 @@ def run_schedule():
 
 def sync_images_only_manual(shop_url):
     """
-    CRASH-PROOF Image Sync: Fetches IDs first, then downloads images in small batches.
+    OPTIMIZED Image Sync: Groups variants by Template to sync only the unique 1921 products.
     """
     with app.app_context():
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): return
         
-        log_event('Image Sync', 'Info', "Starting Batch Image Sync...", shop_url=shop_url)
+        log_event('Image Sync', 'Info', "Starting Optimized Image Sync...", shop_url=shop_url)
         company_id = get_config('odoo_company_id', shop_url=shop_url)
         
-        # 1. Fetch IDs ONLY (Fast)
+        # 1. Fetch ALL variants (IDs only first to save memory)
         domain = [['type', 'in', ['product', 'consu']], ['active', '=', True]]
         if company_id: domain.append(['company_id', '=', int(company_id)])
         
         try:
-            # search() only returns IDs, so it won't crash the network
-            product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+            # Get all 10,000 IDs first
+            all_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                 'product.product', 'search', [domain])
         except Exception as e:
             log_event('Image Sync', 'Error', f"Odoo Search Failed: {e}", shop_url=shop_url)
             return
 
-        total = len(product_ids)
-        log_event('Image Sync', 'Info', f"Found {total} active products. Processing images...", shop_url=shop_url)
+        total_variants = len(all_ids)
+        log_event('Image Sync', 'Info', f"Scanned {total_variants} raw records. Grouping by Template...", shop_url=shop_url)
 
-        BATCH_SIZE = 20
+        # 2. Process in Batches to Group by Template
+        BATCH_SIZE = 500  # Larger batch for metadata
+        unique_templates = {} # Map: tmpl_id -> {sku, id}
+        
+        for i in range(0, total_variants, BATCH_SIZE):
+            batch_ids = all_ids[i:i + BATCH_SIZE]
+            try:
+                # Fetch minimal data to group them
+                data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                    'product.product', 'read', [batch_ids], {'fields': ['default_code', 'product_tmpl_id']})
+                
+                for p in data:
+                    sku = p.get('default_code')
+                    if not sku: continue
+                    
+                    # Group by Template ID
+                    tmpl_id = p['product_tmpl_id'][0] if p.get('product_tmpl_id') else p['id']
+                    if tmpl_id not in unique_templates:
+                        unique_templates[tmpl_id] = p['id'] # Store the Product ID to fetch image later
+            except: continue
+
+        real_count = len(unique_templates)
+        log_event('Image Sync', 'Info', f"Consolidated to {real_count} Unique Products. Downloading images...", shop_url=shop_url)
+
+        # 3. Download & Sync Images for Unique Templates ONLY
         processed = 0
         updates = 0
+        final_ids = list(unique_templates.values())
         
-        # 2. Process in Small Batches
-        for i in range(0, total, BATCH_SIZE):
-            batch_ids = product_ids[i:i + BATCH_SIZE]
-            
+        # Process images in small batches (20) to prevent "IncompleteRead"
+        IMG_BATCH = 20
+        for i in range(0, len(final_ids), IMG_BATCH):
+            chunk = final_ids[i:i + IMG_BATCH]
             try:
-                # fetch images ONLY for this small batch
-                products = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                    'product.product', 'read', [batch_ids], {'fields': ['default_code', 'image_1920']})
-            except Exception as e:
-                print(f"Batch Read Error: {e}")
-                continue
+                prod_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                    'product.product', 'read', [chunk], {'fields': ['default_code', 'image_1920']})
+            except: continue
 
-            for p in products:
+            for p in prod_data:
                 sku = p.get('default_code')
                 img_b64 = p.get('image_1920')
-                
                 if not sku or not img_b64: continue
-                
-                # Standardize Image
+
+                # Decode & Clean
                 if isinstance(img_b64, bytes): img_str = img_b64.decode('utf-8')
                 else: img_str = img_b64
                 img_str = img_str.replace("\n", "")
-                
+
                 # Check Hash
                 current_hash = hashlib.md5(img_str.encode('utf-8')).hexdigest()
                 pm = ProductMap.query.filter_by(sku=sku).first()
                 if pm and pm.image_hash == current_hash: continue
 
-                # Find in Shopify
+                # Sync to Shopify
                 sid = find_shopify_product_by_sku(sku)
-                if not sid: continue
-                
-                try:
-                    sp = shopify.Product.find(sid)
-                    image = shopify.Image(prefix_options={'product_id': sp.id})
-                    image.attachment = img_str
-                    sp.images = [image] 
-                    sp.save()
-                    
-                    if not pm: 
-                        pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id='0')
-                        db.session.add(pm)
-                    
-                    pm.image_hash = current_hash
-                    db.session.commit()
-                    updates += 1
-                except: db.session.rollback()
+                if sid:
+                    try:
+                        sp = shopify.Product.find(sid)
+                        image = shopify.Image(prefix_options={'product_id': sp.id})
+                        image.attachment = img_str
+                        sp.images = [image]
+                        sp.save()
 
-            processed += len(batch_ids)
-            if processed % 100 == 0:
-                log_event('Image Sync', 'Info', f"Processed {processed}/{total} images...", shop_url=shop_url)
+                        if not pm:
+                            pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id='0')
+                            db.session.add(pm)
+                        pm.image_hash = current_hash
+                        db.session.commit()
+                        updates += 1
+                    except: db.session.rollback()
+            
+            processed += len(chunk)
+            if processed % 50 == 0:
+                log_event('Image Sync', 'Info', f"Synced images for {processed}/{real_count} products...", shop_url=shop_url)
 
-        log_event('Image Sync', 'Success', f"Sync Complete. Updated {updates} images.", shop_url=shop_url)
+        log_event('Image Sync', 'Success', f"Done. Updated {updates} images.", shop_url=shop_url)
 
 
 def emergency_purge_junk_products(shop_url):
