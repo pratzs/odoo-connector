@@ -2109,6 +2109,8 @@ def add_security_headers(response):
     # 1. Allow the app to be embedded in Shopify Admin
     # This tells the browser: "It is safe to show this page inside admin.shopify.com"
     response.headers['Content-Security-Policy'] = "frame-ancestors https://admin.shopify.com https://*.myshopify.com;"
+    response.headers['Content-Security-Policy'] = "frame-ancestors https://odoo-connector-oivx.onrender.com;"
+
     
     # 2. Modern browsers require these for iframes
     response.headers['X-Frame-Options'] = 'ALLOWALL' 
