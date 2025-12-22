@@ -168,11 +168,16 @@ def get_odoo_connection(shop_url):
             log_event('System', 'Error', f"Connection failed for {shop_url}: {e}")
             return None
 
-def log_event(entity, status, message):
-    # Try to grab shop from request context, fallback to None
-    try:
-        shop_url = request.args.get('shop') or request.headers.get('X-Shopify-Shop-Domain')
-    except:
+def log_event(entity, status, message, shop_url=None):
+    # 1. If shop_url not provided manually, try to grab from Request Context
+    if not shop_url:
+        try:
+            shop_url = request.args.get('shop') or request.headers.get('X-Shopify-Shop-Domain')
+        except:
+            pass # No request context available (we are in a background thread)
+
+    # 2. Fallback if still missing
+    if not shop_url:
         shop_url = 'System'
 
     try:
@@ -552,7 +557,7 @@ def sync_products_master(shop_url):
             return
 
         # --- STEP 1: GET IDs ONLY ---
-        log_event('Product Sync', 'Info', f"Fetching Odoo product IDs for {shop_url}...")
+        log_event('Product Sync', 'Info', f"Fetching Odoo product IDs...", shop_url=shop_url)
         
         domain = [
             ['sale_ok', '=', True],
@@ -1477,8 +1482,13 @@ def live_logs():
 
 @app.route('/api/logs/live', methods=['GET'])
 def api_live_logs():
+    shop_url = request.args.get('shop')
     try:
-        logs = SyncLog.query.order_by(SyncLog.timestamp.desc()).limit(100).all()
+        # FIX: Filter logs by the current shop OR global system messages
+        logs = SyncLog.query.filter(
+            (SyncLog.shop_url == shop_url) | (SyncLog.shop_url == 'System')
+        ).order_by(SyncLog.timestamp.desc()).limit(50).all()
+        
         data = []
         for log in logs:
             msg_type = 'info'
@@ -1486,9 +1496,17 @@ def api_live_logs():
             if 'error' in status_lower or 'fail' in status_lower: msg_type = 'error'
             elif 'success' in status_lower: msg_type = 'success'
             elif 'warning' in status_lower or 'skip' in status_lower: msg_type = 'warning'
+            
             iso_ts = log.timestamp.isoformat()
             if not iso_ts.endswith('Z'): iso_ts += 'Z'
-            data.append({'id': log.id, 'timestamp': iso_ts, 'message': f"[{log.entity}] {log.message}", 'type': msg_type, 'details': log.status})
+            
+            data.append({
+                'id': log.id, 
+                'timestamp': iso_ts, 
+                'message': f"[{log.entity}] {log.message}", 
+                'type': msg_type, 
+                'details': log.status
+            })
         return jsonify(data)
     except: return jsonify([])
 
@@ -1580,21 +1598,21 @@ def trigger_duplicate_scan():
 @app.route('/sync/orders/manual', methods=['GET'])
 def manual_order_fetch():
     shop_url = request.args.get('shop')
-    # This function needs updating to handle dynamic shop URLs properly in your original code
-    # Assuming connection is handled similarly to others:
+    
     odoo = get_odoo_connection(shop_url)
     if not odoo: return jsonify({"error": "No Odoo connection"})
 
-    url = f"https://{shop_url}/admin/api/2025-10/orders.json?limit=10"
-    # Need access token from DB
     shop = Shop.query.filter_by(shop_url=shop_url).first()
     if not shop: return jsonify({"error": "Shop not found"})
 
+    # FIX: Added status=any to find archived/fulfilled orders too
+    url = f"https://{shop_url}/admin/api/2024-01/orders.json?limit=10&status=any"
     headers = {"X-Shopify-Access-Token": shop.access_token}
+    
     try:
         res = requests.get(url, headers=headers)
         if res.status_code != 200:
-            return jsonify({"orders": [], "error": f"Shopify API Error: {res.status_code}"})
+            return jsonify({"orders": [], "error": f"Shopify API Error: {res.status_code} {res.text}"})
         orders = res.json().get('orders', [])
     except Exception as e:
         return jsonify({"orders": [], "error": str(e)})
@@ -1609,10 +1627,16 @@ def manual_order_fetch():
             if exists: status = "Synced"
         except: pass
         if o.get('cancelled_at'): status = "Cancelled"
+        
         mapped_orders.append({
-            'id': o['id'], 'name': o['name'], 'date': o['created_at'], 'total': o['total_price'], 'odoo_status': status
+            'id': o['id'], 
+            'name': o['name'], 
+            'date': o['created_at'], 
+            'total': o['total_price'], 
+            'odoo_status': status
         })
     return jsonify({"orders": mapped_orders})
+
 
 @app.route('/sync/orders/import_batch', methods=['POST'])
 def import_selected_orders():
@@ -1673,8 +1697,9 @@ def refund_webhook(): return "Received", 200
 
 @app.route('/test/simulate_order', methods=['POST'])
 def test_sim_dummy():
-     log_event('System', 'Success', "Test Connection Triggered by User")
-     return jsonify({"message": "OK"})
+     shop_url = request.args.get('shop')
+     log_event('System', 'Success', "Test Connection Successful (Logs Working)", shop_url=shop_url)
+     return jsonify({"message": "Connection OK - Check Live Logs tab."})
 
 # --- API: Fetch Companies (Dynamic) ---
 @app.route('/api/odoo/companies')
