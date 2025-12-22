@@ -151,9 +151,9 @@
                         <button onclick="triggerAction('/sync/inventory')" class="btn btn-secondary text-start">
                             <i class="bi bi-box-seam me-2"></i> Force Inventory Sync
                         </button>
-                        <button onclick="triggerAction('/sync/products')" class="btn btn-secondary text-start">
-                            <i class="bi bi-arrow-repeat me-2"></i> Force Product Sync
-                        </button>
+                        <button onclick="triggerAction('/sync/products/master', 'POST')" class="btn btn-secondary text-start">
+                        <i class="bi bi-arrow-repeat me-2"></i> Force Product Sync
+                       </button>
                         <button onclick="triggerAction('/sync/images/manual')" class="btn btn-secondary text-start">
                             <i class="bi bi-images me-2"></i> Force Image Sync
                         </button>
