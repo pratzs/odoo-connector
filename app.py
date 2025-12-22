@@ -1716,24 +1716,30 @@ def api_get_locations():
 @app.route('/api/settings/save', methods=['POST'])
 def api_save_settings():
     data = request.json
+    shop_url = request.args.get('shop') # Get shop from URL param
+    
     try:
-        # Inventory
+        # 1. Update the Shop Table (Critical for Company ID)
+        shop = Shop.query.filter_by(shop_url=shop_url).first()
+        if shop and 'company_id' in data:
+            shop.odoo_company_id = int(data['company_id'])
+            db.session.add(shop)
+            db.session.commit() # Save the company ID change immediately
+
+        # 2. Update AppSettings (For everything else)
         set_config('inventory_locations', data.get('locations', []))
         set_config('inventory_field', data.get('field', 'qty_available'))
         set_config('sync_zero_stock', data.get('sync_zero', False))
         set_config('combine_committed', data.get('combine_committed', False))
         
-        # General
-        set_config('odoo_company_id', data.get('company_id'))
+        # Note: We do NOT use set_config for 'odoo_company_id' anymore
         
-        # Customers
         set_config('cust_direction', data.get('cust_direction'))
         set_config('cust_auto_sync', data.get('cust_auto_sync'))
         set_config('cust_sync_tags', data.get('cust_sync_tags'))
         set_config('cust_whitelist_tags', data.get('cust_whitelist_tags', ''))
         set_config('cust_blacklist_tags', data.get('cust_blacklist_tags', ''))
         
-        # Products (NEW)
         set_config('prod_auto_create', data.get('prod_auto_create', False))
         set_config('prod_auto_publish', data.get('prod_auto_publish', False))
         set_config('prod_sync_images', data.get('prod_sync_images', False))
@@ -1746,11 +1752,11 @@ def api_save_settings():
         set_config('prod_sync_type', data.get('prod_sync_type', True))
         set_config('prod_sync_vendor', data.get('prod_sync_vendor', True))
 
-        # Orders (NEW)
         set_config('order_sync_tax', data.get('order_sync_tax', False))
         
         return jsonify({"message": "Saved"})
     except Exception as e:
+        db.session.rollback()
         return jsonify({"message": str(e)}), 500
 
 
