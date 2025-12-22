@@ -1964,15 +1964,43 @@ def test_sim_dummy():
      log_event('System', 'Success', "Test Connection Triggered by User")
      return jsonify({"message": "OK"})
 
-@app.route('/api/odoo/companies', methods=['GET'])
+# --- API: Fetch Companies (Dynamic) ---
+@app.route('/api/odoo/companies')
 def api_get_companies():
-    if odoo: return jsonify(odoo.get_companies())
-    return jsonify([])
+    shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({'error': 'Missing shop param'})
 
-@app.route('/api/odoo/locations', methods=['GET'])
+    # Connect dynamically
+    odoo = get_odoo_connection(shop_url)
+    if not odoo: return jsonify({'error': 'Could not connect to Odoo'})
+
+    try:
+        companies = odoo.execute('res.company', 'search_read', [], {'fields': ['id', 'name']})
+        return jsonify(companies)
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+# --- API: Fetch Locations (Dynamic) ---
+@app.route('/api/odoo/locations')
 def api_get_locations():
-    if odoo: return jsonify(odoo.get_locations(request.args.get('company_id')))
-    return jsonify([])
+    shop_url = request.args.get('shop')
+    company_id = request.args.get('company_id')
+    
+    if not shop_url: return jsonify({'error': 'Missing shop param'})
+
+    # Connect dynamically
+    odoo = get_odoo_connection(shop_url)
+    if not odoo: return jsonify({'error': 'Could not connect to Odoo'})
+
+    try:
+        domain = [['usage', '=', 'internal']]
+        if company_id:
+            domain.append(['company_id', '=', int(company_id)])
+            
+        locs = odoo.execute('stock.location', 'search_read', [domain], {'fields': ['id', 'complete_name', 'name']})
+        return jsonify(locs)
+    except Exception as e:
+        return jsonify({'error': str(e)})
 
 @app.route('/api/settings/save', methods=['POST'])
 def api_save_settings():
