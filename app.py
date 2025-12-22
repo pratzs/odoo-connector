@@ -2103,16 +2103,12 @@ print("**************************************************")
 t = threading.Thread(target=run_schedule, daemon=True)
 t.start()
 
-# --- CRITICAL FIX FOR "REFUSED TO CONNECT" ---
+# --- CRITICAL SECURITY HEADERS (Fixes "Refused to Connect") ---
 @app.after_request
 def add_security_headers(response):
-    # 1. Allow the app to be embedded in Shopify Admin
-    # This tells the browser: "It is safe to show this page inside admin.shopify.com"
+    # Allow this app to be embedded in the Shopify Admin
     response.headers['Content-Security-Policy'] = "frame-ancestors https://admin.shopify.com https://*.myshopify.com;"
-    response.headers['Content-Security-Policy'] = "frame-ancestors https://odoo-connector-oivx.onrender.com;"
-
-    
-    # 2. Modern browsers require these for iframes
+    # Allow this app to be embedded in iframes (like the Live Logs window)
     response.headers['X-Frame-Options'] = 'ALLOWALL' 
     return response
     
