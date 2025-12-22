@@ -1658,7 +1658,6 @@ def auth_callback():
 
 @app.route('/save_settings', methods=['POST'])
 def save_public_settings():
-    """Step 3: Save the Odoo credentials entered by the user."""
     shop_url = request.form.get('shop_url')
     shop = Shop.query.filter_by(shop_url=shop_url).first()
     
@@ -1666,35 +1665,33 @@ def save_public_settings():
         shop.odoo_url = request.form.get('odoo_url')
         shop.odoo_db = request.form.get('odoo_db')
         shop.odoo_username = request.form.get('odoo_user')
-        shop.odoo_password = request.form.get('odoo_pass')
+        
+        # Only update password if user typed something new
+        new_pass = request.form.get('odoo_pass')
+        if new_pass and new_pass.strip():
+            shop.odoo_password = new_pass
+            
         db.session.commit()
-        return f"✅ Settings Saved! <a href='/?shop={shop_url}'>Back to Dashboard</a>"
+        return f"✅ Settings Saved! <script>window.location.href='/?shop={shop_url}';</script>"
     return "Error: Shop not found."
 
-@app.route('/')
+
 @app.route('/')
 def home():
     """
-    Hybrid Dashboard:
-    1. Checks if shop is installed/authorized.
-    2. If missing credentials -> Shows 'Connect Form'.
-    3. If connected -> Shows your full 'Dashboard'.
+    Hybrid Dashboard: Handles Auth, Connect Form, and Main Dashboard.
     """
     shop_url = request.args.get('shop')
-    
-    # --- GATEKEEPER: AUTH CHECK ---
-    if not shop_url: 
-        return "No shop provided. Please open via Shopify Admin."
+    if not shop_url: return "No shop provided."
     
     shop = Shop.query.filter_by(shop_url=shop_url).first()
-    
-    # If shop not in DB, force install flow
-    if not shop: 
-        return redirect(url_for('install', shop=shop_url))
-        
-    # --- SCENARIO 1: NEW USER (Show Connect Form) ---
-    # If they haven't saved their Odoo details yet, show the simple setup form
-    if not shop.odoo_url or not shop.odoo_password:
+    if not shop: return redirect(url_for('install', shop=shop_url))
+
+    # Check for 'mode=connect' to force the form to show
+    mode = request.args.get('mode')
+
+    # --- 1. SHOW CONNECT FORM (If credentials missing OR user requested edit) ---
+    if not shop.odoo_url or not shop.odoo_password or mode == 'connect':
         html = """
         <!DOCTYPE html>
         <html>
@@ -1708,7 +1705,8 @@ def home():
                 button { background: #008060; color: white; border: none; padding: 12px 24px; border-radius: 4px; cursor: pointer; font-size: 16px; margin-top: 15px; width: 100%; font-weight: bold; }
                 button:hover { background: #004c3f; }
                 label { font-weight: 600; display: block; margin-top: 15px; color: #202223; }
-                h2 { text-align: center; color: #202223; margin-top: 0; }
+                .back-link { display: block; text-align: center; margin-top: 20px; color: #5c5f62; text-decoration: none; }
+                .back-link:hover { text-decoration: underline; }
             </style>
             <script>
                 var AppBridge = window['app-bridge'];
@@ -1719,33 +1717,45 @@ def home():
         <body>
             <div class="card">
                 <h2>🔌 Connect Odoo to Shopify</h2>
-                <p style="text-align: center; color: #6d7175;">Enter your Odoo credentials to enable the sync.</p>
+                <p style="text-align: center; color: #6d7175;">Update your credentials below.</p>
                 <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
                 
                 <form action="/save_settings" method="POST">
                     <input type="hidden" name="shop_url" value="{{ shop_url }}">
                     
                     <label>Odoo URL</label>
-                    <input type="text" name="odoo_url" placeholder="https://my-odoo-instance.com" required>
+                    <input type="text" name="odoo_url" value="{{ odoo_url }}" placeholder="https://..." required>
                     
                     <label>Database Name</label>
-                    <input type="text" name="odoo_db" placeholder="e.g. odoo_prod_db" required>
+                    <input type="text" name="odoo_db" value="{{ odoo_db }}" required>
                     
                     <label>Username (Email)</label>
-                    <input type="text" name="odoo_user" placeholder="admin@example.com" required>
+                    <input type="text" name="odoo_user" value="{{ odoo_user }}" required>
                     
-                    <label>Password (or API Key)</label>
-                    <input type="password" name="odoo_pass" required>
+                    <label>Password (Leave empty to keep unchanged)</label>
+                    <input type="password" name="odoo_pass" placeholder="••••••••">
                     
                     <button type="submit">Save & Connect</button>
                 </form>
+                {% if has_creds %}
+                <a href="/?shop={{ shop_url }}" class="back-link">← Back to Dashboard</a>
+                {% endif %}
             </div>
         </body>
         </html>
         """
-        return render_template_string(html, api_key=SHOPIFY_API_KEY, shop_url=shop.shop_url)
+        # We pass existing values so the form is pre-filled
+        return render_template_string(html, 
+            api_key=SHOPIFY_API_KEY, 
+            shop_url=shop.shop_url,
+            odoo_url=shop.odoo_url or '',
+            odoo_db=shop.odoo_db or '',
+            odoo_user=shop.odoo_username or '',
+            has_creds=(shop.odoo_url is not None)
+        )
 
-    # --- SCENARIO 2: CONNECTED USER (Show YOUR Original Dashboard) ---
+    # --- 2. SHOW DASHBOARD ---
+    # (Existing Logic)
     try:
         logs_orders = SyncLog.query.filter(SyncLog.entity.in_(['Order', 'Order Cancel'])).order_by(SyncLog.timestamp.desc()).limit(20).all()
         logs_inventory = SyncLog.query.filter_by(entity='Inventory').order_by(SyncLog.timestamp.desc()).limit(20).all()
@@ -1754,9 +1764,16 @@ def home():
         logs_system = SyncLog.query.filter(SyncLog.entity.notin_(['Order', 'Order Cancel', 'Inventory', 'Customer', 'Product', 'Product Sync', 'Duplicate Scan', 'Customer Sync'])).order_by(SyncLog.timestamp.desc()).limit(20).all()
     except:
         logs_orders = logs_inventory = logs_products = logs_customers = logs_system = []
-    
+
+    odoo_status = False
+    try:
+        test_client = get_odoo_connection(shop_url)
+        if test_client and test_client.common:
+            odoo_status = True
+    except: odoo_status = False
+
     current_settings = {
-        "odoo_company_id": get_config('odoo_company_id', None),
+        "odoo_company_id": shop.odoo_company_id,
         "locations": get_config('inventory_locations', []), 
         "field": get_config('inventory_field', 'qty_available'),
         "sync_zero": get_config('sync_zero_stock', False),
@@ -1778,15 +1795,13 @@ def home():
         "prod_sync_type": get_config('prod_sync_type', True),
         "prod_sync_vendor": get_config('prod_sync_vendor', True)
     }
-    
-    # Pass 'shop_url' and 'api_key' to your dashboard template too!
-    # (You might need to update dashboard.html later to include the App Bridge script)
-    odoo_status = True if odoo else False
+
     return render_template('dashboard.html', 
                            logs_orders=logs_orders, logs_inventory=logs_inventory, logs_products=logs_products,
                            logs_customers=logs_customers, logs_system=logs_system,
                            odoo_status=odoo_status, current_settings=current_settings,
                            shop_url=shop_url, api_key=SHOPIFY_API_KEY)
+    
 @app.route('/live_logs')
 def live_logs():
     return render_template('live_logs.html')
