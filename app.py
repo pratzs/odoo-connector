@@ -110,7 +110,10 @@ def check_for_corrupted_categories():
 
 @app.route('/maintenance/diagnose_categories', methods=['GET'])
 def trigger_diagnose():
-    threading.Thread(target=check_for_corrupted_categories).start()
+    shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+
+    threading.Thread(target=check_for_corrupted_categories, args=(shop_url,)).start()
     return jsonify({"message": "Diagnostic started. Check Live Logs."})
 # ==========================================
 
@@ -1838,29 +1841,36 @@ def maintenance_wipe_logs():
         try:
             num_deleted = db.session.query(SyncLog).delete()
             db.session.commit()
-            return jsonify({"message": f"SUCCESS: Deleted {num_deleted} old log entries. The dashboard is now clean."})
+            return jsonify({"message": f"SUCCESS: Deleted {num_deleted} old log entries."})
         except Exception as e:
             db.session.rollback()
             return jsonify({"error": str(e)})
 
 @app.route('/sync/inventory', methods=['GET'])
 def sync_inventory_endpoint():
-    log_event('System', 'Info', 'Manual Trigger: Starting Inventory Sync (Full Scan)...')
-    with app.app_context():
-        c, u = perform_inventory_sync(lookback_minutes=525600)
-        log_event('Inventory', 'Success', f"Manual Sync Complete. Checked {c}, Updated {u}")
-        return jsonify({"synced": c, "updates": u})
+    shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+    
+    # Pass shop_url to the threaded task
+    threading.Thread(target=scheduled_inventory_sync, args=(shop_url,)).start()
+    return jsonify({"message": f"Inventory Sync Started for {shop_url}"})
 
 @app.route('/sync/fulfillments', methods=['GET'])
 def trigger_fulfillment_sync():
-    log_event('System', 'Info', "Manual Trigger: Checking for new shipments in Odoo...")
-    threading.Thread(target=sync_odoo_fulfillments).start()
+    shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+
+    threading.Thread(target=sync_odoo_fulfillments, args=(shop_url,)).start()
     return jsonify({"message": "Started checking for shipments."})
 
 @app.route('/sync/categories/run_initial_import', methods=['GET'])
 def run_initial_category_import():
-    threading.Thread(target=sync_categories_only).start()
-    return jsonify({"message": "Job Started"})
+    shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+
+    threading.Thread(target=sync_categories_only, args=(shop_url,)).start()
+    return jsonify({"message": "Category Sync Job Started"})
+
 
 @app.route('/webhook/products/create', methods=['POST'])
 @app.route('/webhook/products/update', methods=['POST'])
@@ -2323,12 +2333,13 @@ def emergency_purge_junk_products(shop_url):
 @app.route('/maintenance/purge_junk', methods=['GET'])
 def trigger_purge():
     shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+
     threading.Thread(target=emergency_purge_junk_products, args=(shop_url,)).start()
     return jsonify({"message": "Emergency Purge Started. Check Live Logs."})
 
 @app.route('/sync/images/manual', methods=['GET'])
 def trigger_manual_image_sync():
-    # FIX: Get shop_url and pass it to the function
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
     
@@ -2337,7 +2348,6 @@ def trigger_manual_image_sync():
 
 @app.route('/maintenance/add_hash_column', methods=['GET'])
 def maintenance_add_column():
-    """Run this ONCE to update your Supabase Database."""
     try:
         with app.app_context():
             db.session.execute(text('ALTER TABLE product_map ADD COLUMN IF NOT EXISTS image_hash VARCHAR(32);'))
@@ -2349,9 +2359,11 @@ def maintenance_add_column():
 
 @app.route('/maintenance/fix_variants', methods=['POST'])
 def trigger_fix_variants():
-    # Note: fix_variant_mess_task needs to be updated to accept shop_url if you use this!
-    # For now, disabling or assuming simple usage.
-    return jsonify({"message": "Variant Cleanup is currently disabled in Multi-Tenant mode."})
+    shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+
+    threading.Thread(target=fix_variant_mess_task, args=(shop_url,)).start()
+    return jsonify({"message": "Variant Cleanup Started. Check Live Logs."})
 
 # --- SYSTEM STARTUP ---
 print("**************************************************")
