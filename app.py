@@ -1692,7 +1692,8 @@ def api_get_companies():
     if not odoo: return jsonify({'error': 'Could not connect to Odoo'})
 
     try:
-        companies = odoo.execute('res.company', 'search_read', [], {'fields': ['id', 'name']})
+        # FIX: Use the client's built-in helper method
+        companies = odoo.get_companies()
         return jsonify(companies)
     except Exception as e:
         return jsonify({'error': str(e)})
@@ -1710,14 +1711,12 @@ def api_get_locations():
     if not odoo: return jsonify({'error': 'Could not connect to Odoo'})
 
     try:
-        domain = [['usage', '=', 'internal']]
-        if company_id:
-            domain.append(['company_id', '=', int(company_id)])
-            
-        locs = odoo.execute('stock.location', 'search_read', [domain], {'fields': ['id', 'complete_name', 'name']})
+        # FIX: Use the client's built-in helper method
+        locs = odoo.get_locations(company_id=company_id)
         return jsonify(locs)
     except Exception as e:
         return jsonify({'error': str(e)})
+
 
 @app.route('/api/settings/save', methods=['POST'])
 def api_save_settings():
