@@ -420,19 +420,24 @@
         });
 
         function fetchCompanies() {
-            fetch('/api/odoo/companies')
+            // UPDATED: Pass the shop URL to the API
+            fetch(`/api/odoo/companies?shop=${CURRENT_SHOP_URL}`)
                 .then(r => r.json())
                 .then(data => {
                     const sel = document.getElementById('companySelect');
                     sel.innerHTML = '<option value="">Select Company</option>';
-                    if(data.error) return;
+                    if(data.error) {
+                        console.error(data.error);
+                        return;
+                    }
                     
                     data.forEach(c => {
                         const isSel = (SAVED_SETTINGS.odoo_company_id == c.id) ? 'selected' : '';
                         sel.innerHTML += `<option value="${c.id}" ${isSel}>${c.name}</option>`;
                     });
                     if (SAVED_SETTINGS.odoo_company_id) fetchLocations(SAVED_SETTINGS.odoo_company_id);
-                });
+                })
+                .catch(e => console.error("Failed to load companies"));
         }
 
         document.getElementById('companySelect').addEventListener('change', function() {
@@ -444,7 +449,8 @@
             const list = document.getElementById('locationList');
             list.innerHTML = '<div class="text-center"><div class="spinner-border spinner-border-sm"></div> Loading...</div>';
             
-            fetch(`/api/odoo/locations?company_id=${companyId}`)
+            // UPDATED: Pass the shop URL here too
+            fetch(`/api/odoo/locations?company_id=${companyId}&shop=${CURRENT_SHOP_URL}`)
                 .then(r => r.json())
                 .then(data => {
                     list.innerHTML = '';
