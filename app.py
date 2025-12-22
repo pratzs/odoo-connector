@@ -29,7 +29,7 @@ SCOPES = (
     "read_products,write_products,"
     "read_product_listings,write_product_listings,"
     "read_customers,write_customers,"
-    "read_orders,write_orders,read_all_orders," # <--- ADDED read_all_orders
+    "read_orders,write_orders,read_all_orders,"
     "read_draft_orders,write_draft_orders,"
     "read_inventory,write_inventory,"
     "read_locations,write_locations,"
@@ -37,12 +37,12 @@ SCOPES = (
     "read_assigned_fulfillment_orders,write_assigned_fulfillment_orders,"
     "read_merchant_managed_fulfillment_orders,write_merchant_managed_fulfillment_orders,"
     "read_third_party_fulfillment_orders,write_third_party_fulfillment_orders,"
-    "read_companies,write_companies," 
-    "read_files,write_files," 
+    "read_files,write_files,"
     "read_reports,write_reports,"
     "read_price_rules,write_price_rules,"
     "read_discounts,write_discounts,"
-    "read_returns,write_returns"
+    "read_returns,write_returns,"
+    "read_companies,write_companies" 
 )
 
 # [ADD THIS BLOCK] -> This tells the library your keys globally
