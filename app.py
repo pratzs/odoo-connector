@@ -9,7 +9,7 @@ import time
 import shopify
 import concurrent.futures
 from flask import Flask, request, jsonify, render_template, session, url_for, render_template_string, redirect
-from models import db, ProductMap, SyncLog, AppSetting, CustomerMap, ProcessedOrder
+from models import db, ProductMap, SyncLog, AppSetting, CustomerMap, ProcessedOrder, Shop
 from odoo_client import OdooClient
 import requests
 from datetime import datetime, timedelta
@@ -91,24 +91,6 @@ SHOPIFY_LOCATION_ID = int(os.getenv('SHOPIFY_WAREHOUSE_ID', '0'))
 
 db.init_app(app)
 
-# ==========================================
-# PUBLIC APP DATABASE MODEL
-# ==========================================
-class Shop(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    shop_url = db.Column(db.String(255), unique=True, nullable=False)
-    access_token = db.Column(db.String(255), nullable=False)
-    
-    # Credentials per merchant
-    odoo_url = db.Column(db.String(255))
-    odoo_db = db.Column(db.String(255))
-    odoo_username = db.Column(db.String(255))
-    odoo_password = db.Column(db.String(255)) 
-    odoo_company_id = db.Column(db.Integer, default=1)
-    
-    is_active = db.Column(db.Boolean, default=True)
-    install_date = db.Column(db.DateTime, default=datetime.utcnow)
-
 # --- DB INIT ---
 with app.app_context():
     try: 
@@ -123,23 +105,30 @@ order_processing_lock = threading.Lock()
 active_processing_ids = set()
 recent_processed_cache = {} 
 
-# --- HELPERS ---
+# --- HELPERS (Multi-Tenant Aware) ---
 def get_config(key, default=None):
+    # Try to find shop context
+    shop_url = request.args.get('shop')
+    if not shop_url: return default
+
     try:
-        setting = AppSetting.query.get(key)
+        # Use filter_by because PK is now composite
+        setting = AppSetting.query.filter_by(shop_url=shop_url, key=key).first()
         if not setting: return default
         try: return json.loads(setting.value)
         except: return setting.value
     except Exception as e:
         print(f"Config Read Error ({key}): {e}")
-        db.session.rollback()
         return default
 
 def set_config(key, value):
+    shop_url = request.args.get('shop')
+    if not shop_url: return False
+
     try:
-        setting = AppSetting.query.get(key)
+        setting = AppSetting.query.filter_by(shop_url=shop_url, key=key).first()
         if not setting:
-            setting = AppSetting(key=key)
+            setting = AppSetting(shop_url=shop_url, key=key)
             db.session.add(setting)
         setting.value = json.dumps(value)
         db.session.commit()
@@ -180,8 +169,14 @@ def get_odoo_connection(shop_url):
             return None
 
 def log_event(entity, status, message):
+    # Try to grab shop from request context, fallback to None
     try:
-        log = SyncLog(entity=entity, status=status, message=message, timestamp=datetime.utcnow())
+        shop_url = request.args.get('shop') or request.headers.get('X-Shopify-Shop-Domain')
+    except:
+        shop_url = 'System'
+
+    try:
+        log = SyncLog(shop_url=shop_url, entity=entity, status=status, message=message, timestamp=datetime.utcnow())
         db.session.add(log)
         db.session.commit()
     except Exception as e: 
