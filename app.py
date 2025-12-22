@@ -24,13 +24,11 @@ SHOPIFY_API_KEY = os.getenv('SHOPIFY_API_KEY')
 SHOPIFY_API_SECRET = os.getenv('SHOPIFY_API_SECRET')
 APP_URL = os.getenv('HOST')
 SHOPIFY_API_VERSION = '2025-10'  # UNIFIED VERSION
-
-# Updated Scopes to match your Partner Dashboard selection
 SCOPES = (
     "read_products,write_products,"
     "read_product_listings,write_product_listings,"
     "read_customers,write_customers,"
-    "read_orders,write_orders,"
+    "read_orders,write_orders,read_all_orders," # <--- ADDED read_all_orders
     "read_draft_orders,write_draft_orders,"
     "read_inventory,write_inventory,"
     "read_locations,write_locations,"
@@ -38,8 +36,8 @@ SCOPES = (
     "read_assigned_fulfillment_orders,write_assigned_fulfillment_orders,"
     "read_merchant_managed_fulfillment_orders,write_merchant_managed_fulfillment_orders,"
     "read_third_party_fulfillment_orders,write_third_party_fulfillment_orders,"
-    "read_companies,write_companies,"  # Crucial for B2B
-    "read_files,write_files,"          # Crucial for Images
+    "read_companies,write_companies," 
+    "read_files,write_files," 
     "read_reports,write_reports,"
     "read_price_rules,write_price_rules,"
     "read_discounts,write_discounts,"
@@ -1610,20 +1608,19 @@ def manual_order_fetch():
     shop = Shop.query.filter_by(shop_url=shop_url).first()
     if not shop: return jsonify({"error": "Shop not found"})
 
-    # UPDATED: Added status=any to find all orders (Open, Archived, etc.)
-    # Using 2025-01 as it is currently the most stable version for orders
-    url = f"https://{shop_url}/admin/api/2025-01/orders.json?limit=10&status=any"
+    # UPDATED: Use 2025-10 and status=any
+    url = f"https://{shop_url}/admin/api/2025-10/orders.json?limit=10&status=any"
     headers = {"X-Shopify-Access-Token": shop.access_token}
     
     try:
         res = requests.get(url, headers=headers)
         if res.status_code != 200:
-            return jsonify({"orders": [], "error": f"Shopify Error: {res.status_code} {res.text}"})
+            return jsonify({"orders": [], "error": f"Shopify Error {res.status_code}: {res.text}"})
         orders = res.json().get('orders', [])
     except Exception as e:
         return jsonify({"orders": [], "error": str(e)})
     
-    mapped = []
+    mapped_orders = []
     for o in orders:
         status = "Not Synced"
         try:
@@ -1634,11 +1631,14 @@ def manual_order_fetch():
         except: pass
         if o.get('cancelled_at'): status = "Cancelled"
         
-        mapped.append({
-            'id': o['id'], 'name': o['name'], 'date': o['created_at'], 
-            'total': o['total_price'], 'odoo_status': status
+        mapped_orders.append({
+            'id': o['id'], 
+            'name': o['name'], 
+            'date': o['created_at'], 
+            'total': o['total_price'], 
+            'odoo_status': status
         })
-    return jsonify({"orders": mapped})
+    return jsonify({"orders": mapped_orders})
     
 
 @app.route('/sync/orders/import_batch', methods=['POST'])
@@ -1746,7 +1746,6 @@ def api_save_settings():
     shop_url = request.args.get('shop')
     data = request.json
     
-    # Safety Check
     if not shop_url:
         return jsonify({"message": "Error: Missing shop parameter"}), 400
 
@@ -1757,8 +1756,7 @@ def api_save_settings():
             shop.odoo_company_id = int(data['company_id'])
             db.session.add(shop)
 
-        # 2. Update App Settings (Bulk Transaction)
-        # List of all keys we expect from the frontend
+        # 2. Update App Settings (Bulk Update Transaction)
         configs = [
             'inventory_locations', 'inventory_field', 'sync_zero_stock', 'combine_committed',
             'cust_direction', 'cust_auto_sync', 'cust_sync_tags', 'cust_whitelist_tags', 'cust_blacklist_tags',
@@ -1769,28 +1767,19 @@ def api_save_settings():
         
         for key in configs:
             if key in data:
-                # Convert value to JSON string for storage
                 val_str = json.dumps(data[key])
-                
-                # Check if setting exists
                 setting = AppSetting.query.filter_by(shop_url=shop_url, key=key).first()
-                
                 if not setting:
-                    # Create new
                     setting = AppSetting(shop_url=shop_url, key=key, value=val_str)
                     db.session.add(setting)
                 else:
-                    # Update existing
                     setting.value = val_str
 
         # 3. Commit ALL changes in one atomic transaction
         db.session.commit()
-        
         return jsonify({"message": "Settings Saved Successfully"})
-        
     except Exception as e:
         db.session.rollback()
-        # Return the specific error so you can see it in the Toast notification
         return jsonify({"message": f"Save Error: {str(e)}"}), 500
 
 
