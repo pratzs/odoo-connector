@@ -158,30 +158,34 @@ class OdooClient:
             return []
 
     def get_locations(self, company_id=None):
-        """Fetches internal stock locations, optionally filtered by company."""
+        """Fetches internal stock locations, forcing the specific company context."""
         try:
-            # 1. Base Domain: Only internal physical locations
+            # 1. Base Domain
             domain = [['usage', '=', 'internal']]
             
-            # 2. Filter by Company if provided
-            if company_id:
-                # IMPORTANT: Odoo expects an integer for Many2one fields
-                # Also allow locations with no company (shared locations)
-                domain.append('|')
-                domain.append(['company_id', '=', int(company_id)])
-                domain.append(['company_id', '=', False])
+            # 2. Context setup (Critical for Multi-Company)
+            kwargs = {}
             
-            # 3. Execute Search
+            if company_id:
+                cid = int(company_id)
+                # Filter by company AND allow shared locations (False)
+                domain.append('|')
+                domain.append(['company_id', '=', cid])
+                domain.append(['company_id', '=', False])
+                
+                # TELL ODOO TO SWITCH COMPANIES FOR THIS REQUEST
+                kwargs['context'] = {'allowed_company_ids': [cid]}
+            
+            # 3. Execute Search with Context
             ids = self.models.execute_kw(self.db, self.uid, self.password,
-                'stock.location', 'search', [domain])
+                'stock.location', 'search', [domain], kwargs)
             
             if not ids: return []
             
-            # 4. Read Names
+            # 4. Read Names (Pass context here too just in case)
             locs = self.models.execute_kw(self.db, self.uid, self.password,
-                'stock.location', 'read', [ids], {'fields': ['id', 'display_name', 'company_id']})
+                'stock.location', 'read', [ids], {'fields': ['id', 'display_name', 'company_id']}, kwargs)
             
-            # Format for frontend
             return [{'id': l['id'], 'name': l['display_name']} for l in locs]
             
         except Exception as e:
