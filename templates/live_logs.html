@@ -77,8 +77,12 @@
             // Fetch Logs from Python API
             const fetchLogs = async () => {
                 try {
-                    // Cache buster ?t=... ensures we never get old cached data
-                    const response = await fetch('/api/logs/live?t=' + Date.now());
+                    // 1. Get shop param from URL (passed by dashboard iframe)
+                    const urlParams = new URLSearchParams(window.location.search);
+                    const shop = urlParams.get('shop');
+
+                    // 2. Pass shop to backend so it knows whose logs to fetch
+                    const response = await fetch(`/api/logs/live?shop=${shop}&t=` + Date.now());
                     if (!response.ok) throw new Error("API Error");
                     const data = await response.json();
                     
