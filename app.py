@@ -2018,19 +2018,25 @@ def run_schedule():
 def sync_images_only_manual(shop_url):
     """
     OPTIMIZED Image Sync: Groups variants by Template.
-    FIX: Added ['sale_ok', '=', True] to ignore raw materials/components.
+    FIX: Now correctly fetches Company ID from the Shop table.
     """
     with app.app_context():
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): return
         
-        log_event('Image Sync', 'Info', "Starting Optimized Image Sync...", shop_url=shop_url)
-        company_id = get_config('odoo_company_id', shop_url=shop_url)
+        # FIX 1: Fetch Company ID directly from Shop Table (skipping get_config helper)
+        shop_record = Shop.query.filter_by(shop_url=shop_url).first()
+        company_id = shop_record.odoo_company_id if shop_record else None
         
-        # FIX: Added sale_ok=True. This matches your Product Sync logic.
+        log_event('Image Sync', 'Info', f"Starting Optimized Image Sync for Company ID: {company_id}...", shop_url=shop_url)
+        
+        # FIX 2: Strict Domain
         domain = [['type', 'in', ['product', 'consu']], ['active', '=', True], ['sale_ok', '=', True]]
         if company_id: domain.append(['company_id', '=', int(company_id)])
         
+        # LOG THE DOMAIN (So we can debug if it happens again)
+        print(f"DEBUG: Image Sync Domain: {domain}")
+
         try:
             # Get all IDs
             all_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
@@ -2118,7 +2124,6 @@ def sync_images_only_manual(shop_url):
                 log_event('Image Sync', 'Info', f"Synced images for {processed}/{real_count} products...", shop_url=shop_url)
 
         log_event('Image Sync', 'Success', f"Done. Updated {updates} images.", shop_url=shop_url)
-
 
 def emergency_purge_junk_products(shop_url):
     """
