@@ -158,37 +158,43 @@ class OdooClient:
             return []
 
     def get_locations(self, company_id=None):
-        """Fetches locations with aggressive context switching and debug logging."""
+        """Fetches locations using search_read to avoid XML-RPC argument errors."""
         try:
+            # 1. Base Domain
             domain = [['usage', '=', 'internal']]
-            kwargs = {}
-
+            
+            # 2. Context & Company Logic
+            # We define the context dict to force Odoo to see the correct company
+            context_dict = {}
+            
             if company_id:
                 cid = int(company_id)
-                # 1. Domain: Allow locations for this company OR shared locations (False)
+                # Allow locations for this specific company OR shared locations (False)
                 domain.append('|')
                 domain.append(['company_id', '=', cid])
                 domain.append(['company_id', '=', False])
                 
-                # 2. Context: FORCE Odoo to switch companies
-                # We pass both keys to support different Odoo versions
-                kwargs['context'] = {
-                    'allowed_company_ids': [cid], 
+                # Force context switch
+                context_dict = {
+                    'allowed_company_ids': [cid],
                     'company_id': cid
                 }
-                print(f"DEBUG: Fetching locations for Company ID {cid}...")
 
-            # 3. Execute Search
-            ids = self.models.execute_kw(self.db, self.uid, self.password,
-                'stock.location', 'search', [domain], kwargs)
+            # 3. Execute 'search_read' (Combines search and read in one call)
+            # This signature is more stable across Odoo versions via XML-RPC
+            fields = ['id', 'display_name', 'company_id']
             
-            print(f"DEBUG: Found {len(ids)} locations.")
+            # Note: We pass the context INSIDE the keyword arguments dict
+            kw_args = {'fields': fields}
+            if context_dict:
+                kw_args['context'] = context_dict
 
-            if not ids: return []
-            
-            # 4. Read Data
-            locs = self.models.execute_kw(self.db, self.uid, self.password,
-                'stock.location', 'read', [ids], {'fields': ['id', 'display_name', 'company_id']}, kwargs)
+            locs = self.models.execute_kw(
+                self.db, self.uid, self.password,
+                'stock.location', 'search_read',
+                [domain], # Args list (Positional 1)
+                kw_args   # Keyword args dict (Positional 2, maps to kwargs on server)
+            )
             
             return [{'id': l['id'], 'name': l['display_name']} for l in locs]
             
