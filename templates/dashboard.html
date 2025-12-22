@@ -116,6 +116,31 @@
                             </div>
                         </div>
 
+                        <div class="card mb-4">
+                        <div class="card-body">
+                            <div class="section-header"><i class="bi bi-building"></i> General Connection</div>
+                            
+                            <div class="mb-3">
+                                <label class="form-label-sm">Odoo Company Context</label>
+                                <select class="form-select" id="companySelect">
+                                    <option value="" selected>Loading Companies...</option>
+                                </select>
+                                <div class="form-text">All sync operations will run in the context of this company.</div>
+                            </div>
+                    
+                            <hr class="my-3">
+                            <div class="d-flex align-items-center justify-content-between">
+                                <div>
+                                    <label class="form-label-sm d-block">Connection Credentials</label>
+                                    <small class="text-muted">Update Odoo URL, Database, or Password.</small>
+                                </div>
+                                <a href="/?shop={{ shop_url }}&mode=connect" class="btn btn-sm btn-outline-primary">
+                                    <i class="bi bi-pencil-square"></i> Edit Connection
+                                </a>
+                            </div>
+                            </div>
+                    </div>
+
                         <div class="row">
                             <!-- Product Settings -->
                             <div class="col-md-6">
