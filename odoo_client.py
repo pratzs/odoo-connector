@@ -158,48 +158,26 @@ class OdooClient:
             return []
 
     def get_locations(self, company_id=None):
-        """Fetches locations using search_read to avoid XML-RPC argument errors."""
         try:
-            # 1. Base Domain
-            domain = [['usage', '=', 'internal']]
-            
-            # 2. Context & Company Logic
-            # We define the context dict to force Odoo to see the correct company
+            domain = [['usage', '=', 'internal']] # You can remove this line to see ALL locations if still empty
             context_dict = {}
-            
             if company_id:
                 cid = int(company_id)
-                # Allow locations for this specific company OR shared locations (False)
                 domain.append('|')
                 domain.append(['company_id', '=', cid])
                 domain.append(['company_id', '=', False])
-                
-                # Force context switch
-                context_dict = {
-                    'allowed_company_ids': [cid],
-                    'company_id': cid
-                }
+                context_dict = {'allowed_company_ids': [cid], 'company_id': cid}
 
-            # 3. Execute 'search_read' (Combines search and read in one call)
-            # This signature is more stable across Odoo versions via XML-RPC
-            fields = ['id', 'display_name', 'company_id']
-            
-            # Note: We pass the context INSIDE the keyword arguments dict
-            kw_args = {'fields': fields}
-            if context_dict:
-                kw_args['context'] = context_dict
+            kw_args = {'fields': ['id', 'display_name', 'company_id']}
+            if context_dict: kw_args['context'] = context_dict
 
-            locs = self.models.execute_kw(
-                self.db, self.uid, self.password,
-                'stock.location', 'search_read',
-                [domain], # Args list (Positional 1)
-                kw_args   # Keyword args dict (Positional 2, maps to kwargs on server)
-            )
+            # USE SEARCH_READ (This fixes the TypeError in your logs)
+            locs = self.models.execute_kw(self.db, self.uid, self.password,
+                'stock.location', 'search_read', [domain], kw_args)
             
             return [{'id': l['id'], 'name': l['display_name']} for l in locs]
-            
         except Exception as e:
-            print(f"CRITICAL ERROR in get_locations: {e}")
+            print(f"Odoo Locations Error: {e}")
             return []
 
     def get_total_qty_for_locations(self, product_id, location_ids, field_name='qty_available'):
