@@ -141,12 +141,49 @@ class OdooClient:
         return list(product_ids)
 
     def get_companies(self):
-        return self.models.execute_kw(self.db, self.uid, self.password, 'res.company', 'search_read', [[]], {'fields': ['id', 'name']})
+        """Fetches all allowed companies for the user."""
+        try:
+            # Fetch companies the user has access to
+            # We use 'res.company' search
+            ids = self.models.execute_kw(self.db, self.uid, self.password,
+                'res.company', 'search', [[]])
+            
+            if not ids: return []
+            
+            companies = self.models.execute_kw(self.db, self.uid, self.password,
+                'res.company', 'read', [ids], {'fields': ['id', 'name']})
+            return companies
+        except Exception as e:
+            print(f"Odoo Get Companies Error: {e}")
+            return []
 
     def get_locations(self, company_id=None):
-        if not company_id: return []
-        domain = [['usage', '=', 'internal'], ['company_id', '=', int(company_id)]]
-        return self.models.execute_kw(self.db, self.uid, self.password, 'stock.location', 'search_read', [domain], {'fields': ['id', 'complete_name', 'company_id']})
+        """Fetches internal stock locations, optionally filtered by company."""
+        try:
+            # 1. Base Domain: Only internal physical locations
+            domain = [['usage', '=', 'internal']]
+            
+            # 2. Filter by Company if provided
+            if company_id:
+                # IMPORTANT: Odoo expects an integer, ensuring we cast it fixes the "ignored filter" bug
+                domain.append(['company_id', '=', int(company_id)])
+            
+            # 3. Execute Search
+            ids = self.models.execute_kw(self.db, self.uid, self.password,
+                'stock.location', 'search', [domain])
+            
+            if not ids: return []
+            
+            # 4. Read Names
+            locs = self.models.execute_kw(self.db, self.uid, self.password,
+                'stock.location', 'read', [ids], {'fields': ['id', 'display_name', 'company_id']})
+            
+            # Format for frontend
+            return [{'id': l['id'], 'name': l['display_name']} for l in locs]
+            
+        except Exception as e:
+            print(f"Odoo Get Locations Error: {e}")
+            return []
 
     def get_total_qty_for_locations(self, product_id, location_ids, field_name='qty_available'):
         total_qty = 0
