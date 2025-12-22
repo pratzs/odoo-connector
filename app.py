@@ -157,16 +157,16 @@ class Shop(db.Model):
     is_active = db.Column(db.Boolean, default=True)
     install_date = db.Column(db.DateTime, default=datetime.utcnow)
 
-odoo = None
-try:
-    odoo = OdooClient(
-        url=os.getenv('ODOO_URL'),
-        db=os.getenv('ODOO_DB'),
-        username=os.getenv('ODOO_USERNAME'),
-        password=os.getenv('ODOO_PASSWORD')
-    )
-except Exception as e:
-    print(f"Odoo Startup Error: {e}")
+# odoo = None
+# try:
+#     odoo = OdooClient(
+#         url=os.getenv('ODOO_URL'),
+#         db=os.getenv('ODOO_DB'),
+#         username=os.getenv('ODOO_USERNAME'),
+#         password=os.getenv('ODOO_PASSWORD')
+#     )
+# except Exception as e:
+#     print(f"Odoo Startup Error: {e}")
 
 # --- DB INIT ---
 with app.app_context():
@@ -247,13 +247,26 @@ def log_event(entity, status, message):
         print(f"DB LOG ERROR: {e}")
         db.session.rollback()
 
-def setup_shopify_session():
-    shop_url = os.getenv('SHOPIFY_URL')
-    token = os.getenv('SHOPIFY_TOKEN')
-    if not shop_url or not token: return False
-    session = shopify.Session(shop_url, '2024-01', token)
-    shopify.ShopifyResource.activate_session(session)
-    return True
+def setup_shopify_session(shop_url=None):
+    """
+    Activates a Shopify session for a specific shop from the Database.
+    """
+    if not shop_url:
+        # If called without a shop, try to guess from the global context (only works in requests)
+        try:
+            shop_url = request.args.get('shop')
+        except:
+            return False
+
+    if not shop_url: return False
+
+    with app.app_context():
+        shop = Shop.query.filter_by(shop_url=shop_url).first()
+        if not shop: return False
+        
+        session = shopify.Session(shop.shop_url, '2024-01', shop.access_token)
+        shopify.ShopifyResource.activate_session(session)
+        return True
 
 # --- GRAPHQL HELPERS ---
 def find_shopify_product_by_sku(sku):
@@ -316,11 +329,12 @@ def get_shopify_variant_inv_by_sku(sku):
 
 # --- CORE LOGIC ---
 
-def process_product_data(data):
+def process_product_data(data, odoo_client):
     """
     Handles Shopify Product Webhooks (Update Only).
     Restored: Updates Odoo Category based on Shopify Product Type.
     """
+    odoo = odoo_client
     product_type = data.get('product_type', '')
     cat_id = None
     if product_type:
@@ -367,11 +381,12 @@ def process_product_data(data):
 
     return processed_count
 
-def process_order_data(data):
+def process_order_data(data, odoo_client):
     """
     Syncs order with SQL-Based Locking and Smart UOM Switching.
     FIXED: Strips '-UNIT' suffix to find the correct Odoo product.
     """
+    odoo = odoo_client
     shopify_id = str(data.get('id', ''))
     shopify_name = data.get('name')
     
@@ -1118,17 +1133,19 @@ def cleanup_shopify_products(odoo_active_skus):
     except Exception as e:
         print(f"Cleanup Error: {e}")
 
-def sync_customers_master():
-    """
+def sync_customers_master(shop_url):    """
     Odoo -> Shopify Customer Sync (Master - Fixed 'tags' Crash). 
     - Pushes VAT and Company Name.
     - Merges Odoo Tags (Preserves existing Shopify tags).
     - Maps Odoo Salesperson -> Shopify 'custom.salesrep' Metafield.
     """
     with app.app_context():
-        if not odoo or not setup_shopify_session(): 
+        # --- NEW CONNECTION LOGIC ---
+        odoo = get_odoo_connection(shop_url) # <--- Connect Dynamically
+        if not odoo or not setup_shopify_session(shop_url): 
             log_event('System', 'Error', "Customer Sync Failed: Connection Error")
             return
+        # ----------------------------
 
         # 1. Configuration
         direction = get_config('cust_direction', 'bidirectional')
@@ -1240,9 +1257,9 @@ def sync_customers_master():
 
         log_event('Customer Sync', 'Success', f"Sync Complete. Processed {synced_count} customers.")
 
-def archive_shopify_duplicates():
+def archive_shopify_duplicates(shop_url):
     """Scans Shopify for duplicate SKUs and archives the older ones."""
-    if not setup_shopify_session(): return
+    if not setup_shopify_session(shop_url): return
 
     log_event('Duplicate Scan', 'Info', "Starting scan for duplicate SKUs...")
     
@@ -1430,14 +1447,15 @@ def cleanup_shopify_products(odoo_active_skus):
     if archived_count > 0: 
         log_event('System', 'Success', f"Cleanup Complete. Archived {archived_count} duplicates.")
         
-def perform_inventory_sync(lookback_minutes):
+def perform_inventory_sync(shop_url, lookback_minutes):
     """
     Features: 
     - Checks 'sync_zero_stock'
     - Checks 'combine_committed' (NEW)
     - Updates Cartons & Units
     """
-    if not odoo or not setup_shopify_session(): return 0, 0
+    odoo = get_odoo_connection(shop_url)
+    if not odoo or not setup_shopify_session(shop_url): return 0, 0
     
     target_locations = get_config('inventory_locations', [])
     target_field = get_config('inventory_field', 'qty_available')
@@ -1508,14 +1526,14 @@ def perform_inventory_sync(lookback_minutes):
     return count, updates
 
 
-def sync_odoo_fulfillments():
+def sync_odoo_fulfillments(shop_url):
     """
-    Odoo -> Shopify Fulfillment Sync.
-    - If Tracking exists: Sends Tracking # + Fulfilled Status.
-    - If NO Tracking: Sends Fulfilled Status only.
+    Multi-Tenant: Odoo -> Shopify Fulfillment Sync.
     """
     with app.app_context():
-        if not odoo or not setup_shopify_session(): return
+        # DYNAMIC CONNECT
+        odoo = get_odoo_connection(shop_url)
+        if not odoo or not setup_shopify_session(shop_url): return
 
         # 1. Look back 2 hours for 'Done' shipments
         cutoff = datetime.utcnow() - timedelta(minutes=120)
@@ -1537,7 +1555,6 @@ def sync_odoo_fulfillments():
         synced_count = 0
         for pick in pickings:
             so_name = pick['origin'] 
-            # Handle cases where tracking is False/None
             tracking_ref = pick.get('carrier_tracking_ref')
             if tracking_ref is False: tracking_ref = ''
             
@@ -1552,31 +1569,22 @@ def sync_odoo_fulfillments():
 
                 if order.fulfillment_status == 'fulfilled': continue
 
-                # 3. Find the "Work Order" (FulfillmentOrder)
-                # This is the step that failed before without the fix at the top
+                # 3. Find FulfillmentOrder
                 fulfillment_orders = shopify.FulfillmentOrder.find(order_id=order.id)
-                
-                # Find the first one that is 'open' (needs shipping)
                 open_fo = next((fo for fo in fulfillment_orders if fo.status == 'open'), None)
                 
-                if not open_fo:
-                    continue # Nothing left to fulfill
+                if not open_fo: continue 
 
                 # 4. Prepare Payload
-                # We ALWAYS set notify_customer=True so they get the "Shipped" email
                 fulfillment_payload = {
-                    "line_items_by_fulfillment_order": [
-                        { "fulfillment_order_id": open_fo.id }
-                    ],
+                    "line_items_by_fulfillment_order": [{ "fulfillment_order_id": open_fo.id }],
                     "notify_customer": True 
                 }
 
-                # 5. Conditionally Add Tracking
                 if tracking_ref:
                     carrier_name = pick['carrier_id'][1] if pick['carrier_id'] else 'Other'
                     fulfillment_payload["tracking_info"] = {
-                        "number": tracking_ref,
-                        "company": carrier_name
+                        "number": tracking_ref, "company": carrier_name
                     }
                     log_msg = f"Fulfilled {shopify_order_name} with Tracking: {tracking_ref}"
                 else:
@@ -1592,16 +1600,16 @@ def sync_odoo_fulfillments():
                      log_event('Fulfillment', 'Success', log_msg)
 
             except Exception as e:
-                # Ignore 422 errors (usually means already fulfilled)
                 if "422" not in str(e): 
                     log_event('Fulfillment', 'Error', f"Failed {shopify_order_name}: {e}")
 
         if synced_count > 0:
             log_event('Fulfillment', 'Success', f"Batch Complete. Fulfilled {synced_count} orders.")
 
-def scheduled_inventory_sync():
+def scheduled_inventory_sync(shop_url):
     with app.app_context():
-        c, u = perform_inventory_sync(lookback_minutes=35)
+        # You must also update perform_inventory_sync to accept shop_url!
+        c, u = perform_inventory_sync(shop_url, lookback_minutes=35) 
         if u > 0: log_event('Inventory', 'Success', f"Auto-Sync: Checked {c}, Updated {u}")
 
 # ==========================================
@@ -1857,8 +1865,23 @@ def run_initial_category_import():
 @app.route('/webhook/products/create', methods=['POST'])
 @app.route('/webhook/products/update', methods=['POST'])
 def product_webhook():
-    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')): return "Unauthorized", 401
-    with app.app_context(): process_product_data(request.json)
+    # 1. Verify
+    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')): 
+        return "Unauthorized", 401
+    
+    # 2. Identify Shop
+    shop_url = request.headers.get('X-Shopify-Shop-Domain')
+    if not shop_url: return "Missing Shop Header", 400
+
+    # 3. Connect to Specific Odoo
+    odoo_client = get_odoo_connection(shop_url)
+    if not odoo_client: return "Odoo Not Connected", 200
+
+    # 4. Pass client explicitly (You need to update process_product_data to accept the client object)
+    # Refactor process_product_data to take (data, odoo_client) arguments
+    with app.app_context(): 
+        process_product_data(request.json, odoo_client) # <--- Pass the client!
+    
     return "Received", 200
 
 @app.route('/sync/products/master', methods=['POST'])
@@ -2085,46 +2108,55 @@ def cleanup_old_logs():
 
 # 2. Define Scheduler SECOND (referencing the cleanup function)
 def run_schedule():
-    # --- Sync Jobs (Using specific UTC times for NZDT) ---
+    """
+    Multi-Tenant Scheduler: Runs tasks for ALL active shops in the database.
+    """
+    def run_job_for_all_shops(target_func, job_name="Job"):
+        """
+        Helper: Fetches all active shops and launches a thread for each.
+        """
+        with app.app_context():
+            # 1. Find all shops that have installed the app
+            shops = Shop.query.filter_by(is_active=True).all()
+            
+            if not shops:
+                print(f"Scheduler: No active shops found for {job_name}.")
+                return
+
+            for shop in shops:
+                # 2. Launch the task specifically for this shop
+                # NOTE: The target function MUST accept 'shop_url' as an argument!
+                threading.Thread(target=target_func, args=(shop.shop_url,)).start()
+
+    # --- JOB DEFINITIONS ---
+
+    # 1. Customer Sync (Daily at 03:00 UTC)
+    # The 'conditional' check (get_config) is now done INSIDE sync_customers_master per shop
+    schedule.every().day.at("03:00").do(lambda: run_job_for_all_shops(sync_customers_master, "Customer Sync"))
+
+    # 2. Product Master Sync (Daily at 04:00 UTC)
+    schedule.every().day.at("04:00").do(lambda: run_job_for_all_shops(sync_products_master, "Product Sync"))
+
+    # 3. Duplicate Archive (Every 3 days at 05:00 UTC)
+    schedule.every(3).days.at("05:00").do(lambda: run_job_for_all_shops(archive_shopify_duplicates, "Duplicate Archive"))
     
-    def conditional_customer_sync():
-        if get_config('cust_auto_sync', True):
-            log_event('System', 'Info', "Scheduler: Starting Auto Customer Sync...")
-            threading.Thread(target=sync_customers_master).start()
-        else:
-            log_event('System', 'Info', "Scheduler: Skipped Customer Sync (Disabled in Settings)")
+    # 4. Inventory Sync (Every 10 mins)
+    schedule.every(10).minutes.do(lambda: run_job_for_all_shops(scheduled_inventory_sync, "Inventory Sync"))
 
-    # Customer Master Sync: 3:00 UTC
-    schedule.every().day.at("03:00").do(conditional_customer_sync)
+    # 5. Fulfillment Sync (Every 60 mins)
+    schedule.every(60).minutes.do(lambda: run_job_for_all_shops(sync_odoo_fulfillments, "Fulfillment Sync"))
 
-    # Product Master Sync: 5:00 PM NZDT = 04:00 UTC
-    # (Running 1 hour later to prevent database conflicts)
-    schedule.every().day.at("04:00").do(lambda: threading.Thread(target=sync_products_master).start())
-
-    # Duplicate Archive: 6:00 PM NZDT = 05:00 UTC (Runs every 3 days)
-    schedule.every(3).days.at("05:00").do(lambda: threading.Thread(target=archive_shopify_duplicates).start())
-    
-    # --- High Frequency Jobs ---
-    # Inventory Sync (Every 30 mins) - Timezone irrelevant
-    schedule.every(10).minutes.do(lambda: threading.Thread(target=scheduled_inventory_sync).start())
-
-    # --- Maintenance Job ---
-    # Log Cleanup: 7:00 PM NZDT = 06:00 UTC
+    # 6. Global Maintenance (Log Cleanup)
+    # This cleans the whole table, so it runs ONCE globally (no loop needed)
     schedule.every().day.at("06:00").do(lambda: threading.Thread(target=cleanup_old_logs).start())
-
-    # Fulfillment Sync: Run every 15 minutes to keep customers updated
-    schedule.every(60).minutes.do(lambda: threading.Thread(target=sync_odoo_fulfillments).start())
     
+    # --- RUN LOOP ---
     while True:
         schedule.run_pending()
         time.sleep(1)
 
-# 3. Start Scheduler LAST
-# This ensures all functions are defined before the thread starts using them
-t = threading.Thread(target=run_schedule, daemon=True)
-t.start()
 
-def sync_images_only_manual():
+def sync_images_only_manual(shop_url):
     """
     MEMORY-OPTIMIZED Image Sync (Batched):
     1. Gets all Odoo IDs first (Low Memory).
@@ -2132,7 +2164,8 @@ def sync_images_only_manual():
     3. Clears memory after every chunk.
     """
     with app.app_context():
-        if not odoo or not setup_shopify_session(): return
+        odoo = get_odoo_connection(shop_url)
+        if not odoo or not setup_shopify_session(shop_url): return
         
         log_event('Image Sync', 'Info', "Starting Memory-Safe Image Sync...")
         
@@ -2316,8 +2349,8 @@ def trigger_purge():
 
 @app.route('/sync/images/manual', methods=['GET'])
 def trigger_manual_image_sync():
-    # Trigger the memory-safe image sync in the background
-    threading.Thread(target=sync_images_only_manual).start()
+    shop_url = request.args.get('shop') # GET THE SHOP!
+    threading.Thread(target=sync_images_only_manual, args=(shop_url,)).start() # PASS IT!
     return jsonify({"message": "Image Sync Started. Check Live Logs."})
 
 @app.route('/maintenance/add_hash_column', methods=['GET'])
