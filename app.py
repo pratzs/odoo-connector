@@ -1421,10 +1421,10 @@ def save_public_settings():
     return "Error: Shop not found."
 
 
-@app.route('/')
+@app.route('/', methods=['GET'])
 def home():
     """
-    Hybrid Dashboard: Handles Auth, Connect Form, and Main Dashboard.
+    Hybrid Dashboard: Handles Auth, Connect Form, and Main Tabbed Dashboard.
     """
     shop_url = request.args.get('shop')
     if not shop_url: return "No shop provided."
@@ -1432,7 +1432,7 @@ def home():
     shop = Shop.query.filter_by(shop_url=shop_url).first()
     if not shop: return redirect(url_for('install', shop=shop_url))
 
-    # Check for 'mode=connect' to force the form to show
+    # Check for 'mode=connect' to force the connect form
     mode = request.args.get('mode')
 
     # --- 1. SHOW CONNECT FORM (If credentials missing OR user requested edit) ---
@@ -1489,9 +1489,8 @@ def home():
         </body>
         </html>
         """
-        # We pass existing values so the form is pre-filled
         return render_template_string(html, 
-            api_key=SHOPIFY_API_KEY, 
+            api_key=os.getenv('SHOPIFY_API_KEY'), 
             shop_url=shop.shop_url,
             odoo_url=shop.odoo_url or '',
             odoo_db=shop.odoo_db or '',
@@ -1499,53 +1498,59 @@ def home():
             has_creds=(shop.odoo_url is not None)
         )
 
-    # --- 2. SHOW DASHBOARD ---
-    # (Existing Logic)
-    try:
-        logs_orders = SyncLog.query.filter(SyncLog.entity.in_(['Order', 'Order Cancel'])).order_by(SyncLog.timestamp.desc()).limit(20).all()
-        logs_inventory = SyncLog.query.filter_by(entity='Inventory').order_by(SyncLog.timestamp.desc()).limit(20).all()
-        logs_products = SyncLog.query.filter(SyncLog.entity.in_(['Product', 'Product Sync', 'Duplicate Scan'])).order_by(SyncLog.timestamp.desc()).limit(20).all()
-        logs_customers = SyncLog.query.filter(SyncLog.entity.in_(['Customer', 'Customer Sync'])).order_by(SyncLog.timestamp.desc()).limit(20).all()
-        logs_system = SyncLog.query.filter(SyncLog.entity.notin_(['Order', 'Order Cancel', 'Inventory', 'Customer', 'Product', 'Product Sync', 'Duplicate Scan', 'Customer Sync'])).order_by(SyncLog.timestamp.desc()).limit(20).all()
-    except:
-        logs_orders = logs_inventory = logs_products = logs_customers = logs_system = []
-
-    odoo_status = False
-    try:
-        test_client = get_odoo_connection(shop_url)
-        if test_client and test_client.common:
-            odoo_status = True
-    except: odoo_status = False
-
-    current_settings = {
-        "odoo_company_id": shop.odoo_company_id,
-        "locations": get_config('inventory_locations', []), 
-        "field": get_config('inventory_field', 'qty_available'),
-        "sync_zero": get_config('sync_zero_stock', False),
-        "combine_committed": get_config('combine_committed', False),
-        "cust_direction": get_config('cust_direction', 'bidirectional'),
-        "cust_auto_sync": get_config('cust_auto_sync', True),
-        "cust_sync_tags": get_config('cust_sync_tags', False),
-        "cust_whitelist_tags": get_config('cust_whitelist_tags', ''),
-        "cust_blacklist_tags": get_config('cust_blacklist_tags', ''),
-        "prod_auto_create": get_config('prod_auto_create', False),
-        "prod_auto_publish": get_config('prod_auto_publish', False),
-        "prod_sync_images": get_config('prod_sync_images', False),
-        "prod_sync_tags": get_config('prod_sync_tags', False),
-        "prod_sync_meta_vendor_code": get_config('prod_sync_meta_vendor_code', False),
-        "order_sync_tax": get_config('order_sync_tax', False),
-        "prod_sync_price": get_config('prod_sync_price', True),
-        "prod_sync_title": get_config('prod_sync_title', True),
-        "prod_sync_desc": get_config('prod_sync_desc', True),
-        "prod_sync_type": get_config('prod_sync_type', True),
-        "prod_sync_vendor": get_config('prod_sync_vendor', True)
+    # --- 2. SHOW MAIN DASHBOARD (Tabbed Interface) ---
+    
+    # A. Build the Configuration Object
+    config = {
+        'odoo_url': shop.odoo_url,
+        'odoo_db': shop.odoo_db,
+        'odoo_username': shop.odoo_username,
+        'odoo_password': shop.odoo_password,
+        'odoo_company_id': shop.odoo_company_id
     }
 
-    return render_template('dashboard.html', 
-                           logs_orders=logs_orders, logs_inventory=logs_inventory, logs_products=logs_products,
-                           logs_customers=logs_customers, logs_system=logs_system,
-                           odoo_status=odoo_status, current_settings=current_settings,
-                           shop_url=shop_url, api_key=SHOPIFY_API_KEY)
+    # Load dynamic settings
+    settings = AppSetting.query.filter_by(shop_url=shop_url).all()
+    for s in settings:
+        try:
+            config[s.key] = json.loads(s.value)
+        except:
+            config[s.key] = s.value
+
+    # B. Render the Dashboard
+    return render_template('dashboard.html', shop_url=shop_url, config=config)
+
+
+# --- NEW ROUTE: Save Settings from Dashboard Tab ---
+@app.route('/api/settings/save', methods=['POST'])
+def save_settings_endpoint():
+    shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+    
+    data = request.json
+    if not data: return jsonify({"error": "No data provided"}), 400
+
+    # 1. Update Core Credentials
+    shop = Shop.query.filter_by(shop_url=shop_url).first()
+    if 'odoo_url' in data: shop.odoo_url = data['odoo_url']
+    if 'odoo_db' in data: shop.odoo_db = data['odoo_db']
+    if 'odoo_username' in data: shop.odoo_username = data['odoo_username']
+    if 'odoo_password' in data and data['odoo_password']: shop.odoo_password = data['odoo_password']
+    if 'odoo_company_id' in data: shop.odoo_company_id = int(data['odoo_company_id'])
+    
+    db.session.commit()
+
+    # 2. Update Dynamic Settings
+    setting_keys = [
+        'prod_sync_price', 'prod_sync_title', 'prod_sync_desc', 
+        'prod_auto_create', 'sync_zero_stock'
+    ]
+    
+    for key in setting_keys:
+        if key in data:
+            set_config(key, data[key]) 
+
+    return jsonify({"message": "Settings Saved Successfully"})
     
 @app.route('/live_logs')
 def live_logs():
