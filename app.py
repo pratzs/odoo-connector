@@ -2158,10 +2158,7 @@ def run_schedule():
 
 def sync_images_only_manual(shop_url):
     """
-    MEMORY-OPTIMIZED Image Sync (Batched):
-    1. Gets all Odoo IDs first (Low Memory).
-    2. Processes in chunks of 20.
-    3. Clears memory after every chunk.
+    MEMORY-OPTIMIZED Image Sync (Batched).
     """
     with app.app_context():
         odoo = get_odoo_connection(shop_url)
@@ -2175,7 +2172,6 @@ def sync_images_only_manual(shop_url):
         if company_id: domain.append(['company_id', '=', int(company_id)])
         
         try:
-            # search() only returns a list of IDs [1, 2, 3...] - Very low memory
             odoo_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                 'product.product', 'search', [domain])
         except Exception as e:
@@ -2190,7 +2186,7 @@ def sync_images_only_manual(shop_url):
         processed = 0
         updates = 0
         
-        # Pre-load DB hashes (lightweight string map)
+        # Pre-load DB hashes
         db_hashes = {}
         try:
             for pm in ProductMap.query.all():
@@ -2200,7 +2196,6 @@ def sync_images_only_manual(shop_url):
         for i in range(0, total, BATCH_SIZE):
             chunk_ids = odoo_ids[i:i + BATCH_SIZE]
             
-            # Fetch Data for just this chunk (Heavy data, but only 20 items)
             try:
                 odoo_chunk = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                     'product.product', 'read', [chunk_ids], {'fields': ['default_code', 'image_1920']})
@@ -2215,15 +2210,13 @@ def sync_images_only_manual(shop_url):
                 # Check Hash
                 if isinstance(img_b64, bytes): img_str = img_b64.decode('utf-8')
                 else: img_str = img_b64
-                img_str = img_str.replace("\n", "") # Cleanup
+                img_str = img_str.replace("\n", "") 
                 
                 current_hash = hashlib.md5(img_str.encode('utf-8')).hexdigest()
                 stored_hash = db_hashes.get(sku)
                 
-                # Skip if identical
                 if current_hash == stored_hash: continue 
 
-                # Find in Shopify
                 sid = find_shopify_product_by_sku(sku)
                 if not sid: continue
                 
@@ -2236,7 +2229,6 @@ def sync_images_only_manual(shop_url):
                     image.attachment = img_str
                     image.save()
                     
-                    # Update DB
                     pm = ProductMap.query.filter_by(sku=sku).first()
                     if not pm: 
                         pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id='0')
@@ -2244,17 +2236,14 @@ def sync_images_only_manual(shop_url):
                     
                     pm.image_hash = current_hash
                     db.session.commit()
-                    db_hashes[sku] = current_hash # Update local map
+                    db_hashes[sku] = current_hash 
                     updates += 1
                     
                 except Exception as e:
                     print(f"Img Error {sku}: {e}")
-                    # Rollback to keep connection healthy
                     db.session.rollback()
 
             processed += len(chunk_ids)
-            
-            # 3. FREE MEMORY IMMEDIATELY
             del odoo_chunk
             gc.collect() 
             
@@ -2263,33 +2252,30 @@ def sync_images_only_manual(shop_url):
 
         log_event('Image Sync', 'Success', f"Sync Complete. Updated {updates} images.")
 
-def emergency_purge_junk_products():
+def emergency_purge_junk_products(shop_url):
     """
-    EMERGENCY TOOL:
-    1. Fetches YOUR valid SKUs from Odoo (using your Company ID).
-    2. Scans Shopify.
-    3. DESTROYS any product in Shopify that is NOT in your valid Odoo list.
+    EMERGENCY TOOL: Destroys products in Shopify not found in Odoo.
     """
     with app.app_context():
-        if not odoo or not setup_shopify_session(): 
-            log_event('Cleanup', 'Error', "Connection failed. Aborting safety cleanup.")
+        # DYNAMIC CONNECT
+        odoo = get_odoo_connection(shop_url)
+        if not odoo or not setup_shopify_session(shop_url): 
+            log_event('Cleanup', 'Error', "Connection failed. Aborting.")
             return
 
         company_id = get_config('odoo_company_id')
         if not company_id:
-            log_event('Cleanup', 'Error', "No Company ID set. Aborting to prevent total wipeout.")
+            log_event('Cleanup', 'Error', "No Company ID set. Aborting.")
             return
 
-        # 1. Get VALID SKUs (The "White List")
         log_event('Cleanup', 'Info', f"Fetching valid SKUs for Company {company_id}...")
         
         domain = [
             ['type', 'in', ['product', 'consu']],
-            ['company_id', '=', int(company_id)] # <--- The Critical Filter
+            ['company_id', '=', int(company_id)]
         ]
         
         try:
-            # We only need the default_code (SKU)
             valid_products = odoo.models.execute_kw(
                 odoo.db, odoo.uid, odoo.password,
                 'product.product', 'search_read', [domain], 
@@ -2299,68 +2285,61 @@ def emergency_purge_junk_products():
             log_event('Cleanup', 'Error', f"Odoo Error: {e}")
             return
 
-        # Create a set of valid SKUs for fast checking
         valid_skus = set()
         for p in valid_products:
             if p.get('default_code'):
                 valid_skus.add(p['default_code'])
-                # Also whitelist the "-UNIT" version if you use packs
                 valid_skus.add(f"{p['default_code']}-UNIT")
 
         if len(valid_skus) < 5:
-            log_event('Cleanup', 'Error', "Safety Stop: Found less than 5 valid products in Odoo. Aborting to prevent accidental wipeout.")
+            log_event('Cleanup', 'Error', "Safety Stop: Too few products found. Aborting.")
             return
 
         log_event('Cleanup', 'Info', f"Found {len(valid_skus)} valid SKUs. Starting Purge...")
 
-        # 2. Scan Shopify and Destroy Junk
         page = shopify.Product.find(limit=250)
         deleted_count = 0
         
         while page:
             for sp in page:
-                # Identify the product by its first variant's SKU
                 sku = sp.variants[0].sku if sp.variants else None
                 
-                # IF SKU IS MISSING OR NOT IN VALID LIST -> DELETE
                 if not sku or sku not in valid_skus:
                     try:
                         sp.destroy()
                         deleted_count += 1
-                        # Log every 50 deletions so you know it's working
                         if deleted_count % 50 == 0:
                             log_event('Cleanup', 'Warning', f"Purged {deleted_count} junk products...")
                     except Exception as e:
                         print(f"Failed to delete {sp.id}: {e}")
             
-            if page.has_next_page():
-                page = page.next_page()
-            else:
-                break
+            if page.has_next_page(): page = page.next_page()
+            else: break
         
         log_event('Cleanup', 'Success', f"Purge Complete. Deleted {deleted_count} junk products.")
 
-# --- ADD THIS ROUTE TO TRIGGER IT ---
+# --- ROUTES ---
+
 @app.route('/maintenance/purge_junk', methods=['GET'])
 def trigger_purge():
-    threading.Thread(target=emergency_purge_junk_products).start()
+    shop_url = request.args.get('shop')
+    threading.Thread(target=emergency_purge_junk_products, args=(shop_url,)).start()
     return jsonify({"message": "Emergency Purge Started. Check Live Logs."})
-
 
 @app.route('/sync/images/manual', methods=['GET'])
 def trigger_manual_image_sync():
-    shop_url = request.args.get('shop') # GET THE SHOP!
-    threading.Thread(target=sync_images_only_manual, args=(shop_url,)).start() # PASS IT!
+    # FIX: Get shop_url and pass it to the function
+    shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+    
+    threading.Thread(target=sync_images_only_manual, args=(shop_url,)).start()
     return jsonify({"message": "Image Sync Started. Check Live Logs."})
 
 @app.route('/maintenance/add_hash_column', methods=['GET'])
 def maintenance_add_column():
-    """
-    Run this ONCE to update your Supabase Database.
-    """
+    """Run this ONCE to update your Supabase Database."""
     try:
         with app.app_context():
-            # Postgres specific command to add the column if it doesn't exist
             db.session.execute(text('ALTER TABLE product_map ADD COLUMN IF NOT EXISTS image_hash VARCHAR(32);'))
             db.session.commit()
             return jsonify({"message": "SUCCESS: Column 'image_hash' added to Supabase."})
@@ -2370,16 +2349,14 @@ def maintenance_add_column():
 
 @app.route('/maintenance/fix_variants', methods=['POST'])
 def trigger_fix_variants():
-    threading.Thread(target=fix_variant_mess_task).start()
-    return jsonify({"message": "Variant Cleanup Started. Check Live Logs."})
+    # Note: fix_variant_mess_task needs to be updated to accept shop_url if you use this!
+    # For now, disabling or assuming simple usage.
+    return jsonify({"message": "Variant Cleanup is currently disabled in Multi-Tenant mode."})
 
-
-
-# --- ADD THIS MARKER ---
+# --- SYSTEM STARTUP ---
 print("**************************************************")
 print(">>> SYSTEM STARTUP: VERSION 6.0 - FINAL FIXES <<<")
 print("**************************************************")
 
 if __name__ == '__main__':
-    # Flask Dev Server
     app.run(debug=True)
