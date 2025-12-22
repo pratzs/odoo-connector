@@ -123,12 +123,26 @@ class OdooClient:
             
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search', [domain])
 
-    def get_changed_customers(self, time_limit_str, company_id=None):
-        domain = [('write_date', '>', time_limit_str), ('is_company', '=', True), ('customer_rank', '>', 0), ('active', '=', True)]
-        if company_id: domain = ['&', '&', '&', ('write_date', '>', time_limit_str), ('is_company', '=', True), ('customer_rank', '>', 0), '|', ('company_id', '=', int(company_id)), ('company_id', '=', False)]
-        fields = ['id', 'name', 'email', 'phone', 'street', 'city', 'zip', 'country_id', 'vat', 'category_id', 'user_id']
-        return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search_read', [domain], {'fields': fields})
 
+    def get_changed_customers(self, time_limit_str, company_id=None):
+        """
+        FIX: Removed 'is_company' and 'customer_rank' checks.
+        Now fetches ALL contacts/customers modified recently.
+        """
+        domain = [
+            ('write_date', '>', time_limit_str), 
+            ('active', '=', True),
+            ('email', '!=', False) # Ensure they have an email
+        ]
+        
+        if company_id:
+             # Basic company ID filter
+             domain.append('|')
+             domain.append(('company_id', '=', int(company_id)))
+             domain.append(('company_id', '=', False))
+
+        fields = ['id', 'name', 'email', 'phone', 'street', 'city', 'zip', 'country_id', 'vat', 'category_id', 'user_id', 'is_company', 'parent_id']
+        return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search_read', [domain], {'fields': fields})
     def get_product_ids_with_recent_stock_moves(self, time_limit_str, company_id=None):
         domain = [['date', '>', time_limit_str], ['state', '=', 'done']]
         if company_id: domain.append(['company_id', '=', int(company_id)])
