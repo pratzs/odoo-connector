@@ -327,17 +327,24 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         // --- Global Config ---
-        const SAVED_SETTINGS = {{ current_settings | tojson if current_settings else '{}' }};
+        // SAFE PARSING: If current_settings is empty, default to {}
+        const SAVED_SETTINGS = {{ current_settings | tojson | safe if current_settings else '{}' }};
         const CURRENT_SHOP_URL = "{{ shop_url }}";
-        const modal = new bootstrap.Modal(document.getElementById('orderImportModal'));
+        const modalElement = document.getElementById('orderImportModal');
+        const modal = modalElement ? new bootstrap.Modal(modalElement) : null;
 
         // --- Helpers ---
         function showToast(msg) {
-            document.getElementById('toastMessage').innerText = msg;
-            new bootstrap.Toast(document.getElementById('liveToast')).show();
+            const toastEl = document.getElementById('liveToast');
+            if(toastEl) {
+                document.getElementById('toastMessage').innerText = msg;
+                new bootstrap.Toast(toastEl).show();
+            } else {
+                alert(msg); // Fallback if toast HTML missing
+            }
         }
 
-        // --- TIMEZONE CONVERSION (Browser Local) ---
+        // --- TIMEZONE CONVERSION ---
         function formatLocalTime(utcString) {
             if (!utcString) return '';
             try {
@@ -352,122 +359,143 @@
         }
 
         document.addEventListener("DOMContentLoaded", function() {
-            document.querySelectorAll('.local-timestamp').forEach(el => {
-                const utc = el.getAttribute('data-utc');
-                if(utc) el.innerText = formatLocalTime(utc);
-            });
-            
-            // --- RESTORE SETTINGS ON LOAD ---
+            // --- RESTORE SETTINGS ---
+            // Safely restore checkbox states
+            const setCheck = (id, val) => { const el = document.getElementById(id); if(el) el.checked = !!val; };
+            const setVal = (id, val) => { const el = document.getElementById(id); if(el) el.value = val; };
+
             // Products
-            if(document.getElementById('prodAutoCreate')) document.getElementById('prodAutoCreate').checked = SAVED_SETTINGS.prod_auto_create;
-            if(document.getElementById('prodAutoPublish')) document.getElementById('prodAutoPublish').checked = SAVED_SETTINGS.prod_auto_publish;
-            if(document.getElementById('prodSyncImages')) document.getElementById('prodSyncImages').checked = SAVED_SETTINGS.prod_sync_images;
-            if(document.getElementById('fieldTags')) document.getElementById('fieldTags').checked = SAVED_SETTINGS.prod_sync_tags;
-            if(document.getElementById('fieldMetaVendorCode')) document.getElementById('fieldMetaVendorCode').checked = SAVED_SETTINGS.prod_sync_meta_vendor_code;
-            
-            // New Unlocked Product Fields
-            if(document.getElementById('fieldPrice')) document.getElementById('fieldPrice').checked = SAVED_SETTINGS.prod_sync_price;
-            if(document.getElementById('fieldTitle')) document.getElementById('fieldTitle').checked = SAVED_SETTINGS.prod_sync_title;
-            if(document.getElementById('fieldDesc')) document.getElementById('fieldDesc').checked = SAVED_SETTINGS.prod_sync_desc;
-            if(document.getElementById('fieldProductType')) document.getElementById('fieldProductType').checked = SAVED_SETTINGS.prod_sync_type;
-            if(document.getElementById('fieldVendor')) document.getElementById('fieldVendor').checked = SAVED_SETTINGS.prod_sync_vendor;
+            setCheck('prodAutoCreate', SAVED_SETTINGS.prod_auto_create);
+            setCheck('prodAutoPublish', SAVED_SETTINGS.prod_auto_publish);
+            setCheck('prodSyncImages', SAVED_SETTINGS.prod_sync_images);
+            setCheck('fieldTags', SAVED_SETTINGS.prod_sync_tags);
+            setCheck('fieldMetaVendorCode', SAVED_SETTINGS.prod_sync_meta_vendor_code);
+            setCheck('fieldPrice', SAVED_SETTINGS.prod_sync_price);
+            setCheck('fieldTitle', SAVED_SETTINGS.prod_sync_title);
+            setCheck('fieldDesc', SAVED_SETTINGS.prod_sync_desc);
+            setCheck('fieldProductType', SAVED_SETTINGS.prod_sync_type);
+            setCheck('fieldVendor', SAVED_SETTINGS.prod_sync_vendor);
 
             // Orders
-            if(document.getElementById('orderSyncTax')) document.getElementById('orderSyncTax').checked = SAVED_SETTINGS.order_sync_tax;
+            setCheck('orderSyncTax', SAVED_SETTINGS.order_sync_tax);
 
             // Inventory
-            if(document.getElementById('checkZeroStock')) document.getElementById('checkZeroStock').checked = SAVED_SETTINGS.sync_zero;
-            if(document.getElementById('checkCommitted')) document.getElementById('checkCommitted').checked = SAVED_SETTINGS.combine_committed;
-            if(document.getElementById('invType')) document.getElementById('invType').value = SAVED_SETTINGS.field || 'qty_available';
+            setCheck('checkZeroStock', SAVED_SETTINGS.sync_zero);
+            setCheck('checkCommitted', SAVED_SETTINGS.combine_committed);
+            setVal('invType', SAVED_SETTINGS.field || 'qty_available');
 
             // Customers
-            if(document.getElementById('custSyncDirection')) document.getElementById('custSyncDirection').value = SAVED_SETTINGS.cust_direction || 'bidirectional';
-            if(document.getElementById('custAutoSync')) document.getElementById('custAutoSync').checked = SAVED_SETTINGS.cust_auto_sync;
-            if(document.getElementById('custSyncTagsSwitch')) {
-                document.getElementById('custSyncTagsSwitch').checked = SAVED_SETTINGS.cust_sync_tags;
-                toggleTagFields(); 
-            }
-            if(document.getElementById('custWhitelistTags')) document.getElementById('custWhitelistTags').value = SAVED_SETTINGS.cust_whitelist_tags || '';
-            if(document.getElementById('custBlacklistTags')) document.getElementById('custBlacklistTags').value = SAVED_SETTINGS.cust_blacklist_tags || '';
+            setVal('custSyncDirection', SAVED_SETTINGS.cust_direction || 'bidirectional');
+            setCheck('custAutoSync', SAVED_SETTINGS.cust_auto_sync);
+            setCheck('custSyncTagsSwitch', SAVED_SETTINGS.cust_sync_tags);
+            setVal('custWhitelistTags', SAVED_SETTINGS.cust_whitelist_tags || '');
+            setVal('custBlacklistTags', SAVED_SETTINGS.cust_blacklist_tags || '');
 
-            toggleTagFields();
+            toggleTagFields(); // Init UI state for tags
+            
+            // --- Auto-Load Companies if API Key present ---
+            if(CURRENT_SHOP_URL) {
+                fetchCompanies();
+            }
         });
 
-        // --- Tag Field Toggle ---
         function toggleTagFields() {
-            const toggle = document.getElementById('custSyncTagsSwitch').checked;
-            const fields = document.getElementById('tagFilterFields');
-            fields.style.display = toggle ? 'block' : 'none';
+            const toggle = document.getElementById('custSyncTagsSwitch');
+            if(toggle) {
+                const fields = document.getElementById('tagFilterFields');
+                fields.style.display = toggle.checked ? 'block' : 'none';
+            }
         }
 
-        // --- Settings Tab Logic ---
-        document.querySelector('#mainTabs a[href="#settings"]').addEventListener('shown.bs.tab', function (e) { 
-            fetchCompanies();
-        });
-
+        // --- FETCH COMPANIES ---
         function fetchCompanies() {
             const sel = document.getElementById('companySelect');
+            if(!sel) return;
+            
             sel.innerHTML = '<option value="">Loading...</option>';
 
             fetch(`/api/odoo/companies?shop=${CURRENT_SHOP_URL}`)
                 .then(r => r.json())
                 .then(data => {
-                    // 1. Handle Error Sent from Backend
                     if(data.error) {
-                        console.error("Backend Error:", data.error);
                         sel.innerHTML = `<option value="">❌ Error: ${data.error}</option>`;
-                        showToast("Connection Error: " + data.error);
                         return;
                     }
                     
-                    // 2. Handle Empty List (Connected, but no companies found)
-                    if (data.length === 0) {
-                        sel.innerHTML = '<option value="">⚠️ Connected, but 0 Companies found.</option>';
-                        return;
+                    sel.innerHTML = '<option value="">Select Company</option>';
+                    if (Array.isArray(data)) {
+                        data.forEach(c => {
+                            const isSel = (SAVED_SETTINGS.odoo_company_id == c.id) ? 'selected' : '';
+                            sel.innerHTML += `<option value="${c.id}" ${isSel}>${c.name}</option>`;
+                        });
                     }
 
-                    // 3. Success
-                    sel.innerHTML = '<option value="">Select Company</option>';
-                    data.forEach(c => {
-                        const isSel = (SAVED_SETTINGS.odoo_company_id == c.id) ? 'selected' : '';
-                        sel.innerHTML += `<option value="${c.id}" ${isSel}>${c.name}</option>`;
-                    });
-
-                    // Trigger location fetch if a company is already saved
+                    // Auto-load locations if we have a saved company
                     if (SAVED_SETTINGS.odoo_company_id) {
                         fetchLocations(SAVED_SETTINGS.odoo_company_id);
                     }
                 })
                 .catch(e => {
-                    console.error("Network/JS Error:", e);
-                    sel.innerHTML = `<option value="">❌ Network Error (Check Console)</option>`;
-                    showToast("Failed to reach Odoo.");
+                    sel.innerHTML = `<option value="">❌ Network Error</option>`;
+                    console.error(e);
                 });
         }
 
+        // --- COMPANY CHANGE EVENT ---
+        // Add listener to company dropdown to auto-refresh locations
+        const companySelect = document.getElementById('companySelect');
+        if(companySelect) {
+            companySelect.addEventListener('change', function() {
+                const companyId = this.value;
+                if(companyId) fetchLocations(companyId);
+                else document.getElementById('locationList').innerHTML = '';
+            });
+        }
+
+        // --- FETCH LOCATIONS (The Critical Fix) ---
         function fetchLocations(companyId) {
-            if(!companyId) return;
             const list = document.getElementById('locationList');
-            list.innerHTML = '<div class="text-center"><div class="spinner-border spinner-border-sm"></div> Loading...</div>';
+            if(!list) return;
             
-            // UPDATED: Pass the shop URL here too
+            list.innerHTML = '<div class="text-center"><div class="spinner-border spinner-border-sm"></div> Loading Locations...</div>';
+            
             fetch(`/api/odoo/locations?company_id=${companyId}&shop=${CURRENT_SHOP_URL}`)
                 .then(r => r.json())
                 .then(data => {
-                    list.innerHTML = '';
-                    if(data.error) { list.innerHTML = `<span class="text-danger">Error: ${data.error}</span>`; return; }
+                    // 1. Check for Backend Error Object
+                    if(data.error) { 
+                        list.innerHTML = `<span class="text-danger">Error: ${data.error}</span>`; 
+                        return; 
+                    }
                     
+                    // 2. Validate Array
+                    if (!Array.isArray(data)) {
+                        console.error("Invalid Data Format:", data);
+                        list.innerHTML = '<span class="text-danger">Invalid data received from server.</span>';
+                        return;
+                    }
+
+                    // 3. Handle Empty List
+                    if(data.length === 0) {
+                        list.innerHTML = '<span class="text-warning">No locations found for this company.</span>';
+                        return;
+                    }
+                    
+                    // 4. Render List
                     const savedLocs = SAVED_SETTINGS.locations || [];
                     const items = data.map(loc => {
                         const isChecked = savedLocs.includes(loc.id) ? 'checked' : '';
-                        const displayName = loc.complete_name.replace('Physical Locations/', '').replace(loc.complete_name.split('/')[0] + '/', '');
                         return `
                             <div class="form-check">
                                 <input class="form-check-input loc-check" type="checkbox" value="${loc.id}" id="loc_${loc.id}" ${isChecked}>
-                                <label class="form-check-label small" for="loc_${loc.id}">${displayName}</label>
+                                <label class="form-check-label small" for="loc_${loc.id}">${loc.name}</label>
                             </div>`;
                     });
                     list.innerHTML = items.join('');
+                })
+                .catch(e => {
+                    list.innerHTML = `<span class="text-danger">Network Error</span>`;
+                    console.error(e);
                 });
         }
 
@@ -489,8 +517,6 @@
                 prod_sync_images: document.getElementById('prodSyncImages').checked,
                 prod_sync_tags: document.getElementById('fieldTags').checked,
                 prod_sync_meta_vendor_code: document.getElementById('fieldMetaVendorCode').checked,
-                
-                // New Unlocked Fields
                 prod_sync_price: document.getElementById('fieldPrice').checked,
                 prod_sync_title: document.getElementById('fieldTitle').checked,
                 prod_sync_desc: document.getElementById('fieldDesc').checked,
@@ -518,12 +544,11 @@
             .catch(err => showToast("Save Failed"));
         }
 
-        // --- Manual Import Logic ---
+        // --- Manual Import ---
         function openOrderImportModal() {
-            modal.show();
+            if(modal) modal.show();
             document.getElementById('importTableBody').innerHTML = '<tr><td colspan="5" class="text-center"><div class="spinner-border spinner-border-sm"></div> Fetching...</td></tr>';
             
-            // FIX: Added ?shop=CURRENT_SHOP_URL to the fetch call
             fetch(`/sync/orders/manual?shop=${CURRENT_SHOP_URL}`)
                 .then(r => r.json())
                 .then(data => {
@@ -546,7 +571,6 @@
             }
             document.getElementById('importTableBody').innerHTML = '<tr><td colspan="5" class="text-center"><div class="spinner-border spinner-border-sm"></div> Importing...</td></tr>';
 
-            // FIX: Added shop_url to the JSON payload
             fetch('/sync/orders/import_batch', {
                 method: 'POST', 
                 headers: {'Content-Type': 'application/json'}, 
@@ -557,40 +581,38 @@
             })
             .then(r => r.json())
             .then(data => { 
-                modal.hide(); 
+                if(modal) modal.hide(); 
                 showToast(data.message); 
                 setTimeout(() => location.reload(), 2000); 
             })
             .catch(error => {
-                modal.hide(); 
+                if(modal) modal.hide(); 
                 showToast("Import failed due to a network error.");
                 setTimeout(() => location.reload(), 2000); 
             });
         }
         
         function triggerAction(url, method='GET') {
-            // Automatically append the shop parameter to the URL
             const separator = url.includes('?') ? '&' : '?';
             const finalUrl = `${url}${separator}shop=${CURRENT_SHOP_URL}`;
-
-            // Visual Feedback (Button Loading State could be added here later)
             showToast("Request sent...");
 
             fetch(finalUrl, { method: method })
                 .then(r => r.json())
                 .then(data => {
-                    if (data.error) {
-                        showToast("❌ Error: " + data.error);
-                    } else {
-                        showToast("✅ " + data.message);
-                    }
+                    if (data.error) showToast("❌ Error: " + data.error);
+                    else showToast("✅ " + data.message);
                 })
                 .catch(e => showToast("❌ Network Error"));
         }
 
-        document.getElementById('selectAllOrders').addEventListener('change', function() {
-            document.querySelectorAll('.order-select').forEach(cb => cb.checked = this.checked);
-        });
+        // Checkbox "Select All"
+        const selectAll = document.getElementById('selectAllOrders');
+        if(selectAll) {
+            selectAll.addEventListener('change', function() {
+                document.querySelectorAll('.order-select').forEach(cb => cb.checked = this.checked);
+            });
+        }
     </script>
 </body>
 </html>
