@@ -158,17 +158,19 @@ class OdooClient:
             return []
 
     def get_locations(self, company_id=None):
-        """Fetches internal stock locations, forcing the specific company context."""
+        """Fetches stock locations, forcing the specific company context."""
         try:
             # 1. Base Domain
-            domain = [['usage', '=', 'internal']]
+            # We removed ['usage', '=', 'internal'] to ensure we see ALL locations first.
+            # You can add it back later if the list is too messy.
+            domain = []
             
             # 2. Context setup (Critical for Multi-Company)
             kwargs = {}
             
             if company_id:
                 cid = int(company_id)
-                # Filter by company AND allow shared locations (False)
+                # Filter: Locations for this company OR Shared locations (False)
                 domain.append('|')
                 domain.append(['company_id', '=', cid])
                 domain.append(['company_id', '=', False])
@@ -182,7 +184,7 @@ class OdooClient:
             
             if not ids: return []
             
-            # 4. Read Names (Pass context here too just in case)
+            # 4. Read Names
             locs = self.models.execute_kw(self.db, self.uid, self.password,
                 'stock.location', 'read', [ids], {'fields': ['id', 'display_name', 'company_id']}, kwargs)
             
