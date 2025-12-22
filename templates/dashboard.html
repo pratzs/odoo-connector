@@ -503,13 +503,15 @@
             const companyId = document.getElementById('companySelect').value;
             if (!companyId) { alert("Please select a Company first."); return; }
 
+            // FIX: Keys now exactly match what app.py expects
             const payload = {
                 company_id: companyId,
-                // Inventory
-                field: document.querySelector('#invType').value,
-                sync_zero: document.getElementById('checkZeroStock').checked,
+                
+                // Inventory (FIXED KEYS)
+                inventory_field: document.querySelector('#invType').value,
+                sync_zero_stock: document.getElementById('checkZeroStock').checked,
                 combine_committed: document.getElementById('checkCommitted').checked,
-                locations: Array.from(document.querySelectorAll('.loc-check:checked')).map(cb => parseInt(cb.value)),
+                inventory_locations: Array.from(document.querySelectorAll('.loc-check:checked')).map(cb => parseInt(cb.value)),
                 
                 // Products
                 prod_auto_create: document.getElementById('prodAutoCreate').checked,
@@ -533,6 +535,8 @@
                 cust_whitelist_tags: document.getElementById('custWhitelistTags').value,
                 cust_blacklist_tags: document.getElementById('custBlacklistTags').value
             };
+
+            showToast("Saving...");
 
             fetch(`/api/settings/save?shop=${CURRENT_SHOP_URL}`, { 
                 method: 'POST',
