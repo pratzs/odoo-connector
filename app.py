@@ -81,17 +81,20 @@ app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # 3. SET SSL MODE FOR PSYCOPG2 (Standard Driver)
-# We removed the 'ssl_context' block because it crashes the new driver.
+# FIX: Robust DB connection settings to prevent "SSL Decryption" errors
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    "connect_args": {"sslmode": "require"}
-}
-
-app.config['SQLALCHEMY_DATABASE_URI'] = database_url
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
-# FIX: Use 'sslmode' for psycopg2 (This fixes the 500 Crash)
-app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    "connect_args": {"sslmode": "require"}
+    "pool_pre_ping": True,      # <--- Checks if connection is alive before using it
+    "pool_recycle": 300,        # <--- Refreshes connection every 5 minutes
+    "pool_timeout": 30,
+    "pool_size": 10,
+    "max_overflow": 20,
+    "connect_args": {
+        "sslmode": "require",
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5
+    }
 }
 
 SHOPIFY_LOCATION_ID = int(os.getenv('SHOPIFY_WAREHOUSE_ID', '0'))
