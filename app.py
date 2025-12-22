@@ -2310,27 +2310,167 @@ def check_for_corrupted_categories(shop_url):
 
 def fix_variant_mess_task(shop_url):
     with app.app_context():
+        # 1. Setup
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): 
-            log_event('Cleanup', 'Error', "Startup Failed: No Odoo/Shopify Connection")
+            log_event('Cleanup', 'Error', "Startup Failed: No Odoo/Shopify Connection", shop_url=shop_url)
             return
         
-        company_id = get_config('odoo_company_id')
-        log_event('Cleanup', 'Info', f"Starting Repair Task for Company ID: {company_id}...")
+        company_id = get_config('odoo_company_id', shop_url=shop_url)
+        log_event('Cleanup', 'Info', f"Starting Strict Variant Repair for Company {company_id}...", shop_url=shop_url)
         
+        # 2. Fetch Odoo Data (Including Cost & Pack Qty)
         try:
-            odoo_products = odoo.get_all_products(company_id)
-            if not odoo_products:
-                log_event('Cleanup', 'Error', "STOPPING: Odoo returned 0 products.")
-                return
+            domain = [['sale_ok', '=', True], ['type', 'in', ['product', 'consu']]]
+            if company_id: domain.append(['company_id', '=', int(company_id)])
+            
+            fields = ['default_code', 'name', 'list_price', 'standard_price', 'sh_is_secondary_unit', 'qty_per_pack']
+            odoo_products = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'product.product', 'search_read', [domain], {'fields': fields})
+            
             odoo_map = {p.get('default_code'): p for p in odoo_products if p.get('default_code')}
         except Exception as e:
-            log_event('Cleanup', 'Error', f"Setup Data Failed: {e}")
+            log_event('Cleanup', 'Error', f"Odoo Data Fetch Failed: {e}", shop_url=shop_url)
             return
 
-        # Simplified Logic for Multi-Tenant Safety (Placeholder)
-        # Full logic can be pasted here if needed, but keeping it safe for now.
-        log_event('Cleanup', 'Info', "Variant Repair logic placeholder executed.")
+        # 3. Scan Shopify Products
+        page = 1
+        processed = 0
+        repaired = 0
+        
+        while True:
+            try:
+                products = shopify.Product.find(limit=50, page=page)
+            except: break
+            
+            if not products: break
+            
+            for sp in products:
+                # Identify Parent SKU
+                ref_sku = sp.variants[0].sku if sp.variants else None
+                if ref_sku and "-UNIT" in ref_sku: ref_sku = ref_sku.replace("-UNIT", "")
+                
+                if not ref_sku or ref_sku not in odoo_map:
+                    continue
+
+                p = odoo_map[ref_sku]
+                
+                # --- RULE 1: DETERMINE IF PACK ---
+                is_pack = False
+                qty_pack = float(p.get('qty_per_pack', 0.0))
+                
+                if p.get('sh_is_secondary_unit') is True and qty_pack > 1.0:
+                    is_pack = True
+
+                # --- RULE 2: CALCULATE PRICES ---
+                pack_price = float(p.get('list_price', 0.0))
+                pack_cost = float(p.get('standard_price', 0.0))
+                
+                unit_price = 0.0
+                unit_cost = 0.0
+                
+                if is_pack:
+                    unit_price = round(pack_price / qty_pack, 2)
+                    unit_cost = round(pack_cost / qty_pack, 2)
+
+                # --- RULE 3: DEFINE DESIRED VARIANTS ---
+                desired_variants = []
+
+                if is_pack:
+                    # Enforce Option Name
+                    sp.options = [{'name': 'Pack Size'}]
+                    
+                    # 1. Primary (The Pack)
+                    desired_variants.append({
+                        'sku': ref_sku,
+                        'option1': f"{int(qty_pack)} per pack", # Primary Name
+                        'price': str(pack_price),
+                        'cost': str(pack_cost)
+                    })
+                    
+                    # 2. Secondary (The Unit)
+                    desired_variants.append({
+                        'sku': f"{ref_sku}-UNIT",
+                        'option1': "Unit",
+                        'price': str(unit_price),
+                        'cost': str(unit_cost)
+                    })
+                else:
+                    # Not a pack? Reset to simple product
+                    if sp.options and sp.options[0].name != 'Title':
+                        sp.options = [{'name': 'Title', 'values': ['Default Title']}]
+                    
+                    desired_variants.append({
+                        'sku': ref_sku,
+                        'option1': "Default Title",
+                        'price': str(pack_price),
+                        'cost': str(pack_cost)
+                    })
+
+                # --- RULE 4: SYNC & CLEANUP ---
+                current_variants = sp.variants
+                final_list = []
+                dirty = False
+
+                for target in desired_variants:
+                    # Find existing variant by SKU
+                    match = next((v for v in current_variants if v.sku == target['sku']), None)
+                    
+                    # Or fallback to first variant if we are resetting to "Default Title"
+                    if not match and target['option1'] == 'Default Title' and len(current_variants) > 0:
+                        match = current_variants[0]
+
+                    if not match:
+                        # Create New
+                        print(f"Repair: Creating missing variant {target['sku']}")
+                        match = shopify.Variant({'product_id': sp.id})
+                        match.inventory_management = 'shopify'
+                        dirty = True
+
+                    # Update Values
+                    if match.option1 != target['option1']:
+                        match.option1 = target['option1']
+                        dirty = True
+                    if match.price != target['price']:
+                        match.price = target['price']
+                        dirty = True
+                    if match.sku != target['sku']:
+                        match.sku = target['sku']
+                        dirty = True
+                    
+                    final_list.append(match)
+
+                # --- RULE 5: DETECT DELETIONS ---
+                # If current list has more items than final list, we are deleting junk.
+                if len(current_variants) > len(final_list):
+                    print(f"Repair: Deleting {len(current_variants) - len(final_list)} junk variants for {ref_sku}")
+                    dirty = True
+                
+                if dirty:
+                    try:
+                        sp.variants = final_list
+                        sp.save()
+                        
+                        # Update Costs (Requires InventoryItem API)
+                        for v in sp.variants:
+                            target = next((t for t in desired_variants if t['sku'] == v.sku), None)
+                            if target and v.inventory_item_id:
+                                try:
+                                    ii = shopify.InventoryItem.find(v.inventory_item_id)
+                                    ii.cost = target['cost']
+                                    ii.save()
+                                except: pass
+                                
+                        repaired += 1
+                    except Exception as e:
+                        print(f"Save Failed for {ref_sku}: {e}")
+
+                processed += 1
+            
+            page += 1
+            log_event('Cleanup', 'Info', f"Scanned {processed} products, Repaired {repaired}...", shop_url=shop_url)
+
+        log_event('Cleanup', 'Success', f"Done. Scanned {processed}, Repaired {repaired}.", shop_url=shop_url)
 
 # --- ROUTES FOR MANUAL TOOLS ---
 
