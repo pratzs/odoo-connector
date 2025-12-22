@@ -5,5 +5,5 @@ scramp==1.4.4
 Flask-SQLAlchemy==3.1.1
 gunicorn==21.2.0
 python-dotenv==1.0.0
-ShopifyAPI==12.5.0
+ShopifyAPI>=12.7.0
 schedule==1.2.1
