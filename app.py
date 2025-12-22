@@ -106,20 +106,22 @@ active_processing_ids = set()
 recent_processed_cache = {} 
 
 # --- HELPERS (Multi-Tenant Aware) ---
-def get_config(key, default=None):
-    # Try to find shop context
-    shop_url = request.args.get('shop')
+def get_config(key, default=None, shop_url=None):
+    # 1. If shop_url is NOT passed, try to get it from the request (Frontend mode)
+    if not shop_url:
+        try:
+            shop_url = request.args.get('shop')
+        except:
+            pass # We are in a background thread, so this is expected to fail
+    
     if not shop_url: return default
 
     try:
-        # Use filter_by because PK is now composite
         setting = AppSetting.query.filter_by(shop_url=shop_url, key=key).first()
         if not setting: return default
         try: return json.loads(setting.value)
         except: return setting.value
-    except Exception as e:
-        print(f"Config Read Error ({key}): {e}")
-        return default
+    except: return default
 
 def set_config(key, value):
     shop_url = request.args.get('shop')
@@ -1120,17 +1122,19 @@ def perform_inventory_sync(shop_url, lookback_minutes):
     """
     Features: 
     - Checks 'sync_zero_stock'
-    - Checks 'combine_committed' (NEW)
+    - Checks 'combine_committed'
     - Updates Cartons & Units
     """
     odoo = get_odoo_connection(shop_url)
     if not odoo or not setup_shopify_session(shop_url): return 0, 0
     
-    target_locations = get_config('inventory_locations', [])
-    target_field = get_config('inventory_field', 'qty_available')
-    sync_zero = get_config('sync_zero_stock', False)
-    combine_committed = get_config('combine_committed', False) # <--- NEW
-    company_id = get_config('odoo_company_id')
+    # PASS shop_url explicitly to get_config!
+    target_locations = get_config('inventory_locations', [], shop_url=shop_url)
+    target_field = get_config('inventory_field', 'qty_available', shop_url=shop_url)
+    sync_zero = get_config('sync_zero_stock', False, shop_url=shop_url)
+    combine_committed = get_config('combine_committed', False, shop_url=shop_url)
+    company_id = get_config('odoo_company_id', None, shop_url=shop_url) # <--- IMPORTANT
+
 
     last_run = datetime.utcnow() - timedelta(minutes=lookback_minutes)
     try: 
