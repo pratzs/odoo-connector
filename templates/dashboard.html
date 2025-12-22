@@ -111,6 +111,11 @@
     </style>
 </head>
 <body>
+    <ui-nav-menu>
+  <a href="/?shop={{ shop_url }}" rel="home">Overview & Logs</a>
+  <a href="/?shop={{ shop_url }}#settings" onclick="openTab('tab-settings')">Configuration</a>
+  <a href="/?shop={{ shop_url }}#maintenance" onclick="openTab('tab-maintenance')">Maintenance</a>
+</ui-nav-menu>
 
     <div class="custom-tabs">
         <div class="tab-btn active" onclick="switchTab('overview')">Overview & Logs</div>
@@ -588,6 +593,44 @@
 
         const selectAll = document.getElementById('selectAllOrders');
         if(selectAll) selectAll.addEventListener('change', function() { document.querySelectorAll('.order-select').forEach(cb => cb.checked = this.checked); });
+
+        /**
+ * SIDEBAR NAVIGATION HANDLER
+ * This listens for the URL #hash and opens the correct Bootstrap tab.
+ */
+function handleSidebarNavigation() {
+    const hash = window.location.hash;
+    
+    if (hash === '#settings') {
+        // Find the "Configuration" tab link and click it using Bootstrap's logic
+        const settingsTab = document.querySelector('a[href="#settings"]');
+        if (settingsTab) {
+            const tab = new bootstrap.Tab(settingsTab);
+            tab.show();
+        }
+    } else if (hash === '#maintenance') {
+        // Since Maintenance is likely part of your third tab
+        const maintenanceTab = document.querySelector('a[href="#maintenance"]');
+        if (maintenanceTab) {
+            const tab = new bootstrap.Tab(maintenanceTab);
+            tab.show();
+        }
+    } else {
+        // Default to Live Logs / Overview
+        const overviewTab = document.querySelector('a[href="#live-logs"]');
+        if (overviewTab) {
+            const tab = new bootstrap.Tab(overviewTab);
+            tab.show();
+        }
+    }
+}
+
+// Listen for hash changes (when user clicks sidebar)
+window.addEventListener('hashchange', handleSidebarNavigation);
+
+// Check on initial page load
+window.addEventListener('load', handleSidebarNavigation);
+        
     </script>
 </body>
 </html>
