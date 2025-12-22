@@ -82,20 +82,15 @@
         .tab-content-area { display: none; }
         .tab-content-area.active { display: block; }
 
-        /* --- BUTTONS (Shopify Style) --- */
+        /* --- BUTTONS --- */
         .btn { border-radius: 4px; font-weight: 500; font-size: 13px; padding: 8px 16px; border: 1px solid transparent; }
-        
-        .btn-primary { background-color: #303030; border-color: #303030; } /* Shopify Black */
+        .btn-primary { background-color: #303030; border-color: #303030; }
         .btn-primary:hover { background-color: #1a1a1a; border-color: #1a1a1a; }
-
         .btn-secondary { background-color: white; color: var(--p-text); border-color: var(--p-border); box-shadow: 0 1px 0 rgba(0,0,0,0.05); }
         .btn-secondary:hover { background-color: #f6f6f7; color: var(--p-text); border-color: #c9cccf; }
-
         .btn-success { background-color: var(--p-primary); border-color: var(--p-primary); }
         .btn-success:hover { background-color: var(--p-primary-hover); border-color: var(--p-primary-hover); }
 
-        .btn-danger, .btn-critical { background-color: #d82c0d; border-color: #d82c0d; color: white; }
-        
         /* --- FORMS --- */
         .form-label-sm { font-weight: 500; margin-bottom: 4px; display: block; }
         .form-control, .form-select { border-color: var(--p-border); font-size: 14px; }
@@ -129,9 +124,7 @@
                     </div>
                     <div class="d-flex justify-content-between">
                         <span>Odoo Connection:</span>
-                        <span class="badge {{ 'bg-success' if odoo_status else 'bg-danger' }}">
-                            {{ 'Online' if odoo_status else 'Offline' }}
-                        </span>
+                        <span class="badge bg-success">Active</span>
                     </div>
                     <hr>
                     <a href="/install?shop={{ shop_url }}" class="btn btn-sm btn-secondary w-100" target="_top">
@@ -203,28 +196,28 @@
                             <div class="section-header">📦 Product Settings</div>
                             
                             <div class="form-check form-switch mb-2">
-                                <input class="form-check-input" type="checkbox" id="prodAutoCreate" {% if current_settings.prod_auto_create %}checked{% endif %}>
+                                <input class="form-check-input" type="checkbox" id="prodAutoCreate" {% if config.prod_auto_create %}checked{% endif %}>
                                 <label class="form-check-label" for="prodAutoCreate">Create new products</label>
                             </div>
                             <div class="form-check form-switch mb-2">
-                                <input class="form-check-input" type="checkbox" id="prodAutoPublish" {% if current_settings.prod_auto_publish %}checked{% endif %}>
+                                <input class="form-check-input" type="checkbox" id="prodAutoPublish" {% if config.prod_auto_publish %}checked{% endif %}>
                                 <label class="form-check-label" for="prodAutoPublish">Auto-publish new products</label>
                             </div>
                             <div class="form-check form-switch mb-3">
-                                <input class="form-check-input" type="checkbox" id="prodSyncImages" {% if current_settings.prod_sync_images %}checked{% endif %}>
+                                <input class="form-check-input" type="checkbox" id="prodSyncImages" {% if config.prod_sync_images %}checked{% endif %}>
                                 <label class="form-check-label" for="prodSyncImages">Sync Images</label>
                             </div>
 
                             <hr>
                             <label class="form-label-sm mb-2">Field Mapping</label>
                             <div class="d-flex flex-wrap gap-3">
-                                <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldPrice" {% if current_settings.prod_sync_price %}checked{% endif %}> <label>Price</label></div>
-                                <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldTitle" {% if current_settings.prod_sync_title %}checked{% endif %}> <label>Title</label></div>
-                                <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldDesc" {% if current_settings.prod_sync_desc %}checked{% endif %}> <label>Desc</label></div>
-                                <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldProductType" {% if current_settings.prod_sync_type %}checked{% endif %}> <label>Type</label></div>
-                                <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldVendor" {% if current_settings.prod_sync_vendor %}checked{% endif %}> <label>Vendor</label></div>
-                                <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldTags" {% if current_settings.prod_sync_tags %}checked{% endif %}> <label>Tags</label></div>
-                                <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldMetaVendorCode" {% if current_settings.prod_sync_meta_vendor_code %}checked{% endif %}> <label>Vendor Code</label></div>
+                                <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldPrice" {% if config.prod_sync_price %}checked{% endif %}> <label>Price</label></div>
+                                <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldTitle" {% if config.prod_sync_title %}checked{% endif %}> <label>Title</label></div>
+                                <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldDesc" {% if config.prod_sync_desc %}checked{% endif %}> <label>Desc</label></div>
+                                <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldProductType" {% if config.prod_sync_type %}checked{% endif %}> <label>Type</label></div>
+                                <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldVendor" {% if config.prod_sync_vendor %}checked{% endif %}> <label>Vendor</label></div>
+                                <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldTags" {% if config.prod_sync_tags %}checked{% endif %}> <label>Tags</label></div>
+                                <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldMetaVendorCode" {% if config.prod_sync_meta_vendor_code %}checked{% endif %}> <label>Vendor Code</label></div>
                             </div>
                         </div>
                     </div>
@@ -236,17 +229,17 @@
                             <div class="mb-3">
                                 <label class="form-label-sm">Quantity Source</label>
                                 <select class="form-select" id="invType">
-                                    <option value="qty_available" {% if current_settings.field == 'qty_available' %}selected{% endif %}>On Hand (Physical)</option>
-                                    <option value="virtual_available" {% if current_settings.field == 'virtual_available' %}selected{% endif %}>Forecasted</option>
+                                    <option value="qty_available" {% if config.field == 'qty_available' %}selected{% endif %}>On Hand (Physical)</option>
+                                    <option value="virtual_available" {% if config.field == 'virtual_available' %}selected{% endif %}>Forecasted</option>
                                 </select>
                             </div>
 
                             <div class="form-check form-switch mb-2">
-                                <input class="form-check-input" type="checkbox" id="checkZeroStock" {% if current_settings.sync_zero %}checked{% endif %}>
+                                <input class="form-check-input" type="checkbox" id="checkZeroStock" {% if config.sync_zero %}checked{% endif %}>
                                 <label class="form-check-label" for="checkZeroStock">Do not sync zero stock</label>
                             </div>
                             <div class="form-check form-switch mb-3">
-                                <input class="form-check-input" type="checkbox" id="checkCommitted" {% if current_settings.combine_committed %}checked{% endif %}>
+                                <input class="form-check-input" type="checkbox" id="checkCommitted" {% if config.combine_committed %}checked{% endif %}>
                                 <label class="form-check-label" for="checkCommitted">Combine Committed Stock</label>
                             </div>
 
@@ -263,7 +256,7 @@
                         <div class="card p-4 h-100">
                             <div class="section-header">🛒 Orders</div>
                             <div class="form-check form-switch mb-2">
-                                <input class="form-check-input" type="checkbox" id="orderSyncTax" {% if current_settings.order_sync_tax %}checked{% endif %}>
+                                <input class="form-check-input" type="checkbox" id="orderSyncTax" {% if config.order_sync_tax %}checked{% endif %}>
                                 <label class="form-check-label" for="orderSyncTax">Sync Tax-Included Price</label>
                             </div>
                             <div class="text-muted small">Discounts & Shipping mapped automatically.</div>
@@ -276,23 +269,23 @@
                             <div class="mb-2">
                                 <label class="form-label-sm">Sync Direction</label>
                                 <select class="form-select" id="custSyncDirection">
-                                    <option value="bidirectional" {% if current_settings.cust_direction == 'bidirectional' %}selected{% endif %}>Bidirectional</option>
-                                    <option value="odoo_to_shopify" {% if current_settings.cust_direction == 'odoo_to_shopify' %}selected{% endif %}>Odoo → Shopify</option>
-                                    <option value="shopify_to_odoo" {% if current_settings.cust_direction == 'shopify_to_odoo' %}selected{% endif %}>Shopify → Odoo</option>
+                                    <option value="bidirectional" {% if config.cust_direction == 'bidirectional' %}selected{% endif %}>Bidirectional</option>
+                                    <option value="odoo_to_shopify" {% if config.cust_direction == 'odoo_to_shopify' %}selected{% endif %}>Odoo → Shopify</option>
+                                    <option value="shopify_to_odoo" {% if config.cust_direction == 'shopify_to_odoo' %}selected{% endif %}>Shopify → Odoo</option>
                                 </select>
                             </div>
                             <div class="form-check form-switch">
-                                <input class="form-check-input" type="checkbox" id="custAutoSync" {% if current_settings.cust_auto_sync %}checked{% endif %}>
+                                <input class="form-check-input" type="checkbox" id="custAutoSync" {% if config.cust_auto_sync %}checked{% endif %}>
                                 <label class="form-check-label" for="custAutoSync">Daily Auto Sync</label>
                             </div>
                             
                             <div class="form-check form-switch mt-2">
-                                <input class="form-check-input" type="checkbox" id="custSyncTagsSwitch" {% if current_settings.cust_sync_tags %}checked{% endif %} onchange="toggleTagFields()">
+                                <input class="form-check-input" type="checkbox" id="custSyncTagsSwitch" {% if config.cust_sync_tags %}checked{% endif %} onchange="toggleTagFields()">
                                 <label class="form-check-label" for="custSyncTagsSwitch">Enable Tag Filtering</label>
                             </div>
-                            <div id="tagFilterFields" class="mt-2 p-2 bg-light border rounded" style="{% if not current_settings.cust_sync_tags %}display: none;{% endif %}">
-                                <input type="text" class="form-control form-control-sm mb-1" id="custWhitelistTags" placeholder="Whitelist: tag1, tag2" value="{{ current_settings.cust_whitelist_tags }}">
-                                <input type="text" class="form-control form-control-sm" id="custBlacklistTags" placeholder="Blacklist: tagA, tagB" value="{{ current_settings.cust_blacklist_tags }}">
+                            <div id="tagFilterFields" class="mt-2 p-2 bg-light border rounded" style="{% if not config.cust_sync_tags %}display: none;{% endif %}">
+                                <input type="text" class="form-control form-control-sm mb-1" id="custWhitelistTags" placeholder="Whitelist: tag1, tag2" value="{{ config.cust_whitelist_tags }}">
+                                <input type="text" class="form-control form-control-sm" id="custBlacklistTags" placeholder="Blacklist: tagA, tagB" value="{{ config.cust_blacklist_tags }}">
                             </div>
                         </div>
                     </div>
@@ -399,8 +392,8 @@
             event.target.classList.add('active');
         }
 
-        // --- GLOBAL CONFIG (From your original file) ---
-        const SAVED_SETTINGS = {{ current_settings | tojson | safe if current_settings else '{}' }};
+        // --- GLOBAL CONFIG (Fixed: Uses 'config' now) ---
+        const SAVED_SETTINGS = {{ config | tojson | safe if config else '{}' }};
         const CURRENT_SHOP_URL = "{{ shop_url }}";
         const modalElement = document.getElementById('orderImportModal');
         const modal = modalElement ? new bootstrap.Modal(modalElement) : null;
@@ -432,6 +425,7 @@
             const setCheck = (id, val) => { const el = document.getElementById(id); if(el) el.checked = !!val; };
             const setVal = (id, val) => { const el = document.getElementById(id); if(el) el.value = val; };
 
+            // Using SAVED_SETTINGS which is populated from 'config' now
             setCheck('prodAutoCreate', SAVED_SETTINGS.prod_auto_create);
             setCheck('prodAutoPublish', SAVED_SETTINGS.prod_auto_publish);
             setCheck('prodSyncImages', SAVED_SETTINGS.prod_sync_images);
@@ -517,7 +511,7 @@
             if (!companyId) { alert("Please select a Company first."); return; }
 
             const payload = {
-                company_id: companyId,
+                odoo_company_id: companyId,
                 inventory_field: document.querySelector('#invType').value,
                 sync_zero_stock: document.getElementById('checkZeroStock').checked,
                 combine_committed: document.getElementById('checkCommitted').checked,
