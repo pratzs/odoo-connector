@@ -69,10 +69,10 @@ app = Flask(__name__)
 # --- CONFIGURATION ---
 database_url = os.getenv('DATABASE_URL', 'sqlite:///local.db')
 if database_url:
+    # Fix Render's "postgres://" URL to standard "postgresql://"
     if database_url.startswith("postgres://"):
-        database_url = database_url.replace("postgres://", "postgresql+pg8000://", 1)
-    elif database_url.startswith("postgresql://"):
-        database_url = database_url.replace("postgresql://", "postgresql+pg8000://", 1)
+        database_url = database_url.replace("postgres://", "postgresql://", 1)
+    # We REMOVED "+pg8000". SQLAlchemy will now auto-detect psycopg2 (the stable driver)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
