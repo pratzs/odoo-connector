@@ -2131,7 +2131,7 @@ def sync_images_only_manual(shop_url):
             if processed % 50 == 0:
                 log_event('Image Sync', 'Info', f"Synced images for {processed}/{real_count} products...", shop_url=shop_url)
 
-        log_event('Image Sync', 'Success', f"Done. Updated {updates} images.", shop_url=shop_url))
+        log_event('Image Sync', 'Success', f"Done. Updated {updates} images.", shop_url=shop_url)
 
 
 def emergency_purge_junk_products(shop_url):
