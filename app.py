@@ -193,7 +193,6 @@ def setup_shopify_session(shop_url=None):
     Activates a Shopify session for a specific shop from the Database.
     """
     if not shop_url:
-        # If called without a shop, try to guess from the global context (only works in requests)
         try:
             shop_url = request.args.get('shop')
         except:
@@ -205,7 +204,8 @@ def setup_shopify_session(shop_url=None):
         shop = Shop.query.filter_by(shop_url=shop_url).first()
         if not shop: return False
         
-        session = shopify.Session(shop.shop_url, '2024-01', shop.access_token)
+        # UPDATED: Use 2025-10
+        session = shopify.Session(shop.shop_url, '2025-10', shop.access_token)
         shopify.ShopifyResource.activate_session(session)
         return True
 
@@ -542,9 +542,10 @@ def sync_products_master(shop_url):
             log_event('System', 'Error', f"Sync Failed: Could not connect to Odoo for {shop_url}")
             return
 
-        # 3. Connect to Shopify (Dynamic)
+       # 3. Connect to Shopify (Dynamic)
         try:
-            session = shopify.Session(shop.shop_url, '2024-01', shop.access_token)
+            # UPDATED: Use 2025-10
+            session = shopify.Session(shop.shop_url, '2025-10', shop.access_token)
             shopify.ShopifyResource.activate_session(session)
         except Exception as e:
             log_event('System', 'Error', f"Shopify Auth Failed: {e}")
@@ -948,7 +949,6 @@ def archive_shopify_duplicates(shop_url):
     for sku, products in sku_map.items():
         if len(products) > 1:
             # Sort by created_at (keep the newest)
-            # Format: 2024-10-05T12:00:00-04:00
             products.sort(key=lambda x: x.created_at, reverse=True)
             
             # Keep the first one (index 0), archive the rest
@@ -958,11 +958,14 @@ def archive_shopify_duplicates(shop_url):
                     p.status = 'archived'
                     p.save()
                     archived_count += 1
-                    log_event('Duplicate Scan', 'Warning', f"Archived Duplicate: {p.title} (SKU: {sku})")
+                    # FIX: Pass shop_url so the log appears in the correct dashboard
+                    log_event('Duplicate Scan', 'Warning', f"Archived Duplicate: {p.title} (SKU: {sku})", shop_url=shop_url)
                 except Exception as e:
                     print(f"Failed to archive {p.id}: {e}")
 
-    log_event('Duplicate Scan', 'Success', f"Scan Complete. Archived {archived_count} duplicates.")
+    # FIX: Pass shop_url here too
+    log_event('Duplicate Scan', 'Success', f"Scan Complete. Archived {archived_count} duplicates.", shop_url=shop_url)
+    
 
 def sync_categories_only(shop_url):
     """
@@ -1309,10 +1312,11 @@ def auth_callback():
     except Exception as e:
         return f"Validation Error: {e}", 400
 
-    # 3. Exchange Code for Token
+   # 3. Exchange Code for Token
     try:
-        session = shopify.Session(shop_url, '2024-01')
-        access_token = session.request_token(params) # Pass the full params dict
+        # UPDATED: Use 2025-10
+        session = shopify.Session(shop_url, '2025-10')
+        access_token = session.request_token(params) 
     except Exception as e:
         return f"Token Exchange Failed: {e}", 400
 
@@ -1605,8 +1609,8 @@ def manual_order_fetch():
     shop = Shop.query.filter_by(shop_url=shop_url).first()
     if not shop: return jsonify({"error": "Shop not found"})
 
-    # FIX: Added status=any to find archived/fulfilled orders too
-    url = f"https://{shop_url}/admin/api/2024-01/orders.json?limit=10&status=any"
+    # UPDATE: Changed API version to 2025-01 to ensure compatibility
+    url = f"https://{shop_url}/admin/api/2025-01/orders.json?limit=10&status=any"
     headers = {"X-Shopify-Access-Token": shop.access_token}
     
     try:
@@ -1636,7 +1640,7 @@ def manual_order_fetch():
             'odoo_status': status
         })
     return jsonify({"orders": mapped_orders})
-
+    
 
 @app.route('/sync/orders/import_batch', methods=['POST'])
 def import_selected_orders():
