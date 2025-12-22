@@ -219,8 +219,18 @@ def setup_shopify_session(shop_url=None):
         return True
 
 # --- GRAPHQL HELPERS ---
-def find_shopify_product_by_sku(sku):
-    if not setup_shopify_session(): return None
+def find_shopify_product_by_sku(sku, shop_url=None):
+    """
+    FIX: Added shop_url param so it works in background threads.
+    """
+    # 1. Try to ensure session is active
+    try:
+        if not shopify.ShopifyResource.site:
+            if not setup_shopify_session(shop_url): return None
+    except:
+        if not setup_shopify_session(shop_url): return None
+
+    # 2. Run Query
     query = """{ productVariants(first: 5, query: "sku:%s") { edges { node { sku product { legacyResourceId } } } } }""" % sku
     try:
         client = shopify.GraphQL()
@@ -233,7 +243,6 @@ def find_shopify_product_by_sku(sku):
                 return node['product']['legacyResourceId']
     except Exception as e: print(f"GraphQL Error: {e}")
     return None
-
 def get_shopify_variant_inv_by_sku(sku, shop_url=None):
     """
     FIX: Added shop_url param so it works in background threads.
@@ -518,6 +527,7 @@ def process_order_data(data, odoo_client):
 def sync_products_master(shop_url):
     """
     DYNAMIC Odoo -> Shopify Product Sync (v6.0 - Public App).
+    FIX: Passes shop_url to all helpers to prevent "Silent Skip".
     """
     with app.app_context():
         # 1. Load Shop Data from DB
@@ -532,7 +542,7 @@ def sync_products_master(shop_url):
             log_event('System', 'Error', f"Sync Failed: Could not connect to Odoo for {shop_url}")
             return
 
-       # 3. Connect to Shopify (Dynamic)
+        # 3. Connect to Shopify (Dynamic)
         try:
             # UPDATED: Use 2025-10
             session = shopify.Session(shop.shop_url, '2025-10', shop.access_token)
@@ -560,11 +570,11 @@ def sync_products_master(shop_url):
             product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                 'product.product', 'search', [domain])
         except Exception as e:
-            log_event('Product Sync', 'Error', f"Odoo Search Failed: {e}")
+            log_event('Product Sync', 'Error', f"Odoo Search Failed: {e}", shop_url=shop_url)
             return
 
         total_count = len(product_ids)
-        log_event('Product Sync', 'Info', f"Found {total_count} sellable products. Starting Batch Sync...")
+        log_event('Product Sync', 'Info', f"Found {total_count} sellable products. Starting Batch Sync...", shop_url=shop_url)
 
         # --- PRE-LOAD CACHES ---
         uom_map = {}
@@ -578,16 +588,16 @@ def sync_products_master(shop_url):
                 uom_map[u['id']] = {'name': safe_name, 'ratio': float(u.get('factor_inv', 1.0))}
         except: pass
 
-        # --- CONFIGS (Fallback to defaults if not per-shop yet) ---
-        sync_title = get_config('prod_sync_title', True)
-        sync_price = get_config('prod_sync_price', True)
-        sync_desc = get_config('prod_sync_desc', True)
-        sync_tags = get_config('prod_sync_tags', False)
-        sync_images = get_config('prod_sync_images', False)
-        sync_vendor = get_config('prod_sync_vendor', True) 
+        # --- CONFIGS (FIX: Pass shop_url to everything) ---
+        sync_title = get_config('prod_sync_title', True, shop_url=shop_url)
+        sync_price = get_config('prod_sync_price', True, shop_url=shop_url)
+        sync_desc = get_config('prod_sync_desc', True, shop_url=shop_url)
+        sync_tags = get_config('prod_sync_tags', False, shop_url=shop_url)
+        sync_images = get_config('prod_sync_images', False, shop_url=shop_url)
+        sync_vendor = get_config('prod_sync_vendor', True, shop_url=shop_url) 
         
-        auto_create = get_config('prod_auto_create', False)
-        auto_publish = get_config('prod_auto_publish', False)
+        auto_create = get_config('prod_auto_create', False, shop_url=shop_url)
+        auto_publish = get_config('prod_auto_publish', False, shop_url=shop_url)
 
         synced = 0
         BATCH_SIZE = 50
@@ -607,7 +617,7 @@ def sync_products_master(shop_url):
                 odoo_products = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                     'product.product', 'read', [batch_ids], {'fields': fields})
             except Exception as e:
-                log_event('Product Sync', 'Error', f"Batch Read Error: {e}")
+                log_event('Product Sync', 'Error', f"Batch Read Error: {e}", shop_url=shop_url)
                 continue
 
             for p in odoo_products:
@@ -682,7 +692,8 @@ def sync_products_master(shop_url):
                     })
 
                 # --- SHOPIFY ACTIONS ---
-                shopify_id = find_shopify_product_by_sku(sku)
+                # FIX: Must pass shop_url to find the product!
+                shopify_id = find_shopify_product_by_sku(sku, shop_url=shop_url)
                 sp = None
                 
                 if shopify_id:
@@ -710,7 +721,11 @@ def sync_products_master(shop_url):
                 elif sp.options and sp.options[0].name != 'Title':
                     sp.options = [{'name': 'Title', 'values': ['Default Title']}]
 
-                sp.save()
+                try:
+                    sp.save()
+                except Exception as e:
+                    print(f"Error saving product {sku}: {e}")
+                    continue
 
                 existing_vars = sp.variants
                 final_vars = []
@@ -743,7 +758,7 @@ def sync_products_master(shop_url):
                                     inv_item.save()
                             except: pass
 
-                if get_config('prod_sync_meta_vendor_code', False):
+                if get_config('prod_sync_meta_vendor_code', False, shop_url=shop_url):
                     try:
                         v_code = odoo.get_vendor_product_code(p['id'])
                         if v_code:
@@ -759,20 +774,21 @@ def sync_products_master(shop_url):
                     except: pass
 
                 if sync_images and p.get('image_1920'):
-                     if not sp.images:
-                         try:
+                      if not sp.images:
+                          try:
                             img_data = p['image_1920']
                             if isinstance(img_data, bytes): img_data = img_data.decode('utf-8')
                             image = shopify.Image(prefix_options={'product_id': sp.id})
                             image.attachment = img_data
                             image.save()
-                         except: pass
+                          except: pass
 
                 try:
                     pm = ProductMap.query.filter_by(sku=sku).first()
                     if not pm:
                         v_id = sp.variants[0].id if sp.variants else '0'
-                        pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=str(v_id))
+                        # FIX: shop_url is required for database entry security
+                        pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=str(v_id), shop_url=shop_url)
                         db.session.add(pm)
                     pm.last_synced_at = datetime.utcnow()
                     db.session.commit()
@@ -782,9 +798,9 @@ def sync_products_master(shop_url):
 
             del odoo_products
             gc.collect()
-            log_event('Product Sync', 'Info', f"Processed batch {i}-{i+BATCH_SIZE}...")
+            log_event('Product Sync', 'Info', f"Processed batch {i}-{i+BATCH_SIZE}...", shop_url=shop_url)
 
-        log_event('Product Sync', 'Success', f"Sync Complete. Synced {synced} products.")
+        log_event('Product Sync', 'Success', f"Sync Complete. Synced {synced} products.", shop_url=shop_url)
 
 def sync_customers_master(shop_url):
     """
