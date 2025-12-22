@@ -507,7 +507,7 @@
                 cust_blacklist_tags: document.getElementById('custBlacklistTags').value
             };
 
-            fetch('/api/settings/save', {
+            fetch(`/api/settings/save?shop=${CURRENT_SHOP_URL}`, { 
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(payload)
