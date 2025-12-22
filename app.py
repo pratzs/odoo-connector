@@ -24,6 +24,7 @@ SHOPIFY_API_KEY = os.getenv('SHOPIFY_API_KEY')
 SHOPIFY_API_SECRET = os.getenv('SHOPIFY_API_SECRET')
 APP_URL = os.getenv('HOST')
 SHOPIFY_API_VERSION = '2025-10'  # UNIFIED VERSION
+
 SCOPES = (
     "read_products,write_products,"
     "read_product_listings,write_product_listings,"
