@@ -1554,7 +1554,7 @@ def sync_inventory_endpoint():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
     
-    # FIX 2: True Force Sync (Scans Products, not History)
+    # FIX: Logic was unreachable before. Now defined correctly.
     def run_full_force_sync():
         with app.app_context():
             log_event('Inventory', 'Info', "Starting TRUE Force Sync (Scanning ALL Storable Products)...", shop_url=shop_url)
@@ -1568,11 +1568,12 @@ def sync_inventory_endpoint():
             sync_zero = get_config('sync_zero_stock', False, shop_url=shop_url)
             combine_committed = get_config('combine_committed', False, shop_url=shop_url)
 
-            # Search ALL saleable products directly (ignoring move history)
+            # 1. Fetch ALL Storable Products (Not just recent moves)
             domain = [['type', 'in', ['product', 'consu']], ['active', '=', True], ['sale_ok', '=', True]]
             if company_id: domain.append(['company_id', '=', int(company_id)])
             
             try:
+                # We fetch IDs of ALL storable products
                 all_product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                     'product.product', 'search', [domain])
             except Exception as e:
@@ -1585,7 +1586,7 @@ def sync_inventory_endpoint():
             count = 0
             updates = 0
             
-            # Process in batches
+            # 2. Process in batches
             BATCH_SIZE = 50
             for i in range(0, total_items, BATCH_SIZE):
                 batch_ids = all_product_ids[i:i + BATCH_SIZE]
@@ -1606,11 +1607,21 @@ def sync_inventory_endpoint():
                     shopify_info = get_shopify_variant_inv_by_sku(sku)
                     if not shopify_info: continue
 
-                    # (Your existing logic for calculating final_qty goes here)
-                    # For simplicity, assuming standard map:
-                    final_qty = int(total_odoo) 
-                    
-                    if int(shopify_info['qty']) != final_qty:
+                    committed_qty = 0
+                    if combine_committed:
+                        try:
+                            # GraphQL check for committed
+                            gid_query = '{ productVariants(first: 1, query: "sku:%s") { edges { node { inventoryItem { inventoryLevel(locationId: "gid://shopify/Location/%s") { quantities(names: ["committed"]) { quantity } } } } } } }' % (sku, os.getenv('SHOPIFY_WAREHOUSE_ID', ''))
+                            client = shopify.GraphQL()
+                            res = json.loads(client.execute(gid_query))
+                            qs = res['data']['productVariants']['edges'][0]['node']['inventoryItem']['inventoryLevel']['quantities']
+                            if qs: committed_qty = int(qs[0]['quantity'])
+                        except: pass
+
+                    final_qty = int(total_odoo) + (committed_qty if combine_committed else 0)
+                    current_shopify = int(shopify_info['qty'])
+
+                    if current_shopify != final_qty:
                         try:
                             shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=shopify_info['inventory_item_id'], available=final_qty)
                             updates += 1
@@ -1624,7 +1635,6 @@ def sync_inventory_endpoint():
 
             log_event('Inventory', 'Success', f"Force Sync Complete: Checked {count} items, Updated {updates} items.", shop_url=shop_url)
 
-    # Start the thread
     threading.Thread(target=run_full_force_sync).start()
     return jsonify({"message": f"Full Inventory Sync Started for {shop_url}"})
     
@@ -1785,17 +1795,21 @@ def trigger_duplicate_scan():
 def manual_order_fetch():
     shop_url = request.args.get('shop')
     
-    # FIX 3: Use the official library for reliable auth (fixes "No Order" / 401 issues)
+    # DEBUG LOGGING (Check Render Logs if this fails)
+    print(f"DEBUG: Starting Manual Fetch for {shop_url}", flush=True)
+
     if not setup_shopify_session(shop_url): 
+        print("DEBUG: Auth Failed - Could not setup session", flush=True)
         return jsonify({"orders": [], "error": "Could not authenticate with Shopify"})
     
     odoo = get_odoo_connection(shop_url)
     
     try:
-        # Use library to find last 10 orders
+        # FIX: Using library instead of raw requests to avoid 401/404 errors
         orders = shopify.Order.find(limit=10, status='any')
-        print(f"DEBUG: Fetched {len(orders)} orders via Library.")
+        print(f"DEBUG: Fetched {len(orders)} orders via Library.", flush=True)
     except Exception as e:
+        print(f"CRITICAL API ERROR: {str(e)}", flush=True)
         return jsonify({"orders": [], "error": f"API Error: {str(e)}"})
     
     mapped_orders = []
@@ -1808,7 +1822,6 @@ def manual_order_fetch():
             if exists: status = "Synced"
         except: pass
         
-        # Check cancelled status
         if getattr(o, 'cancelled_at', None): status = "Cancelled"
         
         mapped_orders.append({
@@ -1819,7 +1832,6 @@ def manual_order_fetch():
             'odoo_status': status
         })
     return jsonify({"orders": mapped_orders})
-    
 
 @app.route('/sync/orders/import_batch', methods=['POST'])
 def import_selected_orders():
@@ -2029,7 +2041,7 @@ def sync_images_only_manual(shop_url):
         log_event('Image Sync', 'Info', "Starting Optimized Image Sync...", shop_url=shop_url)
         company_id = get_config('odoo_company_id', shop_url=shop_url)
         
-        # FIX 1: Added sale_ok=True. This matches your Product Sync logic (1921 items).
+        # FIX: Added sale_ok=True. This matches your Product Sync logic.
         domain = [['type', 'in', ['product', 'consu']], ['active', '=', True], ['sale_ok', '=', True]]
         if company_id: domain.append(['company_id', '=', int(company_id)])
         
@@ -2119,7 +2131,7 @@ def sync_images_only_manual(shop_url):
             if processed % 50 == 0:
                 log_event('Image Sync', 'Info', f"Synced images for {processed}/{real_count} products...", shop_url=shop_url)
 
-        log_event('Image Sync', 'Success', f"Done. Updated {updates} images.", shop_url=shop_url)
+        log_event('Image Sync', 'Success', f"Done. Updated {updates} images.", shop_url=shop_url))
 
 
 def emergency_purge_junk_products(shop_url):
