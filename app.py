@@ -1288,9 +1288,14 @@ def sync_odoo_fulfillments(shop_url):
 
 def scheduled_inventory_sync(shop_url):
     with app.app_context():
-        # You must also update perform_inventory_sync to accept shop_url!
+        # Log start
+        # log_event('Inventory', 'Info', "Starting periodic inventory check...", shop_url=shop_url)
+        
+        # Run sync
         c, u = perform_inventory_sync(shop_url, lookback_minutes=35) 
-        if u > 0: log_event('Inventory', 'Success', f"Auto-Sync: Checked {c}, Updated {u}")
+        
+        # Always log result, even if 0 updates, so you know it worked
+        log_event('Inventory', 'Success', f"Sync Run: Checked {c} items, Updated {u} items.", shop_url=shop_url)
 
 # ==========================================
 # SHOPIFY OAUTH ROUTES
@@ -1860,7 +1865,12 @@ def sync_images_only_manual(shop_url):
         log_event('Image Sync', 'Info', "Starting Memory-Safe Image Sync...")
         
         company_id = get_config('odoo_company_id')
-        domain = [['type', 'in', ['product', 'consu']]]
+        
+        # FIX: Added ['active', '=', True] to ignore archived products
+        domain = [
+            ['type', 'in', ['product', 'consu']],
+            ['active', '=', True] 
+        ]
         if company_id: domain.append(['company_id', '=', int(company_id)])
         
         try:
