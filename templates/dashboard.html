@@ -456,18 +456,25 @@ function fetchLocations(companyId) {
     const list = document.getElementById('locationList');
     if(!list) return;
     list.innerHTML = '<div class="spinner-border spinner-border-sm"></div> Loading...';
+    
     fetch(`/api/odoo/locations?company_id=${companyId}&shop=${CURRENT_SHOP_URL}`)
         .then(r => r.json())
         .then(data => {
             if(data.error) { list.innerHTML = `<span class="text-danger">${data.error}</span>`; return; }
-            if (!Array.isArray(data) || data.length === 0) { list.innerHTML = '<span class="text-warning">No locations found.</span>'; return; }
             
-            const savedLocs = SAVED_SETTINGS.locations || [];
+            // Use the correct key from your SAVED_SETTINGS
+            const savedLocs = SAVED_SETTINGS.inventory_locations || []; 
+            
             const items = data.map(loc => {
+                // Check if this location ID is in the saved array
                 const isChecked = savedLocs.includes(loc.id) ? 'checked' : '';
-                return `<div class="form-check"><input class="form-check-input loc-check" type="checkbox" value="${loc.id}" id="loc_${loc.id}" ${isChecked}><label class="form-check-label small" for="loc_${loc.id}">${loc.name}</label></div>`;
+                return `
+                    <div class="form-check">
+                        <input class="form-check-input loc-check" type="checkbox" value="${loc.id}" id="loc_${loc.id}" ${isChecked}>
+                        <label class="form-check-label small" for="loc_${loc.id}">${loc.name}</label>
+                    </div>`;
             });
-            list.innerHTML = items.join('');
+            list.innerHTML = items.join('') || '<span class="text-warning">No locations found.</span>';
         });
 }
 
