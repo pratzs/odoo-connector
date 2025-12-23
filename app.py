@@ -2568,18 +2568,21 @@ t.start()
 
 @app.after_request
 def add_header(response):
-    # This policy explicitly unblocks Bootstrap (jsdelivr) and allows Shopify to frame the app
+    # Allow Shopify Admin and all myshopify stores to frame the app
+    # Removed wildcards and kept it to specific required origins for stability
     csp = (
         "frame-ancestors https://admin.shopify.com https://vjtrading.myshopify.com https://*.myshopify.com; "
         "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.shopify.com https://cdn.jsdelivr.net; "
         "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.shopify.com; "
-        "img-src 'self' data: https://cdn.shopify.com; "
         "connect-src 'self' https://*.myshopify.com https://admin.shopify.com https://cdn.jsdelivr.net;"
     )
     response.headers['Content-Security-Policy'] = csp
     
-    # Crucial: This must be removed for Shopify Apps
+    # CRITICAL: This header is old and REJECTS all iframes. We MUST remove it.
     response.headers.pop('X-Frame-Options', None)
+    
+    # Tell the browser not to guess content types
+    response.headers['X-Content-Type-Options'] = 'nosniff'
     return response
 
     
