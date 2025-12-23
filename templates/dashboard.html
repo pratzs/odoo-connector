@@ -10,7 +10,7 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
     
     <script src="https://cdn.shopify.com/static/frontend/app-bridge-next/latest/app-bridge.js"></script>
-
+</head>
     <style>
         :root {
             --p-surface: #f1f2f4;
@@ -102,7 +102,7 @@
             background: #1e1e1e;
         }
     </style>
-</head>
+
 <body>
 <ui-nav-menu>
     <a href="#overview" rel="home">Overview & Logs</a>
@@ -629,6 +629,13 @@ function handleSidebarNavigation() {
         document.getElementById('btn-overview').classList.add('active');
     }
 }
+
+// THIS PART WAS MISSING:
+window.addEventListener('hashchange', handleSidebarNavigation);
+window.addEventListener('load', handleSidebarNavigation);
+
+function switchTab(id) { window.location.hash = id; }
+
 const selectAll = document.getElementById('selectAllOrders');
 if(selectAll) selectAll.addEventListener('change', function() { document.querySelectorAll('.order-select').forEach(cb => cb.checked = this.checked); });
         
