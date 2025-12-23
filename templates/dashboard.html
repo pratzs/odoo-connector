@@ -380,36 +380,41 @@ function formatLocalTime(utcString) {
     } catch (e) { return utcString; }
 }
 
-// --- INITIALIZATION ---
 document.addEventListener("DOMContentLoaded", function() {
-    const setCheck = (id, val) => { const el = document.getElementById(id); if(el) el.checked = !!val; };
-    const setVal = (id, val) => { const el = document.getElementById(id); if(el) el.value = val; };
+            const setCheck = (id, val) => { const el = document.getElementById(id); if(el) el.checked = !!val; };
+            const setVal = (id, val) => { const el = document.getElementById(id); if(el) el.value = val; };
 
-    setCheck('prodAutoCreate', SAVED_SETTINGS.prod_auto_create);
-    setCheck('prodAutoPublish', SAVED_SETTINGS.prod_auto_publish);
-    setCheck('prodSyncImages', SAVED_SETTINGS.prod_sync_images);
-    setCheck('fieldTags', SAVED_SETTINGS.prod_sync_tags);
-    setCheck('fieldMetaVendorCode', SAVED_SETTINGS.prod_sync_meta_vendor_code);
-    setCheck('fieldPrice', SAVED_SETTINGS.prod_sync_price);
-    setCheck('fieldTitle', SAVED_SETTINGS.prod_sync_title);
-    setCheck('fieldDesc', SAVED_SETTINGS.prod_sync_desc);
-    setCheck('fieldProductType', SAVED_SETTINGS.prod_sync_type);
-    setCheck('fieldVendor', SAVED_SETTINGS.prod_sync_vendor);
-    setCheck('orderSyncTax', SAVED_SETTINGS.order_sync_tax);
-    setCheck('checkZeroStock', SAVED_SETTINGS.sync_zero);
-    setCheck('checkCommitted', SAVED_SETTINGS.combine_committed);
-    setVal('invType', SAVED_SETTINGS.field || 'qty_available');
-    setVal('custSyncDirection', SAVED_SETTINGS.cust_direction || 'bidirectional');
-    setCheck('custAutoSync', SAVED_SETTINGS.cust_auto_sync);
-    setCheck('custSyncTagsSwitch', SAVED_SETTINGS.cust_sync_tags);
-    setVal('custWhitelistTags', SAVED_SETTINGS.cust_whitelist_tags || '');
-    setVal('custBlacklistTags', SAVED_SETTINGS.cust_blacklist_tags || '');
+            // Products
+            setCheck('prodAutoCreate', SAVED_SETTINGS.prod_auto_create);
+            setCheck('prodAutoPublish', SAVED_SETTINGS.prod_auto_publish);
+            setCheck('prodSyncImages', SAVED_SETTINGS.prod_sync_images);
+            setCheck('fieldTags', SAVED_SETTINGS.prod_sync_tags);
+            setCheck('fieldMetaVendorCode', SAVED_SETTINGS.prod_sync_meta_vendor_code);
+            setCheck('fieldPrice', SAVED_SETTINGS.prod_sync_price);
+            setCheck('fieldTitle', SAVED_SETTINGS.prod_sync_title);
+            setCheck('fieldDesc', SAVED_SETTINGS.prod_sync_desc);
+            setCheck('fieldProductType', SAVED_SETTINGS.prod_sync_type);
+            setCheck('fieldVendor', SAVED_SETTINGS.prod_sync_vendor);
 
-    toggleTagFields();
-    
-    if(CURRENT_SHOP_URL) fetchCompanies();
-    handleSidebarNavigation(); // Run once on load
-});
+            // Orders
+            setCheck('orderSyncTax', SAVED_SETTINGS.order_sync_tax);
+
+            // Inventory (FIXED: Mapping to correct keys from your app.py)
+            setCheck('checkZeroStock', SAVED_SETTINGS.sync_zero_stock); // Changed from sync_zero
+            setCheck('checkCommitted', SAVED_SETTINGS.combine_committed);
+            setVal('invType', SAVED_SETTINGS.inventory_field || 'qty_available'); // Changed from field
+
+            // Customers
+            setVal('custSyncDirection', SAVED_SETTINGS.cust_direction || 'bidirectional');
+            setCheck('custAutoSync', SAVED_SETTINGS.cust_auto_sync);
+            setCheck('custSyncTagsSwitch', SAVED_SETTINGS.cust_sync_tags);
+            setVal('custWhitelistTags', SAVED_SETTINGS.cust_whitelist_tags || '');
+            setVal('custBlacklistTags', SAVED_SETTINGS.cust_blacklist_tags || '');
+
+            toggleTagFields(); 
+            if(CURRENT_SHOP_URL) fetchCompanies();
+            handleSidebarNavigation(); // Now runs correctly after settings are restored
+        });
 
 function toggleTagFields() {
     const toggle = document.getElementById('custSyncTagsSwitch');
