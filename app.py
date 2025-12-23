@@ -2566,18 +2566,6 @@ print("**************************************************")
 t = threading.Thread(target=run_schedule, daemon=True)
 t.start()
 
-@app.after_request
-def add_header(response):
-    # This policy allows Bootstrap, Shopify Scripts, and Framing by Shopify Admin
-    csp = (
-        "frame-ancestors https://admin.shopify.com https://vjtrading.myshopify.com https://*.myshopify.com; "
-        "script-src 'self' 'unsafe-inline' https://cdn.shopify.com https://cdn.jsdelivr.net; "
-        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
-        "connect-src 'self' https://*.myshopify.com https://admin.shopify.com https://cdn.jsdelivr.net;"
-    )
-    response.headers['Content-Security-Policy'] = csp
-    response.headers.pop('X-Frame-Options', None)
-    return response
     
 if __name__ == '__main__':
     app.run(debug=True)
