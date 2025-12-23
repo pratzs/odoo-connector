@@ -2568,14 +2568,17 @@ t.start()
 
 @app.after_request
 def add_header(response):
-    # Allow framing by Shopify
-    response.headers['Content-Security-Policy'] = (
-        "frame-ancestors https://admin.shopify.com https://*.myshopify.com; "
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.shopify.com https://cdn.jsdelivr.net; "
-        "connect-src 'self' https://*.myshopify.com https://admin.shopify.com;"
+    # This format is compatible with all modern browsers for Shopify embedding
+    csp = (
+        "frame-ancestors https://admin.shopify.com https://vjtrading.myshopify.com https://*.myshopify.com; "
+        "script-src 'self' 'unsafe-inline' https://cdn.shopify.com; "
+        "connect-src 'self' https://*.myshopify.com https://admin.shopify.com https://cdn.jsdelivr.net;"
     )
-    # Essential: Allow embedding
+    response.headers['Content-Security-Policy'] = csp
+    
+    # Force removal of headers that block iframes
     response.headers.pop('X-Frame-Options', None)
+    response.headers['X-Content-Type-Options'] = 'nosniff'
     return response
     
 if __name__ == '__main__':
