@@ -617,45 +617,25 @@ function runBatchImport() {
 
 // --- SIDEBAR & HASH NAVIGATION ---
 function handleSidebarNavigation() {
-    const hash = window.location.hash;
+    const hash = window.location.hash || '#overview';
     
-    // Deactivate all custom tab contents (for Polaris-style tabs if used)
+    // 1. Hide all tab content areas and remove 'active' from buttons
     document.querySelectorAll('.tab-content-area').forEach(el => el.classList.remove('active'));
     document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
 
+    // 2. Open the correct section based on the hash
     if (hash === '#settings') {
-        const settingsTab = document.querySelector('a[href="#settings"]');
-        if (settingsTab) {
-            new bootstrap.Tab(settingsTab).show();
-            // Also update the custom Polaris tab styling
-            const polarisBtn = Array.from(document.querySelectorAll('.tab-btn')).find(b => b.innerText.includes('Config'));
-            if(polarisBtn) polarisBtn.classList.add('active');
-            const targetContent = document.getElementById('tab-settings');
-            if(targetContent) targetContent.classList.add('active');
-        }
+        document.getElementById('tab-settings').classList.add('active');
+        document.getElementById('btn-settings').classList.add('active');
     } else if (hash === '#maintenance') {
-        const maintenanceTab = document.querySelector('a[href="#maintenance"]');
-        if (maintenanceTab) {
-            new bootstrap.Tab(maintenanceTab).show();
-            const polarisBtn = Array.from(document.querySelectorAll('.tab-btn')).find(b => b.innerText.includes('Maint'));
-            if(polarisBtn) polarisBtn.classList.add('active');
-            const targetContent = document.getElementById('tab-maintenance');
-            if(targetContent) targetContent.classList.add('active');
-        }
+        document.getElementById('tab-maintenance').classList.add('active');
+        document.getElementById('btn-maintenance').classList.add('active');
     } else {
-        const overviewTab = document.querySelector('a[href="#live-logs"]');
-        if (overviewTab) {
-            new bootstrap.Tab(overviewTab).show();
-            const polarisBtn = Array.from(document.querySelectorAll('.tab-btn')).find(b => b.innerText.includes('Over'));
-            if(polarisBtn) polarisBtn.classList.add('active');
-            const targetContent = document.getElementById('tab-overview');
-            if(targetContent) targetContent.classList.add('active');
-        }
+        // Default to Overview
+        document.getElementById('tab-overview').classList.add('active');
+        document.getElementById('btn-overview').classList.add('active');
     }
 }
-
-window.addEventListener('hashchange', handleSidebarNavigation);
-
 const selectAll = document.getElementById('selectAllOrders');
 if(selectAll) selectAll.addEventListener('change', function() { document.querySelectorAll('.order-select').forEach(cb => cb.checked = this.checked); });
         
