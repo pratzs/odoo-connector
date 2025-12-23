@@ -1182,11 +1182,14 @@ def perform_inventory_sync(shop_url, lookback_minutes=60):
 
         # 2. FIX: Auto-Detect Shopify Location
         location_id = SHOPIFY_LOCATION_ID
-        try:
-            if not location_id or location_id == 0:
+        if not location_id or location_id == 0:
+            try:
+                setup_shopify_session(shop_url) # Ensure session is active
                 locs = shopify.Location.find()
-                if locs: location_id = locs[0].id
-        except: pass
+                if locs:
+                    location_id = locs[0].id
+            except Exception as e:
+                print(f"Location detection failed: {e}")
         
         if not location_id:
              log_event('Inventory', 'Error', "Scheduler: No Location ID found.", shop_url=shop_url)
