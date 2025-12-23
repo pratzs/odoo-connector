@@ -1526,32 +1526,6 @@ def home():
                            api_key=SHOPIFY_API_KEY, 
                            config=config)
 
-    # --- 2. SHOW MAIN DASHBOARD (Tabbed Interface) ---
-    
-    # A. Build the Configuration Object
-    config = {
-        'odoo_url': shop.odoo_url,
-        'odoo_db': shop.odoo_db,
-        'odoo_username': shop.odoo_username,
-        'odoo_password': shop.odoo_password,
-        'odoo_company_id': shop.odoo_company_id
-    }
-
-    # Load dynamic settings
-    settings = AppSetting.query.filter_by(shop_url=shop_url).all()
-    for s in settings:
-        try:
-            config[s.key] = json.loads(s.value)
-        except:
-            config[s.key] = s.value
-
-    # B. Render the Dashboard
-return render_template('dashboard.html', 
-                           shop_url=shop_url, 
-                           shop_origin=shop_url, 
-                           api_key=SHOPIFY_API_KEY, 
-                           config=config)
-
 # --- NEW ROUTE: Save Settings from Dashboard Tab ---
 @app.route('/api/settings/save', methods=['POST'])
 def save_settings_endpoint():
