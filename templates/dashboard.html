@@ -3,13 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="shopify-api-key" content="{{ api_key }}" />
     <title>Odoo Connector Dashboard</title>
     
+    <meta name="shopify-api-key" content="{{ api_key }}" />
+    <script src="https://cdn.shopify.com/static/frontend/app-bridge-next/latest/app-bridge.js"></script>
+
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
-    
-    <script src="https://cdn.shopify.com/static/frontend/app-bridge-next/latest/app-bridge.js"></script>
 
     <style>
         :root {
@@ -21,89 +21,22 @@
             --p-border: #e1e3e5;
             --p-shadow-card: 0px 0px 5px rgba(23, 24, 24, 0.05), 0px 1px 2px rgba(0, 0, 0, 0.15);
         }
-
-        body {
-            background-color: var(--p-surface);
-            font-family: -apple-system, BlinkMacSystemFont, "San Francisco", "Segoe UI", Roboto, sans-serif;
-            color: var(--p-text);
-            font-size: 14px;
-            padding: 20px;
-        }
-
-        /* --- CARDS --- */
-        .card {
-            border: none;
-            border-radius: 8px;
-            box-shadow: var(--p-shadow-card);
-            background: white;
-            margin-bottom: 20px;
-        }
-        
-        .section-header {
-            font-weight: 600;
-            font-size: 15px;
-            border-bottom: 1px solid var(--p-border);
-            padding-bottom: 10px;
-            margin-bottom: 15px;
-            color: var(--p-text);
-        }
-
-        /* --- TABS --- */
-        .custom-tabs {
-            display: flex;
-            background: white;
-            border-bottom: 1px solid #dcdcdc;
-            padding: 0 20px;
-            margin-bottom: 20px;
-            border-radius: 8px;
-            box-shadow: var(--p-shadow-card);
-        }
-        .tab-btn {
-            padding: 15px 20px;
-            cursor: pointer;
-            font-weight: 500;
-            color: #6d7175;
-            border-bottom: 3px solid transparent;
-            margin-bottom: -1px;
-        }
-        .tab-btn:hover { color: var(--p-primary); }
-        .tab-btn.active {
-            color: var(--p-primary);
-            border-bottom: 3px solid var(--p-primary);
-            font-weight: 600;
-        }
+        body { background-color: var(--p-surface); font-family: -apple-system, sans-serif; color: var(--p-text); font-size: 14px; padding: 20px; }
+        .card { border: none; border-radius: 8px; box-shadow: var(--p-shadow-card); background: white; margin-bottom: 20px; }
+        .section-header { font-weight: 600; font-size: 15px; border-bottom: 1px solid var(--p-border); padding-bottom: 10px; margin-bottom: 15px; color: var(--p-text); }
+        .custom-tabs { display: flex; background: white; border-bottom: 1px solid #dcdcdc; padding: 0 20px; margin-bottom: 20px; border-radius: 8px; box-shadow: var(--p-shadow-card); }
+        .tab-btn { padding: 15px 20px; cursor: pointer; font-weight: 500; color: #6d7175; border-bottom: 3px solid transparent; margin-bottom: -1px; }
+        .tab-btn.active { color: var(--p-primary); border-bottom: 3px solid var(--p-primary); font-weight: 600; }
         .tab-content-area { display: none; }
         .tab-content-area.active { display: block; }
-
-        /* --- BUTTONS (Shopify Style) --- */
         .btn { border-radius: 4px; font-weight: 500; font-size: 13px; padding: 8px 16px; border: 1px solid transparent; }
-        
-        .btn-primary { background-color: #303030; border-color: #303030; } /* Shopify Black */
-        .btn-primary:hover { background-color: #1a1a1a; border-color: #1a1a1a; }
-
-        .btn-secondary { background-color: white; color: var(--p-text); border-color: var(--p-border); box-shadow: 0 1px 0 rgba(0,0,0,0.05); }
-        .btn-secondary:hover { background-color: #f6f6f7; color: var(--p-text); border-color: #c9cccf; }
-
-        .btn-success { background-color: var(--p-primary); border-color: var(--p-primary); }
-        .btn-success:hover { background-color: var(--p-primary-hover); border-color: var(--p-primary-hover); }
-
-        .btn-danger, .btn-critical { background-color: #d82c0d; border-color: #d82c0d; color: white; }
-        
-        /* --- FORMS --- */
+        .btn-primary { background-color: #303030; color: white; }
+        .btn-secondary { background-color: white; color: var(--p-text); border-color: var(--p-border); }
+        .btn-success { background-color: var(--p-primary); color: white; }
         .form-label-sm { font-weight: 500; margin-bottom: 4px; display: block; }
-        .form-control, .form-select { border-color: var(--p-border); font-size: 14px; }
-        .form-check-input:checked { background-color: var(--p-primary); border-color: var(--p-primary); }
-
-        /* --- LOGS --- */
-        .log-frame-container {
-            height: 600px;
-            border: 1px solid var(--p-border);
-            border-radius: 4px;
-            background: #1e1e1e;
-        }
+        .log-frame-container { height: 600px; border: 1px solid var(--p-border); background: #1e1e1e; }
     </style>
 </head>
-
 <body>
 <ui-nav-menu>
     <a href="#overview" rel="home">Overview & Logs</a>
