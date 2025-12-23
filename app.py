@@ -2566,6 +2566,22 @@ print("**************************************************")
 t = threading.Thread(target=run_schedule, daemon=True)
 t.start()
 
+@app.after_request
+def add_header(response):
+    # This policy explicitly unblocks Bootstrap (jsdelivr) and allows Shopify to frame the app
+    csp = (
+        "frame-ancestors https://admin.shopify.com https://vjtrading.myshopify.com https://*.myshopify.com; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.shopify.com https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.shopify.com; "
+        "img-src 'self' data: https://cdn.shopify.com; "
+        "connect-src 'self' https://*.myshopify.com https://admin.shopify.com https://cdn.jsdelivr.net;"
+    )
+    response.headers['Content-Security-Policy'] = csp
+    
+    # Crucial: This must be removed for Shopify Apps
+    response.headers.pop('X-Frame-Options', None)
+    return response
+
     
 if __name__ == '__main__':
     app.run(debug=True)
