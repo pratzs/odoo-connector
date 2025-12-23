@@ -1437,10 +1437,12 @@ def home():
     Hybrid Dashboard: Handles Auth, Connect Form, and Main Tabbed Dashboard.
     """
     shop_url = request.args.get('shop')
-    if not shop_url: return "No shop provided."
+    if not shop_url: 
+        return "No shop provided."
     
     shop = Shop.query.filter_by(shop_url=shop_url).first()
-    if not shop: return redirect(url_for('install', shop=shop_url))
+    if not shop: 
+        return redirect(url_for('install', shop=shop_url))
 
     # Check for 'mode=connect' to force the connect form
     mode = request.args.get('mode')
@@ -1452,7 +1454,11 @@ def home():
         <html>
         <head>
             <title>Connect Odoo</title>
-            <script src="https://unpkg.com/@shopify/app-bridge-utils"></script>
+            <script 
+              src="https://cdn.shopify.com/static/frontend/app-bridge-next/latest/app-bridge.js"
+              data-api-key="{{ api_key }}"
+              data-shop-origin="{{ shop_url }}"
+            ></script>
             <style>
                 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 40px; background: #f4f6f8; }
                 .card { background: white; border: 1px solid #dfe3e8; padding: 30px; border-radius: 8px; max-width: 500px; margin: 0 auto; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
@@ -1463,33 +1469,22 @@ def home():
                 .back-link { display: block; text-align: center; margin-top: 20px; color: #5c5f62; text-decoration: none; }
                 .back-link:hover { text-decoration: underline; }
             </style>
-            <script>
-                var AppBridge = window['app-bridge'];
-                var createApp = AppBridge.default;
-                var app = createApp({ apiKey: '{{ api_key }}', shopOrigin: '{{ shop_url }}' });
-            </script>
         </head>
         <body>
             <div class="card">
                 <h2>🔌 Connect Odoo to Shopify</h2>
                 <p style="text-align: center; color: #6d7175;">Update your credentials below.</p>
                 <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
-                
                 <form action="/save_settings" method="POST">
                     <input type="hidden" name="shop_url" value="{{ shop_url }}">
-                    
                     <label>Odoo URL</label>
                     <input type="text" name="odoo_url" value="{{ odoo_url }}" placeholder="https://..." required>
-                    
                     <label>Database Name</label>
                     <input type="text" name="odoo_db" value="{{ odoo_db }}" required>
-                    
                     <label>Username (Email)</label>
                     <input type="text" name="odoo_user" value="{{ odoo_user }}" required>
-                    
                     <label>Password (Leave empty to keep unchanged)</label>
                     <input type="password" name="odoo_pass" placeholder="••••••••">
-                    
                     <button type="submit">Save & Connect</button>
                 </form>
                 {% if has_creds %}
@@ -1500,13 +1495,36 @@ def home():
         </html>
         """
         return render_template_string(html, 
-            api_key=os.getenv('SHOPIFY_API_KEY'), 
+            api_key=SHOPIFY_API_KEY, 
             shop_url=shop.shop_url,
             odoo_url=shop.odoo_url or '',
             odoo_db=shop.odoo_db or '',
             odoo_user=shop.odoo_username or '',
             has_creds=(shop.odoo_url is not None)
         )
+
+    # --- 2. SHOW MAIN DASHBOARD (Tabbed Interface) ---
+    config = {
+        'odoo_url': shop.odoo_url,
+        'odoo_db': shop.odoo_db,
+        'odoo_username': shop.odoo_username,
+        'odoo_company_id': shop.odoo_company_id
+    }
+
+    settings = AppSetting.query.filter_by(shop_url=shop_url).all()
+    for s in settings:
+        try:
+            config[s.key] = json.loads(s.value)
+        except:
+            config[s.key] = s.value
+
+    # B. Render the Dashboard (Indented Fix)
+    clean_shop = shop_url.replace("https://", "").replace("http://", "").split('/')[0]
+    return render_template('dashboard.html', 
+                           shop_url=shop_url, 
+                           shop_origin=clean_shop, 
+                           api_key=SHOPIFY_API_KEY, 
+                           config=config)
 
     # --- 2. SHOW MAIN DASHBOARD (Tabbed Interface) ---
     
@@ -2573,6 +2591,14 @@ print("**************************************************")
 # Start scheduler thread
 t = threading.Thread(target=run_schedule, daemon=True)
 t.start()
+
+@app.after_request
+def add_header(response):
+    # Allow Shopify to frame the app
+    response.headers['Content-Security-Policy'] = "frame-ancestors https://admin.shopify.com https://*.myshopify.com;"
+    # Remove any headers that might block framing
+    response.headers.pop('X-Frame-Options', None)
+    return response
     
 if __name__ == '__main__':
     app.run(debug=True)
