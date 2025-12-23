@@ -1833,10 +1833,28 @@ def product_webhook():
     odoo_client = get_odoo_connection(shop_url)
     if not odoo_client: return "Odoo Not Connected", 200
 
-    # 4. Pass client explicitly (You need to update process_product_data to accept the client object)
-    # Refactor process_product_data to take (data, odoo_client) arguments
+    # 4. Process Data & Log Success
+    data = request.json
+    product_title = data.get('title', 'Unknown Product')
+    
     with app.app_context(): 
-        process_product_data(request.json, odoo_client) # <--- Pass the client!
+        try:
+            process_product_data(data, odoo_client)
+            
+            # --- NEW: Add Log Entry for Webhook ---
+            log_event(
+                entity='Product Sync',
+                status='Success',
+                message=f"Webhook Sync: '{product_title}' updated from Shopify to Odoo.",
+                shop_url=shop_url
+            )
+        except Exception as e:
+            log_event(
+                entity='Product Sync',
+                status='Error',
+                message=f"Webhook Failed for '{product_title}': {str(e)}",
+                shop_url=shop_url
+            )
     
     return "Received", 200
 
@@ -1926,30 +1944,27 @@ def import_selected_orders():
             success, _ = process_order_data(res.json().get('order'), odoo)
             if success: synced += 1
     return jsonify({"message": f"Batch Complete. Synced: {synced}"})
+    
 
 @app.route('/webhook/orders', methods=['POST'])
 @app.route('/webhook/orders/updated', methods=['POST'])
-@app.route('/webhook/orders/cancelled', methods=['POST']) # <--- Make sure this line is here
+@app.route('/webhook/orders/cancelled', methods=['POST'])
 def order_webhook():
-    """
-    HYBRID MODE + CANCELLATIONS:
-    1. 'orders/create'    -> ALLOWED (Create)
-    2. 'orders/cancelled' -> ALLOWED (Cancel)
-    3. 'orders/updated'   -> BLOCKED (Prevent Duplicates)
-    """
     hmac_header = request.headers.get('X-Shopify-Hmac-Sha256')
     if not verify_shopify(request.get_data(), hmac_header):
         return "Unauthorized", 401
 
     topic = request.headers.get('X-Shopify-Topic', '')
     shop_url = request.headers.get('X-Shopify-Shop-Domain')
+    data = request.json
+    order_num = data.get('name') or data.get('order_number')
 
     odoo_client = get_odoo_connection(shop_url)
 
     with app.app_context():
         if topic == 'orders/cancelled':
-            # Needs process_cancellation implementation with client
-            process_cancellation(request.json) 
+            process_cancellation(data) 
+            log_event('Order', 'Info', f"Webhook: Order {order_num} was cancelled in Shopify.", shop_url=shop_url)
             return "Cancellation Processed", 200
             
         elif topic == 'orders/updated':
@@ -1957,7 +1972,23 @@ def order_webhook():
 
         # Default to Create logic
         if odoo_client:
-            process_order_data(request.json, odoo_client)
+            try:
+                process_order_data(data, odoo_client)
+                
+                # --- THIS IS THE FIX ---
+                log_event(
+                    entity='Order', 
+                    status='Success', 
+                    message=f"Automatic Sync: Order {order_num} successfully synced to Odoo.", 
+                    shop_url=shop_url
+                )
+            except Exception as e:
+                log_event(
+                    entity='Order', 
+                    status='Error', 
+                    message=f"Automatic Sync Failed for {order_num}: {str(e)}", 
+                    shop_url=shop_url
+                )
 
     return "Received", 200
     
