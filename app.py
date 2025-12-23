@@ -142,7 +142,14 @@ def set_config(key, value):
         if not setting:
             setting = AppSetting(shop_url=shop_url, key=key)
             db.session.add(setting)
-        setting.value = json.dumps(value)
+        
+        # Only dump to JSON if it's a list (like inventory_locations)
+        # Otherwise, save simple strings/booleans as strings
+        if isinstance(value, (list, dict)):
+            setting.value = json.dumps(value)
+        else:
+            setting.value = str(value).lower() if isinstance(value, bool) else str(value)
+            
         db.session.commit()
         return True
     except Exception as e:
