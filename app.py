@@ -2568,21 +2568,18 @@ t.start()
 
 @app.after_request
 def add_header(response):
-    # Allow Shopify Admin and all myshopify stores to frame the app
-    # Removed wildcards and kept it to specific required origins for stability
-    csp = (
-        "frame-ancestors https://admin.shopify.com https://vjtrading.myshopify.com https://*.myshopify.com; "
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.shopify.com https://cdn.jsdelivr.net; "
-        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.shopify.com; "
-        "connect-src 'self' https://*.myshopify.com https://admin.shopify.com https://cdn.jsdelivr.net;"
-    )
+    # This format is the industry standard for Shopify App Bridge v4
+    # We use a single string to avoid parsing errors in Chrome/Edge
+    csp = "frame-ancestors https://admin.shopify.com https://*.myshopify.com https://vjtrading.myshopify.com;"
+    
     response.headers['Content-Security-Policy'] = csp
     
-    # CRITICAL: This header is old and REJECTS all iframes. We MUST remove it.
+    # CRITICAL: If this exists, it OVERRIDES the CSP and blocks the frame
     response.headers.pop('X-Frame-Options', None)
     
-    # Tell the browser not to guess content types
+    # Prevent browser from trying to MIME-sniff the content
     response.headers['X-Content-Type-Options'] = 'nosniff'
+    
     return response
 
     
