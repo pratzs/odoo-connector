@@ -2568,9 +2568,13 @@ t.start()
 
 @app.after_request
 def add_header(response):
-    # Allow Shopify to frame the app
-    response.headers['Content-Security-Policy'] = "frame-ancestors https://admin.shopify.com https://*.myshopify.com;"
-    # Remove any headers that might block framing
+    # This updated policy ensures Shopify can frame the app without security violations
+    response.headers['Content-Security-Policy'] = (
+        "frame-ancestors https://admin.shopify.com "
+        "https://*.myshopify.com "
+        "https://vjtrading.myshopify.com;"
+    )
+    # Remove older headers that conflict with modern framing
     response.headers.pop('X-Frame-Options', None)
     return response
     
