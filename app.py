@@ -1525,7 +1525,7 @@ def home():
             config[s.key] = s.value
 
     # B. Render the Dashboard
-    return render_template('dashboard.html', shop_url=shop_url, config=config)
+    return render_template('dashboard.html', shop_url=shop_url, shop_origin=shop_url, api_key=SHOPIFY_API_KEY, config=config)
 
 
 # --- NEW ROUTE: Save Settings from Dashboard Tab ---
