@@ -2566,21 +2566,6 @@ print("**************************************************")
 t = threading.Thread(target=run_schedule, daemon=True)
 t.start()
 
-@app.after_request
-def add_header(response):
-    # This format is the industry standard for Shopify App Bridge v4
-    # We use a single string to avoid parsing errors in Chrome/Edge
-    csp = "frame-ancestors https://admin.shopify.com https://*.myshopify.com https://vjtrading.myshopify.com;"
-    
-    response.headers['Content-Security-Policy'] = csp
-    
-    # CRITICAL: If this exists, it OVERRIDES the CSP and blocks the frame
-    response.headers.pop('X-Frame-Options', None)
-    
-    # Prevent browser from trying to MIME-sniff the content
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    
-    return response
 
     
 if __name__ == '__main__':
