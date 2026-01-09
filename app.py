@@ -2418,52 +2418,6 @@ def fix_variant_mess_task(shop_url):
 
         log_event('Cleanup', 'Success', f"Done. Scanned {processed}, Repaired {repaired}.", shop_url=shop_url)
 
-# --- ROUTES FOR MANUAL TOOLS ---
-
-@app.route('/maintenance/purge_junk', methods=['GET'])
-@require_shopify_session
-def trigger_purge():
-    shop_url = request.args.get('shop')
-    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
-    # CHANGED: Queue
-    q.enqueue(emergency_purge_junk_products, shop_url, job_timeout=600)
-    return jsonify({"message": "Emergency Purge Queued."})
-
-@app.route('/sync/images/manual', methods=['GET'])
-def trigger_manual_image_sync():
-    shop_url = request.args.get('shop')
-    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
-    # CHANGED: Queue
-    q.enqueue(sync_images_only_manual, shop_url, job_timeout=1800)
-    return jsonify({"message": "Image Sync Queued."})
-
-@app.route('/maintenance/diagnose_categories', methods=['GET'])
-def trigger_diagnose():
-    shop_url = request.args.get('shop')
-    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
-    # CHANGED: Queue
-    q.enqueue(check_for_corrupted_categories, shop_url, job_timeout=300)
-    return jsonify({"message": "Diagnostic Queued."})
-
-@app.route('/maintenance/add_hash_column', methods=['GET'])
-def maintenance_add_column():
-    try:
-        with app.app_context():
-            db.session.execute(text('ALTER TABLE product_map ADD COLUMN IF NOT EXISTS image_hash VARCHAR(32);'))
-            db.session.commit()
-            return jsonify({"message": "SUCCESS: Column 'image_hash' added to Supabase."})
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({"error": str(e)})
-
-@app.route('/maintenance/fix_variants', methods=['POST'])
-@require_shopify_session
-def trigger_fix_variants():
-    shop_url = request.args.get('shop')
-    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
-    # CHANGED: Queue
-    q.enqueue(fix_variant_mess_task, shop_url, job_timeout=900)
-    return jsonify({"message": "Variant Cleanup Queued."})
 
 # --- SYSTEM STARTUP ---
 print("**************************************************")
