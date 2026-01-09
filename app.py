@@ -1176,105 +1176,92 @@ def cleanup_shopify_products(shop_url):
     if archived_count > 0: 
         log_event('System', 'Success', f"Cleanup Complete. Archived {archived_count} duplicates.")
         
-def perform_inventory_sync(shop_url, lookback_minutes=60):
+def perform_inventory_sync(shop_url):
     """
-    Scheduled Inventory Sync: Fetches products modified in the last X minutes.
-    FIX: Now uses Auto-Detect Location + Correct Company ID + GraphQL Lookup.
+    Runs inside the Worker Process. 
     """
     with app.app_context():
-        # 1. Setup Connections
-        shop_record = Shop.query.filter_by(shop_url=shop_url).first()
-        if not shop_record: return 0, 0
+        log_event('Inventory', 'Info', "Starting Force Sync...", shop_url=shop_url)
         
         odoo = get_odoo_connection(shop_url)
-        if not odoo or not setup_shopify_session(shop_url): return 0, 0
+        if not odoo or not setup_shopify_session(shop_url): return
 
-        # 2. FIX: Auto-Detect Shopify Location
-        location_id = SHOPIFY_LOCATION_ID
-        if not location_id or location_id == 0:
-            try:
-                setup_shopify_session(shop_url) # Ensure session is active
-                locs = shopify.Location.find()
-                if locs:
-                    location_id = locs[0].id
-            except Exception as e:
-                print(f"Location detection failed: {e}")
-        
-        if not location_id:
-             log_event('Inventory', 'Error', "Scheduler: No Location ID found.", shop_url=shop_url)
-             return 0, 0
-
-        # 3. Settings & Company ID
-        company_id = shop_record.odoo_company_id
+        # Load Configs
+        company_id = get_config('odoo_company_id', shop_url=shop_url)
         target_locations = get_config('inventory_locations', [], shop_url=shop_url)
         target_field = get_config('inventory_field', 'qty_available', shop_url=shop_url)
         sync_zero = get_config('sync_zero_stock', False, shop_url=shop_url)
+        combine_committed = get_config('combine_committed', False, shop_url=shop_url)
 
-        # 4. Search for Recently Modified Products
-        time_limit = (datetime.utcnow() - timedelta(minutes=lookback_minutes)).strftime('%Y-%m-%d %H:%M:%S')
-        
-        domain = [
-            ['type', 'in', ['product', 'consu']], 
-            ['active', '=', True], 
-            ['sale_ok', '=', True],
-            ['write_date', '>=', time_limit]  # <--- The "Recent" Filter
-        ]
+        # 1. Fetch ALL Storable Products
+        domain = [['type', 'in', ['product', 'consu']], ['active', '=', True]]
         if company_id: domain.append(['company_id', '=', int(company_id)])
-
+        
         try:
-            product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search', [domain])
+            all_product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'product.product', 'search', [domain])
         except Exception as e:
-            log_event('Inventory', 'Error', f"Scheduler Search Failed: {e}", shop_url=shop_url)
-            return 0, 0
+            log_event('Inventory', 'Error', f"Odoo Search Failed: {e}", shop_url=shop_url)
+            return
 
-        if not product_ids:
-            # Log nothing if 0 items found (keeps logs clean)
-            return 0, 0
-
-        log_event('Inventory', 'Info', f"Scheduler: Found {len(product_ids)} items changed in last {lookback_minutes}m.", shop_url=shop_url)
-
-        # 5. Process Items
+        total_items = len(all_product_ids)
+        log_event('Inventory', 'Info', f"Found {total_items} items. Syncing...", shop_url=shop_url)
+        
         count = 0
         updates = 0
         
-        # Batch Read
+        # 2. Process in batches
         BATCH_SIZE = 50
-        for i in range(0, len(product_ids), BATCH_SIZE):
-            batch = product_ids[i:i + BATCH_SIZE]
+        for i in range(0, total_items, BATCH_SIZE):
+            batch_ids = all_product_ids[i:i + BATCH_SIZE]
+            
             try:
-                data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'read', [batch], {'fields': ['default_code']})
+                p_data_list = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+                    'product.product', 'read', [batch_ids], {'fields': ['default_code', 'uom_id', 'sh_is_secondary_unit']})
             except: continue
 
-            for p in data:
-                sku = p.get('default_code')
-                p_id = p['id']
+            for p_data in p_data_list:
+                p_id = p_data['id']
+                sku = p_data.get('default_code')
                 if not sku: continue
 
+                # Get Odoo Qty
                 total_odoo = odoo.get_total_qty_for_locations(p_id, target_locations, field_name=target_field)
                 if sync_zero and total_odoo <= 0: continue
 
-                # FIX: Use the GraphQL Helper we fixed earlier
-                shopify_info = get_shopify_variant_inv_by_sku(sku, shop_url=shop_url)
+                # Get Shopify Qty
+                shopify_info = get_shopify_variant_inv_by_sku(sku)
                 if not shopify_info: continue
 
-                if int(shopify_info['qty']) != int(total_odoo):
+                # Calculate Committed (Optional)
+                committed_qty = 0
+                if combine_committed:
                     try:
-                        shopify.InventoryLevel.set(
-                            location_id=location_id,
-                            inventory_item_id=shopify_info['inventory_item_id'], 
-                            available=int(total_odoo)
-                        )
+                        gid_query = '{ productVariants(first: 1, query: "sku:%s") { edges { node { inventoryItem { inventoryLevel(locationId: "gid://shopify/Location/%s") { quantities(names: ["committed"]) { quantity } } } } } } }' % (sku, os.getenv('SHOPIFY_WAREHOUSE_ID', ''))
+                        client = shopify.GraphQL()
+                        res = json.loads(client.execute(gid_query))
+                        qs = res['data']['productVariants']['edges'][0]['node']['inventoryItem']['inventoryLevel']['quantities']
+                        if qs: committed_qty = int(qs[0]['quantity'])
+                    except: pass
+
+                # Push if different
+                final_qty = int(total_odoo) + (committed_qty if combine_committed else 0)
+                current_shopify = int(shopify_info['qty'])
+
+                if current_shopify != final_qty:
+                    try:
+                        shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=shopify_info['inventory_item_id'], available=final_qty)
                         updates += 1
-                    except Exception as e:
-                        print(f"Scheduler Update Fail {sku}: {e}")
+                    except Exception as e: 
+                        print(f"Update failed for {sku}: {e}")
                 
                 count += 1
+            
+            # Log progress every 500 items
+            if count % 500 == 0:
+                log_event('Inventory', 'Info', f"Processed {count}/{total_items}...", shop_url=shop_url)
 
-        if updates > 0:
-            log_event('Inventory', 'Success', f"Scheduler Run: Checked {count} items, Updated {updates} items.", shop_url=shop_url)
-        
-        return count, updates
-
+        log_event('Inventory', 'Success', f"Force Sync Complete: Updated {updates} items.", shop_url=shop_url)
 
 def sync_odoo_fulfillments(shop_url):
     """
@@ -1615,227 +1602,89 @@ def maintenance_wipe_logs():
             db.session.rollback()
             return jsonify({"error": str(e)})
 
-@app.route('/sync/inventory', methods=['GET'])
-@require_shopify_session        
-def sync_inventory_endpoint():
+# --- ROUTES FOR MANUAL TOOLS ---
+
+@app.route('/maintenance/purge_junk', methods=['GET'])
+@require_shopify_session
+def trigger_purge():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+    # Changed to Queue
+    q.enqueue(emergency_purge_junk_products, shop_url, job_timeout=600)
+    return jsonify({"message": "Emergency Purge Queued."})
+
+@app.route('/sync/images/manual', methods=['GET'])
+def trigger_manual_image_sync():
+    shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+    # Changed to Queue (Long timeout for images)
+    q.enqueue(sync_images_only_manual, shop_url, job_timeout=1800)
+    return jsonify({"message": "Image Sync Queued."})
+
+@app.route('/maintenance/diagnose_categories', methods=['GET'])
+def trigger_diagnose():
+    shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+    # Changed to Queue
+    q.enqueue(check_for_corrupted_categories, shop_url, job_timeout=300)
+    return jsonify({"message": "Diagnostic Queued."})
+
+@app.route('/maintenance/fix_variants', methods=['POST'])
+@require_shopify_session
+def trigger_fix_variants():
+    shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+    # Changed to Queue
+    q.enqueue(fix_variant_mess_task, shop_url, job_timeout=900)
+    return jsonify({"message": "Variant Cleanup Queued."})
     
-    def run_full_force_sync():
-        with app.app_context():
-            log_event('Inventory', 'Info', "Starting TRUE Force Sync...", shop_url=shop_url)
-            
-            odoo = get_odoo_connection(shop_url)
-            if not odoo or not setup_shopify_session(shop_url): return
-
-            # FIX 1: Auto-Detect Shopify Location ID
-            # Use the global ID if set, otherwise fetch the first active location from Shopify
-            location_id = SHOPIFY_LOCATION_ID
-            try:
-                if not location_id or location_id == 0:
-                    locs = shopify.Location.find()
-                    if locs:
-                        location_id = locs[0].id
-                        log_event('Inventory', 'Info', f"Auto-detected Shopify Location ID: {location_id}", shop_url=shop_url)
-                    else:
-                        log_event('Inventory', 'Error', "CRITICAL: No active Location found in Shopify.", shop_url=shop_url)
-                        return
-            except Exception as e:
-                log_event('Inventory', 'Error', f"Failed to fetch Shopify Location: {e}", shop_url=shop_url)
-                return
-
-            # FIX 2: Get Company ID correctly from Shop Table
-            shop_record = Shop.query.filter_by(shop_url=shop_url).first()
-            company_id = shop_record.odoo_company_id if shop_record else None
-
-            # Get settings
-            target_locations = get_config('inventory_locations', [], shop_url=shop_url)
-            target_field = get_config('inventory_field', 'qty_available', shop_url=shop_url)
-            sync_zero = get_config('sync_zero_stock', False, shop_url=shop_url)
-            combine_committed = get_config('combine_committed', False, shop_url=shop_url)
-
-            # 3. Fetch Storable Products
-            domain = [['type', 'in', ['product', 'consu']], ['active', '=', True], ['sale_ok', '=', True]]
-            if company_id: domain.append(['company_id', '=', int(company_id)])
-            
-            try:
-                all_product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                    'product.product', 'search', [domain])
-            except Exception as e:
-                log_event('Inventory', 'Error', f"Odoo Search Failed: {e}", shop_url=shop_url)
-                return
-
-            total_items = len(all_product_ids)
-            log_event('Inventory', 'Info', f"Found {total_items} storable products (Company {company_id}). Syncing...", shop_url=shop_url)
-            
-            count = 0
-            updates = 0
-            
-            # 4. Process in batches
-            BATCH_SIZE = 50
-            for i in range(0, total_items, BATCH_SIZE):
-                batch_ids = all_product_ids[i:i + BATCH_SIZE]
-                
-                try:
-                    p_data_list = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
-                        'product.product', 'read', [batch_ids], {'fields': ['default_code']})
-                except: continue
-
-                for p_data in p_data_list:
-                    sku = p_data.get('default_code')
-                    p_id = p_data['id']
-                    if not sku: continue
-
-                    # Calculate Odoo Qty
-                    total_odoo = odoo.get_total_qty_for_locations(p_id, target_locations, field_name=target_field)
-                    if sync_zero and total_odoo <= 0: continue
-
-                    # Fetch Shopify Variant
-                    shopify_info = get_shopify_variant_inv_by_sku(sku, shop_url=shop_url)
-                    if not shopify_info: continue
-
-                    committed_qty = 0
-                    if combine_committed:
-                        try:
-                            gid_query = '{ productVariants(first: 1, query: "sku:%s") { edges { node { inventoryItem { inventoryLevel(locationId: "gid://shopify/Location/%s") { quantities(names: ["committed"]) { quantity } } } } } } }' % (sku, location_id)
-                            client = shopify.GraphQL()
-                            res = json.loads(client.execute(gid_query))
-                            qs = res['data']['productVariants']['edges'][0]['node']['inventoryItem']['inventoryLevel']['quantities']
-                            if qs: committed_qty = int(qs[0]['quantity'])
-                        except: pass
-
-                    final_qty = int(total_odoo) + (committed_qty if combine_committed else 0)
-                    current_shopify = int(shopify_info['qty'])
-
-                    # Update if different
-                    if current_shopify != final_qty:
-                        try:
-                            # FIX 3: Use the detected location_id here!
-                            shopify.InventoryLevel.set(
-                                location_id=location_id, 
-                                inventory_item_id=shopify_info['inventory_item_id'], 
-                                available=final_qty
-                            )
-                            updates += 1
-                        except Exception as e: 
-                            print(f"Update failed for {sku}: {e}")
-                    
-                    count += 1
-                
-                if count % 100 == 0:
-                    log_event('Inventory', 'Info', f"Processed {count}/{total_items} items...", shop_url=shop_url)
-
-            log_event('Inventory', 'Success', f"Force Sync Complete: Checked {count} items, Updated {updates} items.", shop_url=shop_url)
-
-    threading.Thread(target=run_full_force_sync).start()
-    return jsonify({"message": f"Full Inventory Sync Started for {shop_url}"})
     
-    def run_full_force_sync():
-        with app.app_context():
-            log_event('Inventory', 'Info', "Starting TRUE Force Sync (Scanning ALL Storable Products)...", shop_url=shop_url)
-            
-            odoo = get_odoo_connection(shop_url)
-            if not odoo or not setup_shopify_session(shop_url): return
-
-            company_id = get_config('odoo_company_id', shop_url=shop_url)
-            target_locations = get_config('inventory_locations', [], shop_url=shop_url)
-            target_field = get_config('inventory_field', 'qty_available', shop_url=shop_url)
-            sync_zero = get_config('sync_zero_stock', False, shop_url=shop_url)
-            combine_committed = get_config('combine_committed', False, shop_url=shop_url)
-
-            # 1. Fetch ALL Storable Products (Not just recent moves)
-            domain = [['type', 'in', ['product', 'consu']], ['active', '=', True]]
-            if company_id: domain.append(['company_id', '=', int(company_id)])
-            
-            try:
-                # We fetch IDs of ALL storable products
-                all_product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                    'product.product', 'search', [domain])
-            except Exception as e:
-                log_event('Inventory', 'Error', f"Odoo Search Failed: {e}", shop_url=shop_url)
-                return
-
-            total_items = len(all_product_ids)
-            log_event('Inventory', 'Info', f"Found {total_items} storable products. Syncing...", shop_url=shop_url)
-            
-            count = 0
-            updates = 0
-            
-            # 2. Process in batches to handle 10k items smoothly
-            BATCH_SIZE = 50
-            for i in range(0, total_items, BATCH_SIZE):
-                batch_ids = all_product_ids[i:i + BATCH_SIZE]
-                
-                # Pre-fetch Odoo Data
-                try:
-                    p_data_list = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
-                        'product.product', 'read', [batch_ids], {'fields': ['default_code', 'uom_id', 'sh_is_secondary_unit']})
-                except: continue
-
-                for p_data in p_data_list:
-                    p_id = p_data['id']
-                    sku = p_data.get('default_code')
-                    if not sku: continue
-
-                    # Get Odoo Qty
-                    total_odoo = odoo.get_total_qty_for_locations(p_id, target_locations, field_name=target_field)
-                    if sync_zero and total_odoo <= 0: continue
-
-                    # Get Shopify Qty
-                    shopify_info = get_shopify_variant_inv_by_sku(sku)
-                    if not shopify_info: continue
-
-                    # Calculate Committed (Optional)
-                    committed_qty = 0
-                    if combine_committed:
-                        try:
-                            # Simple GraphQL check for committed
-                            gid_query = '{ productVariants(first: 1, query: "sku:%s") { edges { node { inventoryItem { inventoryLevel(locationId: "gid://shopify/Location/%s") { quantities(names: ["committed"]) { quantity } } } } } } }' % (sku, os.getenv('SHOPIFY_WAREHOUSE_ID', ''))
-                            client = shopify.GraphQL()
-                            res = json.loads(client.execute(gid_query))
-                            qs = res['data']['productVariants']['edges'][0]['node']['inventoryItem']['inventoryLevel']['quantities']
-                            if qs: committed_qty = int(qs[0]['quantity'])
-                        except: pass
-
-                    # Push if different
-                    final_qty = int(total_odoo) + (committed_qty if combine_committed else 0)
-                    current_shopify = int(shopify_info['qty'])
-
-                    if current_shopify != final_qty:
-                        try:
-                            shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=shopify_info['inventory_item_id'], available=final_qty)
-                            updates += 1
-                        except Exception as e: 
-                            print(f"Update failed for {sku}: {e}")
-                    
-                    count += 1
-                
-                # Log progress every 500 items
-                if count % 500 == 0:
-                    log_event('Inventory', 'Info', f"Processed {count}/{total_items} items...", shop_url=shop_url)
-
-            log_event('Inventory', 'Success', f"Force Sync Complete: Checked {count} items, Updated {updates} items.", shop_url=shop_url)
-
-    threading.Thread(target=run_full_force_sync).start()
-    return jsonify({"message": f"Full Inventory Sync Started for {shop_url}"})
 
 @app.route('/sync/fulfillments', methods=['GET'])
 def trigger_fulfillment_sync():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
 
-    threading.Thread(target=sync_odoo_fulfillments, args=(shop_url,)).start()
-    return jsonify({"message": "Started checking for shipments."})
+    # Changed to Queue
+    q.enqueue(sync_odoo_fulfillments, shop_url, job_timeout=600)
+    return jsonify({"message": "Started checking for shipments (Queued)."})
 
 @app.route('/sync/categories/run_initial_import', methods=['GET'])
 def run_initial_category_import():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
 
-    threading.Thread(target=sync_categories_only, args=(shop_url,)).start()
-    return jsonify({"message": "Category Sync Job Started"})
+    # Changed to Queue
+    q.enqueue(sync_categories_only, shop_url, job_timeout=600)
+    return jsonify({"message": "Category Sync Job Queued"})
 
 
+# --- 1. NEW HELPER: Background Job for Products ---
+def background_product_sync(shop_url, product_data):
+    """
+    Runs inside the Worker Process. 
+    Handles connection, processing, and logging safely.
+    """
+    with app.app_context():
+        # Connect
+        odoo = get_odoo_connection(shop_url)
+        if not odoo:
+            log_event('Product', 'Error', "Auto Sync Failed: Could not connect to Odoo.", shop_url=shop_url)
+            return
+
+        product_title = product_data.get('title', 'Unknown')
+        try:
+            # Sync
+            process_product_data(product_data, odoo)
+            
+            # Log Success
+            log_event('Product', 'Success', f"Webhook Sync: '{product_title}' updated.", shop_url=shop_url)
+            
+        except Exception as e:
+            log_event('Product', 'Error', f"Webhook Failed for '{product_title}': {str(e)}", shop_url=shop_url)
+
+
+# --- 2. UPDATED ROUTE: Product Webhook (Now uses Queue) ---
 @app.route('/webhook/products/create', methods=['POST'])
 @app.route('/webhook/products/update', methods=['POST'])
 def product_webhook():
@@ -1847,48 +1696,28 @@ def product_webhook():
     shop_url = request.headers.get('X-Shopify-Shop-Domain')
     if not shop_url: return "Missing Shop Header", 400
 
-    # 3. Connect to Specific Odoo
-    odoo_client = get_odoo_connection(shop_url)
-    if not odoo_client: return "Odoo Not Connected", 200
-
-    # 4. Process Data & Log Success
+    # 3. Queue the Job
+    # We send the data to Redis immediately. Shopify gets a 200 OK instantly.
     data = request.json
-    product_title = data.get('title', 'Unknown Product')
+    q.enqueue(background_product_sync, shop_url, data, job_timeout=300)
     
-    with app.app_context(): 
-        try:
-            process_product_data(data, odoo_client)
-            
-            # --- NEW: Add Log Entry for Webhook ---
-            log_event(
-                entity='Product Sync',
-                status='Success',
-                message=f"Webhook Sync: '{product_title}' updated from Shopify to Odoo.",
-                shop_url=shop_url
-            )
-        except Exception as e:
-            log_event(
-                entity='Product Sync',
-                status='Error',
-                message=f"Webhook Failed for '{product_title}': {str(e)}",
-                shop_url=shop_url
-            )
-    
-    return "Received", 200
+    return "Queued", 200
 
+
+# --- 3. UPDATED ROUTE: Master Sync (Now uses Queue) ---
 @app.route('/sync/products/master', methods=['POST'])
 @require_shopify_session
 def trigger_master_sync():
     # 1. Identify who is asking
-    shop_url = request.args.get('shop') # Passed from dashboard URL params
+    shop_url = request.args.get('shop') 
     if not shop_url:
-        # Fallback: Try to get from referrer or form data if needed
         return jsonify({"message": "Error: Missing shop parameter"}), 400
 
-    # 2. Start Thread with the shop_url
-    threading.Thread(target=sync_products_master, args=(shop_url,)).start()
+    # 2. Enqueue Job (Replaces Threading)
+    # We use a long timeout (20 mins) because master syncs can be huge.
+    job = q.enqueue(sync_products_master, shop_url, job_timeout=1200)
     
-    return jsonify({"message": f"Started Sync for {shop_url}"})
+    return jsonify({"message": f"Started Sync for {shop_url} (Job ID: {job.get_id()})"})
 
 @app.route('/sync/customers/master', methods=['POST'])
 @require_shopify_session
@@ -2582,41 +2411,34 @@ def fix_variant_mess_task(shop_url):
 def trigger_purge():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
-    threading.Thread(target=emergency_purge_junk_products, args=(shop_url,)).start()
-    return jsonify({"message": "Emergency Purge Started. Check Live Logs."})
+    # Changed to Queue
+    q.enqueue(emergency_purge_junk_products, shop_url, job_timeout=600)
+    return jsonify({"message": "Emergency Purge Queued."})
 
 @app.route('/sync/images/manual', methods=['GET'])
 def trigger_manual_image_sync():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
-    threading.Thread(target=sync_images_only_manual, args=(shop_url,)).start()
-    return jsonify({"message": "Image Sync Started. Check Live Logs."})
+    # Changed to Queue (Long timeout for images)
+    q.enqueue(sync_images_only_manual, shop_url, job_timeout=1800)
+    return jsonify({"message": "Image Sync Queued."})
 
 @app.route('/maintenance/diagnose_categories', methods=['GET'])
 def trigger_diagnose():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
-    threading.Thread(target=check_for_corrupted_categories, args=(shop_url,)).start()
-    return jsonify({"message": "Diagnostic started. Check Live Logs."})
-
-@app.route('/maintenance/add_hash_column', methods=['GET'])
-def maintenance_add_column():
-    try:
-        with app.app_context():
-            db.session.execute(text('ALTER TABLE product_map ADD COLUMN IF NOT EXISTS image_hash VARCHAR(32);'))
-            db.session.commit()
-            return jsonify({"message": "SUCCESS: Column 'image_hash' added to Supabase."})
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({"error": str(e)})
+    # Changed to Queue
+    q.enqueue(check_for_corrupted_categories, shop_url, job_timeout=300)
+    return jsonify({"message": "Diagnostic Queued."})
 
 @app.route('/maintenance/fix_variants', methods=['POST'])
 @require_shopify_session
 def trigger_fix_variants():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
-    threading.Thread(target=fix_variant_mess_task, args=(shop_url,)).start()
-    return jsonify({"message": "Variant Cleanup Started. Check Live Logs."})
+    # Changed to Queue
+    q.enqueue(fix_variant_mess_task, shop_url, job_timeout=900)
+    return jsonify({"message": "Variant Cleanup Queued."})
 
 # --- SYSTEM STARTUP ---
 print("**************************************************")
