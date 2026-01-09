@@ -8,9 +8,12 @@ import schedule
 import time
 import shopify
 import concurrent.futures
+import redis
+from rq import Queue
 from flask import Flask, request, jsonify, render_template, session, url_for, render_template_string, redirect
 from models import db, ProductMap, SyncLog, AppSetting, CustomerMap, ProcessedOrder, Shop
 from odoo_client import OdooClient
+from security_utils import require_shopify_session # <--- NEW SECURITY TOOL
 import requests
 from datetime import datetime, timedelta
 import random
@@ -98,6 +101,12 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
 }
 
 SHOPIFY_LOCATION_ID = int(os.getenv('SHOPIFY_WAREHOUSE_ID', '0'))
+
+# --- NEW: REDIS QUEUE SETUP ---
+redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
+conn = redis.from_url(redis_url)
+q = Queue(connection=conn)
+# ------------------------------
 
 db.init_app(app)
 
@@ -1607,6 +1616,7 @@ def maintenance_wipe_logs():
             return jsonify({"error": str(e)})
 
 @app.route('/sync/inventory', methods=['GET'])
+@require_shopify_session        
 def sync_inventory_endpoint():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
@@ -1867,6 +1877,7 @@ def product_webhook():
     return "Received", 200
 
 @app.route('/sync/products/master', methods=['POST'])
+@require_shopify_session
 def trigger_master_sync():
     # 1. Identify who is asking
     shop_url = request.args.get('shop') # Passed from dashboard URL params
@@ -1880,6 +1891,7 @@ def trigger_master_sync():
     return jsonify({"message": f"Started Sync for {shop_url}"})
 
 @app.route('/sync/customers/master', methods=['POST'])
+@require_shopify_session
 def trigger_customer_master_sync():
     shop_url = request.args.get('shop')
     threading.Thread(target=sync_customers_master, args=(shop_url,)).start()
@@ -2125,8 +2137,10 @@ def run_schedule():
         with app.app_context():
             shops = Shop.query.filter_by(is_active=True).all()
             for shop in shops:
-                # Launch thread for specific shop
-                threading.Thread(target=target_func, args=(shop.shop_url,)).start()
+                # OLD: threading.Thread(target=target_func, args=(shop.shop_url,)).start()
+                
+                # NEW: Enqueue to Redis
+                q.enqueue(target_func, shop.shop_url, job_timeout=600)
 
     # Schedule Jobs
     schedule.every().day.at("03:00").do(lambda: run_job_for_all_shops(sync_customers_master, "Customer Sync"))
@@ -2519,6 +2533,7 @@ def fix_variant_mess_task(shop_url):
 # --- ROUTES FOR MANUAL TOOLS ---
 
 @app.route('/maintenance/purge_junk', methods=['GET'])
+@require_shopify_session
 def trigger_purge():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
@@ -2551,6 +2566,7 @@ def maintenance_add_column():
         return jsonify({"error": str(e)})
 
 @app.route('/maintenance/fix_variants', methods=['POST'])
+@require_shopify_session
 def trigger_fix_variants():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
