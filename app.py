@@ -2581,30 +2581,6 @@ print("**************************************************")
 # Start scheduler thread
 t = threading.Thread(target=run_schedule, daemon=True)
 t.start()
-
-# --- TEMPORARY DATABASE FIX ---
-from sqlalchemy import text
-
-@app.route('/maintenance/fix_db_schema')
-def fix_db_schema():
-    """
-    Run this URL once to update the database table 
-    to match the new Security V7.0 code.
-    """
-    try:
-        with app.app_context():
-            # 1. Add the new Encrypted Password column
-            # We use 'text' to execute raw SQL safely
-            db.session.execute(text("ALTER TABLE shop ADD COLUMN IF NOT EXISTS odoo_password_enc VARCHAR(500);"))
-            
-            # 2. Commit the change
-            db.session.commit()
-            
-            return "✅ SUCCESS: Database column 'odoo_password_enc' added. <br>You can now go back to the dashboard. (You will need to re-enter your Odoo password once)."
-            
-    except Exception as e:
-        db.session.rollback()
-        return f"❌ ERROR: {str(e)}"
     
 if __name__ == '__main__':
     app.run(debug=True)
