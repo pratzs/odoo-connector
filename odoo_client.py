@@ -2,7 +2,6 @@ import xmlrpc.client
 import ssl
 
 class OdooClient:
-    class OdooClient:
     def __init__(self, url, db, username, password):
         self.url = url
         self.db = db
