@@ -2,6 +2,7 @@ import xmlrpc.client
 import ssl
 
 class OdooClient:
+    class OdooClient:
     def __init__(self, url, db, username, password):
         self.url = url
         self.db = db
@@ -9,7 +10,13 @@ class OdooClient:
         self.password = password
         self.context = ssl._create_unverified_context()
         self.common = xmlrpc.client.ServerProxy(f'{self.url}/xmlrpc/2/common', context=self.context, allow_none=True)
+        
+        # Authenticate
         self.uid = self.common.authenticate(self.db, self.username, self.password, {})
+        
+        # --- NEW: Check if login actually succeeded ---
+        if not self.uid:
+            raise Exception(f"Odoo Login Failed! Check credentials for {self.username}")
 
     @property
     def models(self):
