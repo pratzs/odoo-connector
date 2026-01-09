@@ -1902,38 +1902,56 @@ def trigger_duplicate_scan():
     shop_url = request.args.get('shop')
     threading.Thread(target=archive_shopify_duplicates, args=(shop_url,)).start()
     return jsonify({"message": "Started"})
+    
 
 @app.route('/sync/orders/manual', methods=['GET'])
+@require_shopify_session
 def manual_order_fetch():
     shop_url = request.args.get('shop')
     
-    # DEBUG LOGGING (Check Render Logs if this fails)
-    print(f"DEBUG: Starting Manual Fetch for {shop_url}", flush=True)
-
+    # 1. Setup Connections
     if not setup_shopify_session(shop_url): 
-        print("DEBUG: Auth Failed - Could not setup session", flush=True)
         return jsonify({"orders": [], "error": "Could not authenticate with Shopify"})
     
     odoo = get_odoo_connection(shop_url)
+    if not odoo:
+        return jsonify({"orders": [], "error": "Could not connect to Odoo"})
     
+    # 2. Fetch Recent Shopify Orders
     try:
-        # FIX: Using library instead of raw requests to avoid 401/404 errors
         orders = shopify.Order.find(limit=10, status='any')
-        print(f"DEBUG: Fetched {len(orders)} orders via Library.", flush=True)
     except Exception as e:
-        print(f"CRITICAL API ERROR: {str(e)}", flush=True)
         return jsonify({"orders": [], "error": f"API Error: {str(e)}"})
     
     mapped_orders = []
     for o in orders:
         status = "Not Synced"
         try:
-            client_ref = f"ONLINE_{o.name}"
+            # --- SMART SEARCH LOGIC ---
+            # We check both "ONLINE_#1001" and just "#1001"
+            # We check both "Customer Reference" and "Source Document" (origin)
+            
+            client_ref = f"ONLINE_{o.name}"  # e.g., ONLINE_#1001
+            plain_name = o.name              # e.g., #1001
+            
+            domain = [
+                '|', '|', '|',
+                ['client_order_ref', '=', client_ref], # Match ONLINE_... in Ref
+                ['client_order_ref', '=', plain_name], # Match #... in Ref
+                ['origin', '=', client_ref],           # Match ONLINE_... in Source Doc
+                ['origin', '=', plain_name]            # Match #... in Source Doc
+            ]
+            
             exists = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
-                'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
+                'sale.order', 'search', [domain])
+            
             if exists: status = "Synced"
-        except: pass
+            # --------------------------
+
+        except Exception as e: 
+            print(f"Check Error: {e}")
         
+        # Override status if cancelled
         if getattr(o, 'cancelled_at', None): status = "Cancelled"
         
         mapped_orders.append({
@@ -1943,7 +1961,9 @@ def manual_order_fetch():
             'total': o.total_price, 
             'odoo_status': status
         })
+        
     return jsonify({"orders": mapped_orders})
+    
 
 @app.route('/sync/orders/import_batch', methods=['POST'])
 def import_selected_orders():
