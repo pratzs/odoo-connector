@@ -1,0 +1,17 @@
+import os
+import redis
+from rq import Worker, Queue, Connection
+from app import app
+
+listen = ['default']
+
+# Get Redis URL from environment
+redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
+
+conn = redis.from_url(redis_url)
+
+if __name__ == '__main__':
+    with app.app_context():
+        with Connection(conn):
+            worker = Worker(map(Queue, listen))
+            worker.work()
