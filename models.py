@@ -1,9 +1,9 @@
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
+from security_utils import encrypt_val, decrypt_val # Import helpers
 
 db = SQLAlchemy()
 
-# --- MOVED FROM APP.PY (Centralized here) ---
 class Shop(db.Model):
     __tablename__ = 'shop'
     id = db.Column(db.Integer, primary_key=True)
@@ -12,7 +12,19 @@ class Shop(db.Model):
     odoo_url = db.Column(db.String(255))
     odoo_db = db.Column(db.String(255))
     odoo_username = db.Column(db.String(255))
-    odoo_password = db.Column(db.String(255))
+    
+    # STORE ENCRYPTED PASSWORD
+    odoo_password_enc = db.Column(db.String(500)) 
+
+    # Helper property to handle encryption automatically
+    @property
+    def odoo_password(self):
+        return decrypt_val(self.odoo_password_enc)
+
+    @odoo_password.setter
+    def odoo_password(self, value):
+        self.odoo_password_enc = encrypt_val(value)
+
     odoo_company_id = db.Column(db.Integer, default=1)
     is_active = db.Column(db.Boolean, default=True)
     install_date = db.Column(db.DateTime, default=datetime.utcnow)
