@@ -6,3 +6,6 @@ gunicorn==21.2.0
 python-dotenv==1.0.0
 ShopifyAPI>=12.7.0
 schedule==1.2.1
+cryptography==42.0.0
+redis==5.0.1
+rq==1.15.1
