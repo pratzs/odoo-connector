@@ -1522,39 +1522,6 @@ def home():
                            api_key=SHOPIFY_API_KEY, 
                            config=config)
 
-# --- NEW ROUTE: Save Settings from Dashboard Tab ---
-@app.route('/api/settings/save', methods=['POST'])
-def save_settings_endpoint():
-    shop_url = request.args.get('shop')
-    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
-    
-    data = request.json
-    if not data: return jsonify({"error": "No data provided"}), 400
-
-    # 1. Update Shop Credentials
-    shop = Shop.query.filter_by(shop_url=shop_url).first()
-    if shop:
-        if 'odoo_company_id' in data: 
-            shop.odoo_company_id = int(data['odoo_company_id'])
-        db.session.commit()
-
-    # 2. Update ALL Dynamic Settings (Including Locations)
-    # This list must match the keys you send from dashboard.html
-    setting_keys = [
-        'prod_auto_create', 'prod_auto_publish', 'prod_sync_images',
-        'prod_sync_tags', 'prod_sync_meta_vendor_code', 'prod_sync_price',
-        'prod_sync_title', 'prod_sync_desc', 'prod_sync_type', 'prod_sync_vendor',
-        'order_sync_tax', 'sync_zero_stock', 'combine_committed',
-        'inventory_field', 'inventory_locations', 'cust_direction',
-        'cust_auto_sync', 'cust_sync_tags', 'cust_whitelist_tags', 'cust_blacklist_tags'
-    ]
-    
-    for key in setting_keys:
-        if key in data:
-            # Note: Ensure your set_config function can handle lists/arrays for 'inventory_locations'
-            set_config(key, data[key]) 
-
-    return jsonify({"message": "Settings Saved Successfully"})
     
 @app.route('/live_logs')
 def live_logs():
