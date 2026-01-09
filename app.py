@@ -1894,14 +1894,16 @@ def trigger_master_sync():
 @require_shopify_session
 def trigger_customer_master_sync():
     shop_url = request.args.get('shop')
-    threading.Thread(target=sync_customers_master, args=(shop_url,)).start()
-    return jsonify({"message": "Started"})
+    # CHANGED: Use RQ
+    job = q.enqueue(sync_customers_master, shop_url, job_timeout=1200)
+    return jsonify({"message": f"Customer Sync Queued (ID: {job.get_id()})"})
 
 @app.route('/sync/products/archive_duplicates', methods=['POST'])
 def trigger_duplicate_scan():
     shop_url = request.args.get('shop')
-    threading.Thread(target=archive_shopify_duplicates, args=(shop_url,)).start()
-    return jsonify({"message": "Started"})
+    # CHANGED: Use RQ
+    job = q.enqueue(archive_shopify_duplicates, shop_url, job_timeout=1200)
+    return jsonify({"message": f"Duplicate Scan Queued (ID: {job.get_id()})"})
     
 
 @app.route('/sync/orders/manual', methods=['GET'])
@@ -1927,31 +1929,26 @@ def manual_order_fetch():
     for o in orders:
         status = "Not Synced"
         try:
-            # --- SMART SEARCH LOGIC ---
-            # We check both "ONLINE_#1001" and just "#1001"
-            # We check both "Customer Reference" and "Source Document" (origin)
-            
-            client_ref = f"ONLINE_{o.name}"  # e.g., ONLINE_#1001
-            plain_name = o.name              # e.g., #1001
+            # Smart Search Logic
+            client_ref = f"ONLINE_{o.name}"
+            plain_name = o.name
             
             domain = [
                 '|', '|', '|',
-                ['client_order_ref', '=', client_ref], # Match ONLINE_... in Ref
-                ['client_order_ref', '=', plain_name], # Match #... in Ref
-                ['origin', '=', client_ref],           # Match ONLINE_... in Source Doc
-                ['origin', '=', plain_name]            # Match #... in Source Doc
+                ['client_order_ref', '=', client_ref],
+                ['client_order_ref', '=', plain_name],
+                ['origin', '=', client_ref],
+                ['origin', '=', plain_name]
             ]
             
             exists = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
                 'sale.order', 'search', [domain])
             
             if exists: status = "Synced"
-            # --------------------------
 
         except Exception as e: 
             print(f"Check Error: {e}")
         
-        # Override status if cancelled
         if getattr(o, 'cancelled_at', None): status = "Cancelled"
         
         mapped_orders.append({
@@ -1977,61 +1974,89 @@ def import_selected_orders():
     odoo = get_odoo_connection(shop_url)
     
     synced = 0
-    log_event('System', 'Info', f"Manual Trigger: Importing {len(ids)} orders...")
+    log_event('System', 'Info', f"Manual Trigger: Importing {len(ids)} orders...", shop_url=shop_url)
+    
+    # Recommendation: If users select 50+ orders, this might timeout.
+    # Ideally, we would enqueue this entire loop, but for now this works for small batches.
     for oid in ids:
         res = requests.get(f"https://{shop_url}/admin/api/{SHOPIFY_API_VERSION}/orders/{oid}.json", headers=headers)
         if res.status_code == 200:
-            success, _ = process_order_data(res.json().get('order'), odoo)
+            # We handle the return type safely here
+            result = process_order_data(res.json().get('order'), odoo)
+            if isinstance(result, tuple):
+                success = result[0]
+            else:
+                success = result
+            
             if success: synced += 1
+            
     return jsonify({"message": f"Batch Complete. Synced: {synced}"})
+
+def background_order_sync(shop_url, order_data):
+    """
+    Runs inside the Worker Process.
+    """
+    with app.app_context():
+        # 1. Connect
+        odoo = get_odoo_connection(shop_url)
+        if not odoo:
+            log_event('Order', 'Error', "Auto Sync Failed: Could not connect to Odoo.", shop_url=shop_url)
+            return
+
+        # 2. Sync with CRASH PROTECTION
+        try:
+            result = process_order_data(order_data, odoo)
+            
+            # Handle tuple return (success, message) vs boolean (True/False)
+            if isinstance(result, tuple):
+                success, msg = result
+            else:
+                success, msg = result, "Processed"
+            
+            # 3. Log Result
+            if success:
+                 if "Synced" in msg:
+                     log_event('Order', 'Success', f"Auto Sync: {msg}", shop_url=shop_url)
+                 elif "Skipped" in msg:
+                     pass 
+            else:
+                 log_event('Order', 'Error', f"Auto Sync Failed: {msg}", shop_url=shop_url)
+
+        except Exception as e:
+            log_event('Order', 'Error', f"Worker Crash: {str(e)}", shop_url=shop_url)
     
 
 @app.route('/webhook/orders', methods=['POST'])
 @app.route('/webhook/orders/updated', methods=['POST'])
 @app.route('/webhook/orders/cancelled', methods=['POST'])
 def order_webhook():
+    # 1. Security Check
     hmac_header = request.headers.get('X-Shopify-Hmac-Sha256')
     if not verify_shopify(request.get_data(), hmac_header):
         return "Unauthorized", 401
 
+    # 2. Extract Info
     topic = request.headers.get('X-Shopify-Topic', '')
     shop_url = request.headers.get('X-Shopify-Shop-Domain')
     data = request.json
-    order_num = data.get('name') or data.get('order_number')
+    order_num = data.get('name')
 
-    odoo_client = get_odoo_connection(shop_url)
+    # 3. Handle Cancellation (Keep this fast & simple)
+    if topic == 'orders/cancelled':
+        with app.app_context():
+            process_cancellation(data)
+            log_event('Order', 'Info', f"Webhook: Order {order_num} cancelled.", shop_url=shop_url)
+        return "Cancellation Processed", 200
 
-    with app.app_context():
-        if topic == 'orders/cancelled':
-            process_cancellation(data) 
-            log_event('Order', 'Info', f"Webhook: Order {order_num} was cancelled in Shopify.", shop_url=shop_url)
-            return "Cancellation Processed", 200
-            
-        elif topic == 'orders/updated':
-            return "Update Ignored", 200
+    # 4. QUEUE THE SYNC (The Fix)
+    # Instead of running process_order_data immediately, we send it to Redis.
+    # This fixes the "Access Denied" and "Timeout" issues.
+    if topic in ['orders/create', 'orders/paid', 'orders/updated']:
+        q.enqueue(background_order_sync, shop_url, data, job_timeout=300)
+        return "Queued", 200
 
-        # Default to Create logic
-        if odoo_client:
-            try:
-                process_order_data(data, odoo_client)
-                
-                # --- THIS IS THE FIX ---
-                log_event(
-                    entity='Order', 
-                    status='Success', 
-                    message=f"Automatic Sync: Order {order_num} successfully synced to Odoo.", 
-                    shop_url=shop_url
-                )
-            except Exception as e:
-                log_event(
-                    entity='Order', 
-                    status='Error', 
-                    message=f"Automatic Sync Failed for {order_num}: {str(e)}", 
-                    shop_url=shop_url
-                )
+    return "Ignored", 200
 
-    return "Received", 200
-    
 @app.route('/webhook/refunds', methods=['POST'])
 def refund_webhook(): return "Received", 200
 
