@@ -69,6 +69,8 @@ shopify.Fulfillment._prefix_source = "/"
 
 app = Flask(__name__)
 
+app.secret_key = os.getenv('FLASK_SECRET_KEY')
+
 # --- CONFIGURATION ---
 database_url = os.getenv('DATABASE_URL', 'sqlite:///local.db')
 
