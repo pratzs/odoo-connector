@@ -1189,7 +1189,7 @@ def cleanup_shopify_products(shop_url):
 def perform_inventory_sync(shop_url):
     """
     Runs inside the Worker Process. 
-    OPTIMIZED: Uses batch fetching for Odoo stock.
+    OPTIMIZED: Uses batch fetching AND strictly filters for 'Can be Sold'.
     """
     with app.app_context():
         log_event('Inventory', 'Info', "Starting Optimized Force Sync...", shop_url=shop_url)
@@ -1203,11 +1203,16 @@ def perform_inventory_sync(shop_url):
         target_field = get_config('inventory_field', 'qty_available', shop_url=shop_url)
         sync_zero = get_config('sync_zero_stock', False, shop_url=shop_url)
         
-        # 1. Fetch ALL Storable Products
-        domain = [['type', 'in', ['product', 'consu']], ['active', '=', True]]
+        # --- THE FIX: ADD 'sale_ok' = True ---
+        domain = [
+            ['type', 'in', ['product', 'consu']], 
+            ['active', '=', True],
+            ['sale_ok', '=', True]  # <--- THIS IS THE MISSING FILTER
+        ]
         if company_id: domain.append(['company_id', '=', int(company_id)])
         
         try:
+            # 1. Search (This should now return ~1972 IDs)
             all_product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                 'product.product', 'search', [domain])
         except Exception as e:
@@ -1215,7 +1220,7 @@ def perform_inventory_sync(shop_url):
             return
 
         total_items = len(all_product_ids)
-        log_event('Inventory', 'Info', f"Found {total_items} items. Syncing...", shop_url=shop_url)
+        log_event('Inventory', 'Info', f"Found {total_items} sellable items. Syncing...", shop_url=shop_url)
         
         count = 0
         updates = 0
@@ -1249,7 +1254,7 @@ def perform_inventory_sync(shop_url):
                 
                 if sync_zero and total_odoo <= 0: continue
 
-                # Get Shopify Qty (Still 1-by-1, but unavoidable)
+                # Get Shopify Qty
                 shopify_info = get_shopify_variant_inv_by_sku(sku, shop_url=shop_url)
                 if not shopify_info: continue
 
