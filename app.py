@@ -1189,10 +1189,10 @@ def cleanup_shopify_products(shop_url):
 def perform_inventory_sync(shop_url):
     """
     Runs inside the Worker Process.
-    STRATEGY: Shopify-Driven + Safe Mode (Small Batches).
+    STRATEGY: Shopify-Driven + ULTRA SAFE MODE (Batch Size 5).
     """
     with app.app_context():
-        log_event('Inventory', 'Info', "Starting Safe-Mode Sync (Batch Size 50)...", shop_url=shop_url)
+        log_event('Inventory', 'Info', "Starting Ultra-Safe Sync (Batch Size 5)...", shop_url=shop_url)
         
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): return
@@ -1221,23 +1221,20 @@ def perform_inventory_sync(shop_url):
             return
 
         total_shopify = len(shopify_variants)
-        log_event('Inventory', 'Info', f"Found {total_shopify} variants in Shopify. Syncing in batches of 50...", shop_url=shop_url)
+        log_event('Inventory', 'Info', f"Found {total_shopify} variants. Syncing 5 at a time...", shop_url=shop_url)
 
-        # 2. BATCH FETCH FROM ODOO
+        # 2. BATCH FETCH FROM ODOO (Chunk Size 5)
         all_skus = list(shopify_variants.keys())
         updates = 0
         processed = 0
         
-        # CHANGED: Reduce to 10 to prevent Odoo timeout
-        CHUNK_SIZE = 10 
+        # CHANGED: 5 items per batch to prevent Odoo freeze
+        CHUNK_SIZE = 5
         for i in range(0, len(all_skus), CHUNK_SIZE):
             sku_chunk = all_skus[i:i + CHUNK_SIZE]
             
             try:
-                # Debug Log: Prove we are alive
-                # print(f"Processing chunk {i}...") 
-
-                # A. Find Odoo IDs for these SKUs
+                # A. Find Odoo IDs
                 domain = [['default_code', 'in', sku_chunk], ['active', '=', True]]
                 if company_id: domain.append(['company_id', '=', int(company_id)])
                 
@@ -1256,7 +1253,6 @@ def perform_inventory_sync(shop_url):
                 
                 for loc_id in target_locations:
                     ctx = {'location': loc_id}
-                    # READ CALL - This is usually where it hangs if batch is too big
                     stock_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                         'product.product', 'read', [found_ids], {'fields': [target_field], 'context': ctx})
                     
@@ -1271,7 +1267,6 @@ def perform_inventory_sync(shop_url):
                     if not sp_variant: continue
                     if sync_zero and total_qty <= 0: continue
                     
-                    # Check if update needed
                     current_shopify_qty = int(sp_variant.inventory_quantity) if sp_variant.inventory_quantity else 0
                     
                     if int(total_qty) != current_shopify_qty:
@@ -1287,12 +1282,12 @@ def perform_inventory_sync(shop_url):
 
                 processed += len(sku_chunk)
                 
-                # Log every 100 items so you see movement
-                if processed % 100 == 0:
+                # Log often so you know it's working
+                if processed % 25 == 0:
                      log_event('Inventory', 'Info', f"Checked {processed}/{total_shopify} items...", shop_url=shop_url)
 
             except Exception as e:
-                log_event('Inventory', 'Error', f"Batch Error at index {i}: {e}", shop_url=shop_url)
+                log_event('Inventory', 'Error', f"Batch Error: {e}", shop_url=shop_url)
 
         log_event('Inventory', 'Success', f"Sync Complete. Checked {total_shopify} items. Updated {updates}.", shop_url=shop_url)
 
