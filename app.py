@@ -1223,12 +1223,13 @@ def perform_inventory_sync(shop_url):
         total_shopify = len(shopify_variants)
         log_event('Inventory', 'Info', f"Found {total_shopify} variants in Shopify. Syncing in batches of 50...", shop_url=shop_url)
 
-        # 2. BATCH FETCH FROM ODOO (Safe Size: 50)
+        # 2. BATCH FETCH FROM ODOO
         all_skus = list(shopify_variants.keys())
         updates = 0
         processed = 0
         
-        CHUNK_SIZE = 50 
+        # CHANGED: Increase from 50 to 100
+        CHUNK_SIZE = 100 
         for i in range(0, len(all_skus), CHUNK_SIZE):
             sku_chunk = all_skus[i:i + CHUNK_SIZE]
             
