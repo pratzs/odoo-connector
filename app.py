@@ -1648,19 +1648,17 @@ def maintenance_wipe_logs():
             db.session.rollback()
             return jsonify({"error": str(e)})
 
-# --- REPLACEMENT CODE START ---
 @app.route('/sync/inventory', methods=['GET'])
 @require_shopify_session        
 def sync_inventory_endpoint():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
     
-    # Use the 'perform_inventory_sync' function you already defined earlier
-    # 20 Minute timeout because inventory syncs are heavy
-    job = q.enqueue(perform_inventory_sync, shop_url, job_timeout=1200)
+    # CHANGED: Increase timeout from 1200 to 3600 (1 Hour)
+    # This gives your slow Odoo server enough time to finish.
+    job = q.enqueue(perform_inventory_sync, shop_url, job_timeout=3600)
     
     return jsonify({"message": f"Full Inventory Sync Queued (Job ID: {job.get_id()})"})
-# --- REPLACEMENT CODE END ---
 
 # --- ROUTES FOR MANUAL TOOLS ---
 
