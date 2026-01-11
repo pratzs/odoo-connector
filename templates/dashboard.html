@@ -246,6 +246,11 @@
                     <p class="text-muted mb-4">Advanced tools to fix data corruption. Use with caution.</p>
 
                     <div class="d-grid gap-3">
+                        <button onclick="triggerAction('/maintenance/register_webhooks')" class="btn btn-info text-white text-start p-3">
+                            <strong>🔗 Register Webhooks</strong><br>
+                            <small>Tell Shopify to start sending order events.</small>
+                        </button>
+                        
                         <button onclick="triggerAction('/maintenance/fix_variants', 'POST')" class="btn btn-secondary text-start p-3" style="border-left: 4px solid #f4c076;">
                             <strong>🛠 Fix Variant Mess</strong><br>
                             <small>Scans products. Fixes Pack/Unit logic. Deletes bad variants.</small>
