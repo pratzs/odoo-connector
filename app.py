@@ -1188,11 +1188,14 @@ def cleanup_shopify_products(shop_url):
         
 def perform_inventory_sync(shop_url):
     """
-    Runs inside the Worker Process. 
-    OPTIMIZED: Uses batch fetching AND strictly filters for 'Can be Sold'.
+    Runs inside the Worker Process.
+    STRATEGY: Shopify-Driven. 
+    1. Fetches all ~2000 variants from Shopify.
+    2. Asks Odoo for stock of ONLY those SKUs (Batch Mode).
+    3. Updates Shopify if different.
     """
     with app.app_context():
-        log_event('Inventory', 'Info', "Starting Optimized Force Sync...", shop_url=shop_url)
+        log_event('Inventory', 'Info', "Starting Shopify-Driven Sync (Smart Mode)...", shop_url=shop_url)
         
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): return
@@ -1202,83 +1205,96 @@ def perform_inventory_sync(shop_url):
         target_locations = get_config('inventory_locations', [], shop_url=shop_url)
         target_field = get_config('inventory_field', 'qty_available', shop_url=shop_url)
         sync_zero = get_config('sync_zero_stock', False, shop_url=shop_url)
-        
-        # --- THE FIX: ADD 'sale_ok' = True ---
-        domain = [
-            ['type', 'in', ['product', 'consu']], 
-            ['active', '=', True],
-            ['sale_ok', '=', True]  # <--- THIS IS THE MISSING FILTER
-        ]
-        if company_id: domain.append(['company_id', '=', int(company_id)])
-        
+
+        # 1. FETCH SHOPIFY PRODUCTS (The "Source of Truth")
+        shopify_variants = {} # Map: SKU -> Shopify Variant Object
         try:
-            # 1. Search (This should now return ~1972 IDs)
-            all_product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                'product.product', 'search', [domain])
+            # We use product resource to avoid API limits, then drill down to variants
+            page = shopify.Product.find(limit=250)
+            while page:
+                for p in page:
+                    for v in p.variants:
+                        if v.sku:
+                            shopify_variants[v.sku] = v
+                
+                if page.has_next_page(): 
+                    page = page.next_page()
+                else: 
+                    break
         except Exception as e:
-            log_event('Inventory', 'Error', f"Odoo Search Failed: {e}", shop_url=shop_url)
+            log_event('Inventory', 'Error', f"Shopify Fetch Failed: {e}", shop_url=shop_url)
             return
 
-        total_items = len(all_product_ids)
-        log_event('Inventory', 'Info', f"Found {total_items} sellable items. Syncing...", shop_url=shop_url)
-        
-        count = 0
+        total_shopify = len(shopify_variants)
+        log_event('Inventory', 'Info', f"Found {total_shopify} variants in Shopify. Checking Odoo...", shop_url=shop_url)
+
+        # 2. BATCH FETCH FROM ODOO
+        # We break the SKUs into chunks of 1000 to keep Odoo happy
+        all_skus = list(shopify_variants.keys())
         updates = 0
+        processed = 0
         
-        # 2. Process in batches (Optimized)
-        BATCH_SIZE = 50
-        for i in range(0, total_items, BATCH_SIZE):
-            batch_ids = all_product_ids[i:i + BATCH_SIZE]
+        CHUNK_SIZE = 500
+        for i in range(0, len(all_skus), CHUNK_SIZE):
+            sku_chunk = all_skus[i:i + CHUNK_SIZE]
             
-            # A. GET ODOO DATA (BULK)
             try:
-                # Get SKUs
-                p_data_list = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
-                    'product.product', 'read', [batch_ids], {'fields': ['default_code']})
+                # A. Find Odoo IDs for these SKUs
+                domain = [['default_code', 'in', sku_chunk], ['active', '=', True]]
+                if company_id: domain.append(['company_id', '=', int(company_id)])
                 
-                # Get Quantities (The Fast Way)
-                qty_map = odoo.get_stock_batch(batch_ids, target_locations, target_field)
+                odoo_products = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                    'product.product', 'search_read', [domain], {'fields': ['default_code']})
+                
+                # Map Odoo ID -> SKU
+                id_to_sku = {p['id']: p['default_code'] for p in odoo_products}
+                found_ids = list(id_to_sku.keys())
+                
+                if not found_ids: continue
+
+                # B. Get Stock Quantities (Batch Optimized Inline)
+                # We calculate totals manually here to avoid needing 'get_stock_batch' in odoo_client
+                qty_map = {pid: 0 for pid in found_ids}
+                
+                for loc_id in target_locations:
+                    ctx = {'location': loc_id}
+                    stock_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                        'product.product', 'read', [found_ids], {'fields': [target_field], 'context': ctx})
+                    
+                    for record in stock_data:
+                        qty_map[record['id']] += record.get(target_field, 0)
+
+                # C. Compare and Update
+                for pid, total_qty in qty_map.items():
+                    sku = id_to_sku[pid]
+                    sp_variant = shopify_variants.get(sku)
+                    
+                    if not sp_variant: continue
+                    
+                    if sync_zero and total_qty <= 0: continue
+                    
+                    # Update if different
+                    current_shopify_qty = int(sp_variant.inventory_quantity) if sp_variant.inventory_quantity else 0
+                    
+                    if int(total_qty) != current_shopify_qty:
+                        try:
+                            shopify.InventoryLevel.set(
+                                location_id=SHOPIFY_LOCATION_ID,
+                                inventory_item_id=sp_variant.inventory_item_id,
+                                available=int(total_qty)
+                            )
+                            updates += 1
+                        except Exception as e:
+                            print(f"Failed to update {sku}: {e}")
+
+                processed += len(sku_chunk)
+                if processed % 500 == 0:
+                     log_event('Inventory', 'Info', f"Checked {processed}/{total_shopify} items...", shop_url=shop_url)
+
             except Exception as e:
-                print(f"Batch Error: {e}")
-                continue
+                log_event('Inventory', 'Error', f"Batch Error: {e}", shop_url=shop_url)
 
-            # B. PROCESS BATCH
-            for p_data in p_data_list:
-                p_id = p_data['id']
-                sku = p_data.get('default_code')
-                
-                if not sku: continue
-                
-                # Use pre-fetched quantity
-                total_odoo = qty_map.get(p_id, 0)
-                
-                if sync_zero and total_odoo <= 0: continue
-
-                # Get Shopify Qty
-                shopify_info = get_shopify_variant_inv_by_sku(sku, shop_url=shop_url)
-                if not shopify_info: continue
-
-                final_qty = int(total_odoo)
-                current_shopify = int(shopify_info['qty'])
-
-                if current_shopify != final_qty:
-                    try:
-                        shopify.InventoryLevel.set(
-                            location_id=SHOPIFY_LOCATION_ID, 
-                            inventory_item_id=shopify_info['inventory_item_id'], 
-                            available=final_qty
-                        )
-                        updates += 1
-                    except Exception as e: 
-                        print(f"Update failed for {sku}: {e}")
-                
-                count += 1
-            
-            # Log progress every 500 items
-            if count % 500 == 0 and count > 0:
-                log_event('Inventory', 'Info', f"Processed {count}/{total_items}...", shop_url=shop_url)
-
-        log_event('Inventory', 'Success', f"Force Sync Complete: Updated {updates} items.", shop_url=shop_url)
+        log_event('Inventory', 'Success', f"Sync Complete. Checked {total_shopify} items. Updated {updates}.", shop_url=shop_url)
 
 def sync_odoo_cancellations(shop_url):
     """
