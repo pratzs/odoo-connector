@@ -1620,6 +1620,56 @@ def trigger_fix_variants():
     # Changed to Queue
     q.enqueue(fix_variant_mess_task, shop_url, job_timeout=900)
     return jsonify({"message": "Variant Cleanup Queued."})
+
+# In app.py
+
+@app.route('/maintenance/register_webhooks', methods=['GET'])
+@require_shopify_session
+def register_webhooks_manual():
+    shop_url = request.args.get('shop')
+    if not setup_shopify_session(shop_url):
+        return jsonify({"error": "Auth failed"}), 401
+
+    # Ensure HOST is set in your .env (e.g., https://odoo-connector-oivx.onrender.com)
+    app_host = os.getenv('HOST') 
+    if not app_host:
+        return jsonify({"error": "HOST env var is missing! Cannot register webhooks."}), 500
+
+    # Define the hooks we need
+    required_hooks = [
+        {'topic': 'orders/create', 'address': f'{app_host}/webhook/orders'},
+        {'topic': 'orders/updated', 'address': f'{app_host}/webhook/orders'},
+        {'topic': 'orders/cancelled', 'address': f'{app_host}/webhook/orders'},
+        {'topic': 'products/create', 'address': f'{app_host}/webhook/products/create'},
+        {'topic': 'products/update', 'address': f'{app_host}/webhook/products/update'}
+    ]
+
+    results = []
+    
+    # Fetch existing to avoid duplicates
+    existing_hooks = shopify.Webhook.find()
+    existing_addresses = [h.address for h in existing_hooks]
+
+    for hook in required_hooks:
+        # Check if a hook with this topic AND address already exists
+        match = next((h for h in existing_hooks if h.topic == hook['topic'] and h.address == hook['address']), None)
+        
+        if not match:
+            new_hook = shopify.Webhook()
+            new_hook.topic = hook['topic']
+            new_hook.address = hook['address']
+            new_hook.format = 'json'
+            try:
+                if new_hook.save():
+                    results.append(f"✅ Created {hook['topic']}")
+                else:
+                    results.append(f"❌ Failed {hook['topic']}: {new_hook.errors.full_messages()}")
+            except Exception as e:
+                results.append(f"❌ Error {hook['topic']}: {str(e)}")
+        else:
+            results.append(f"⏭️ Exists {hook['topic']}")
+
+    return jsonify({"message": "Webhook Registration Complete", "details": results})
     
     
 
