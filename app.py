@@ -1229,7 +1229,7 @@ def perform_inventory_sync(shop_url):
         log_event('Inventory', 'Info', f"Found {total_shopify} variants in Shopify. Checking Odoo...", shop_url=shop_url)
 
         # 2. BATCH FETCH FROM ODOO
-        # We break the SKUs into chunks of 1000 to keep Odoo happy
+        # We break the SKUs into chunks of 500 to keep Odoo happy
         all_skus = list(shopify_variants.keys())
         updates = 0
         processed = 0
@@ -1295,6 +1295,7 @@ def perform_inventory_sync(shop_url):
                 log_event('Inventory', 'Error', f"Batch Error: {e}", shop_url=shop_url)
 
         log_event('Inventory', 'Success', f"Sync Complete. Checked {total_shopify} items. Updated {updates}.", shop_url=shop_url)
+
 
 def sync_odoo_cancellations(shop_url):
     """
