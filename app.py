@@ -1265,6 +1265,52 @@ def perform_inventory_sync(shop_url):
 
         log_event('Inventory', 'Success', f"Force Sync Complete: Updated {updates} items.", shop_url=shop_url)
 
+def sync_odoo_cancellations(shop_url):
+    """
+    Checks for orders cancelled in Odoo and cancels them in Shopify.
+    """
+    with app.app_context():
+        odoo = get_odoo_connection(shop_url)
+        if not odoo or not setup_shopify_session(shop_url): return
+
+        # 1. Look back 60 minutes for cancelled orders
+        cutoff = datetime.utcnow() - timedelta(minutes=60)
+        company_id = get_config('odoo_company_id', shop_url=shop_url)
+
+        try:
+            # Re-use the client helper method
+            cancelled_orders = odoo.get_recently_cancelled_orders(str(cutoff), company_id)
+        except Exception as e:
+            log_event('Cancel Sync', 'Error', f"Odoo Search Failed: {e}", shop_url=shop_url)
+            return
+
+        sync_count = 0
+        for o_order in cancelled_orders:
+            ref = o_order.get('client_order_ref', '')
+            if not ref.startswith('ONLINE_'): continue
+            
+            shopify_name = ref.replace('ONLINE_', '').strip()
+            
+            try:
+                # 2. Find in Shopify
+                orders = shopify.Order.find(name=shopify_name, status='any')
+                if not orders: continue
+                sp_order = orders[0]
+
+                # 3. Cancel if open
+                if sp_order.cancelled_at is None:
+                    sp_order.cancel(reason="other", email=False) # email=False prevents spamming customer
+                    sync_count += 1
+                    log_event('Cancel Sync', 'Success', f"Cancelled Shopify Order {shopify_name} (Source: Odoo)", shop_url=shop_url)
+            
+            except Exception as e:
+                # 422 usually means "Already cancelled" or "Cannot cancel fulfilled order"
+                if "422" not in str(e):
+                    log_event('Cancel Sync', 'Error', f"Failed to cancel {shopify_name}: {e}", shop_url=shop_url)
+
+        if sync_count > 0:
+            log_event('Cancel Sync', 'Success', f"Synced {sync_count} cancellations from Odoo.", shop_url=shop_url)
+
 def sync_odoo_fulfillments(shop_url):
     """
     Multi-Tenant: Odoo -> Shopify Fulfillment Sync.
@@ -1904,11 +1950,12 @@ def order_webhook():
     order_num = data.get('name')
 
     # 3. Handle Cancellation (Keep this fast & simple)
+    # 3. Handle Cancellation
     if topic == 'orders/cancelled':
-        with app.app_context():
-            process_cancellation(data)
-            log_event('Order', 'Info', f"Webhook: Order {order_num} cancelled.", shop_url=shop_url)
-        return "Cancellation Processed", 200
+        # CHANGED: We now pass shop_url to the function
+        # Using a background thread or queue here is best practice to avoid timeouts
+        q.enqueue(process_cancellation, data, shop_url) 
+        return "Cancellation Queued", 200
 
     # 4. QUEUE THE SYNC (The Fix)
     # Instead of running process_order_data immediately, we send it to Redis.
@@ -2007,21 +2054,41 @@ def api_save_settings():
         return jsonify({"message": f"Save Error: {str(e)}"}), 500
 
 
-def process_cancellation(data):
-    """Handles Shopify -> Odoo Cancellation."""
+def process_cancellation(data, shop_url):
+    """
+    Handles Shopify -> Odoo Cancellation.
+    Finds the Odoo sale order by reference and cancels it.
+    """
     shopify_name = data.get('name')
     client_ref = f"ONLINE_{shopify_name}"
     
-    # We need to get Odoo client here somehow, or pass it in. 
-    # For now assuming this runs in context where we can get it or this needs refactor
-    # This function was missing context in provided snippet, kept as is structure-wise
-    # but added minimal error handling to prevent crash if odoo var missing
+    odoo = get_odoo_connection(shop_url)
+    if not odoo:
+        log_event('Order Cancel', 'Error', f"Could not connect to Odoo for {shop_url}", shop_url=shop_url)
+        return
+
     try:
-        # WARNING: In multi-tenant, this function needs 'odoo' object passed or created
-        # Assuming single tenant behavior for this specific fallback or provided snippets
-        pass 
+        # 1. Find the Order ID in Odoo
+        domain = [['client_order_ref', '=', client_ref]]
+        # Also check 'origin' just in case
+        ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+            'sale.order', 'search', [domain])
+        
+        if not ids:
+            log_event('Order Cancel', 'Warning', f"Order {client_ref} not found in Odoo. Skipping.", shop_url=shop_url)
+            return
+
+        order_id = ids[0]
+
+        # 2. Check current state (cannot cancel if 'done' or 'locked')
+        # We try anyway, let Odoo handle the state logic
+        if odoo.cancel_order(order_id):
+            log_event('Order Cancel', 'Success', f"Cancelled Odoo Order {client_ref}", shop_url=shop_url)
+        else:
+            log_event('Order Cancel', 'Warning', f"Could not cancel {client_ref} (Check Odoo state)", shop_url=shop_url)
+
     except Exception as e:
-        log_event('Order Cancel', 'Error', f"Error processing cancellation for {shopify_name}: {e}")
+        log_event('Order Cancel', 'Error', f"Error processing cancellation for {shopify_name}: {e}", shop_url=shop_url)
         
 
 # 1. Define Cleanup Function FIRST
@@ -2055,6 +2122,8 @@ def run_schedule():
     schedule.every(3).days.at("05:00").do(lambda: run_job_for_all_shops(archive_shopify_duplicates, "Duplicate Archive"))
     schedule.every(10).minutes.do(lambda: run_job_for_all_shops(scheduled_inventory_sync, "Inventory Sync"))
     schedule.every(60).minutes.do(lambda: run_job_for_all_shops(sync_odoo_fulfillments, "Fulfillment Sync"))
+    schedule.every(3).minutes.do(lambda: run_job_for_all_shops(sync_odoo_cancellations, "Cancellation Sync"))
+    
     
     # Global maintenance (once per day)
     schedule.every().day.at("06:00").do(lambda: threading.Thread(target=cleanup_old_logs).start())
