@@ -2444,8 +2444,8 @@ print(">>> SYSTEM STARTUP: VERSION 6.0 - FINAL FIXES <<<")
 print("**************************************************")
 
 # Start scheduler thread
-t = threading.Thread(target=run_schedule, daemon=True)
-t.start()
+# t = threading.Thread(target=run_schedule, daemon=True)
+# t.start()
     
 if __name__ == '__main__':
     app.run(debug=True)
