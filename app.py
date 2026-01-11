@@ -910,10 +910,18 @@ def sync_customers_master(shop_url):
                     c = shopify.Customer()
                     c.email = email
                 
-                # 5. Map Basic Fields
-                c.first_name = p.get('name', '').split(' ')[0]
-                c.last_name = ' '.join(p.get('name', '').split(' ')[1:]) or 'Customer'
-                c.phone = p.get('phone') or p.get('mobile')
+                # --- FIX STARTS HERE ---
+                # 5. Map Basic Fields (Handle Odoo 'False' for empty names)
+                # Odoo returns False for empty fields, so we use "or ''" to force it to a string
+                raw_name = p.get('name') or '' 
+                
+                # Safe Split
+                name_parts = raw_name.split(' ')
+                c.first_name = name_parts[0] if name_parts else 'Customer'
+                c.last_name = ' '.join(name_parts[1:]) if len(name_parts) > 1 else 'Customer'
+                
+                # Phone might also be False
+                c.phone = (p.get('phone') or p.get('mobile') or '').strip()
                 c.verified_email = True
                 
                 # 6. Map Address & Company
