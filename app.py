@@ -1189,9 +1189,10 @@ def cleanup_shopify_products(shop_url):
 def perform_inventory_sync(shop_url):
     """
     Runs inside the Worker Process. 
+    OPTIMIZED: Uses batch fetching for Odoo stock.
     """
     with app.app_context():
-        log_event('Inventory', 'Info', "Starting Force Sync...", shop_url=shop_url)
+        log_event('Inventory', 'Info', "Starting Optimized Force Sync...", shop_url=shop_url)
         
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): return
@@ -1201,8 +1202,7 @@ def perform_inventory_sync(shop_url):
         target_locations = get_config('inventory_locations', [], shop_url=shop_url)
         target_field = get_config('inventory_field', 'qty_available', shop_url=shop_url)
         sync_zero = get_config('sync_zero_stock', False, shop_url=shop_url)
-        combine_committed = get_config('combine_committed', False, shop_url=shop_url)
-
+        
         # 1. Fetch ALL Storable Products
         domain = [['type', 'in', ['product', 'consu']], ['active', '=', True]]
         if company_id: domain.append(['company_id', '=', int(company_id)])
@@ -1220,47 +1220,49 @@ def perform_inventory_sync(shop_url):
         count = 0
         updates = 0
         
-        # 2. Process in batches
+        # 2. Process in batches (Optimized)
         BATCH_SIZE = 50
         for i in range(0, total_items, BATCH_SIZE):
             batch_ids = all_product_ids[i:i + BATCH_SIZE]
             
+            # A. GET ODOO DATA (BULK)
             try:
+                # Get SKUs
                 p_data_list = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
-                    'product.product', 'read', [batch_ids], {'fields': ['default_code', 'uom_id', 'sh_is_secondary_unit']})
-            except: continue
+                    'product.product', 'read', [batch_ids], {'fields': ['default_code']})
+                
+                # Get Quantities (The Fast Way)
+                qty_map = odoo.get_stock_batch(batch_ids, target_locations, target_field)
+            except Exception as e:
+                print(f"Batch Error: {e}")
+                continue
 
+            # B. PROCESS BATCH
             for p_data in p_data_list:
                 p_id = p_data['id']
                 sku = p_data.get('default_code')
+                
                 if not sku: continue
-
-                # Get Odoo Qty
-                total_odoo = odoo.get_total_qty_for_locations(p_id, target_locations, field_name=target_field)
+                
+                # Use pre-fetched quantity
+                total_odoo = qty_map.get(p_id, 0)
+                
                 if sync_zero and total_odoo <= 0: continue
 
-                # Get Shopify Qty
-                shopify_info = get_shopify_variant_inv_by_sku(sku)
+                # Get Shopify Qty (Still 1-by-1, but unavoidable)
+                shopify_info = get_shopify_variant_inv_by_sku(sku, shop_url=shop_url)
                 if not shopify_info: continue
 
-                # Calculate Committed (Optional)
-                committed_qty = 0
-                if combine_committed:
-                    try:
-                        gid_query = '{ productVariants(first: 1, query: "sku:%s") { edges { node { inventoryItem { inventoryLevel(locationId: "gid://shopify/Location/%s") { quantities(names: ["committed"]) { quantity } } } } } } }' % (sku, os.getenv('SHOPIFY_WAREHOUSE_ID', ''))
-                        client = shopify.GraphQL()
-                        res = json.loads(client.execute(gid_query))
-                        qs = res['data']['productVariants']['edges'][0]['node']['inventoryItem']['inventoryLevel']['quantities']
-                        if qs: committed_qty = int(qs[0]['quantity'])
-                    except: pass
-
-                # Push if different
-                final_qty = int(total_odoo) + (committed_qty if combine_committed else 0)
+                final_qty = int(total_odoo)
                 current_shopify = int(shopify_info['qty'])
 
                 if current_shopify != final_qty:
                     try:
-                        shopify.InventoryLevel.set(location_id=SHOPIFY_LOCATION_ID, inventory_item_id=shopify_info['inventory_item_id'], available=final_qty)
+                        shopify.InventoryLevel.set(
+                            location_id=SHOPIFY_LOCATION_ID, 
+                            inventory_item_id=shopify_info['inventory_item_id'], 
+                            available=final_qty
+                        )
                         updates += 1
                     except Exception as e: 
                         print(f"Update failed for {sku}: {e}")
@@ -1268,7 +1270,7 @@ def perform_inventory_sync(shop_url):
                 count += 1
             
             # Log progress every 500 items
-            if count % 500 == 0:
+            if count % 500 == 0 and count > 0:
                 log_event('Inventory', 'Info', f"Processed {count}/{total_items}...", shop_url=shop_url)
 
         log_event('Inventory', 'Success', f"Force Sync Complete: Updated {updates} items.", shop_url=shop_url)
