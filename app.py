@@ -1228,8 +1228,8 @@ def perform_inventory_sync(shop_url):
         updates = 0
         processed = 0
         
-        # CHANGED: Increase from 50 to 100
-        CHUNK_SIZE = 100 
+        # CHANGED: Reduce to 10 to prevent Odoo timeout
+        CHUNK_SIZE = 10 
         for i in range(0, len(all_skus), CHUNK_SIZE):
             sku_chunk = all_skus[i:i + CHUNK_SIZE]
             
