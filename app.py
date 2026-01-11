@@ -1,4 +1,6 @@
 import os
+import logging
+import socket
 import hmac
 import hashlib
 import base64
@@ -21,6 +23,8 @@ import xmlrpc.client
 from sqlalchemy import text
 import ssl
 import gc
+
+socket.setdefaulttimeout(60) # Force 60-second timeout for all network calls
 
 # --- PUBLIC APP CONFIG ---
 SHOPIFY_API_KEY = os.getenv('SHOPIFY_API_KEY')
