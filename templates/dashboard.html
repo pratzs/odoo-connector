@@ -67,6 +67,9 @@
                     <a href="/install?shop={{ shop_url }}" class="btn btn-sm btn-secondary w-100" target="_top">
                         <i class="bi bi-shield-lock"></i> Re-Authenticate Shopify
                     </a>
+                    <button id="btnSyncLocs" onclick="syncLocations()" class="btn btn-sm btn-info w-100 text-white">
+                    <i class="bi bi-geo-alt"></i> Sync Warehouse Locations
+                    </button>
                 </div>
 
                 <div class="card p-3">
@@ -267,6 +270,11 @@
                         <button onclick="triggerAction('/maintenance/purge_junk')" class="btn btn-secondary text-start p-3" style="border-left: 4px solid #d82c0d;">
                             <strong>🗑 Purge Junk Products</strong><br>
                             <small>Deletes Shopify products that do not exist in Odoo.</small>
+                        </button>
+
+                        <button onclick="triggerAction('/maintenance/clear_product_map', 'POST')" class="btn btn-outline-danger text-start p-3 mt-3">
+                        <strong>🧹 Clear Local Product Map</strong><br>
+                        <small>Force the app to re-link Shopify products to Odoo IDs from scratch.</small>
                         </button>
                         
                         <div class="row">
@@ -596,6 +604,36 @@ function handleSidebarNavigation() {
         document.getElementById('tab-overview').classList.add('active');
         document.getElementById('btn-overview').classList.add('active');
     }
+}
+
+
+        function syncLocations() {
+    if(!confirm("Refresh warehouse locations from Odoo? This will update the list in your settings.")) return;
+    
+    const btn = document.getElementById('btnSyncLocs');
+    const originalText = btn.innerHTML;
+    
+    // Show Loading State
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Syncing...';
+    btn.disabled = true;
+
+    fetch(`/api/odoo/refresh_locations?shop=${CURRENT_SHOP_URL}`)
+        .then(response => response.json())
+        .then(data => {
+            if(data.error) throw new Error(data.error);
+            showToast(data.message || "Locations refreshed!");
+            
+            // Reload after a short delay so the user sees the success message
+            setTimeout(() => {
+                window.location.hash = 'settings';
+                window.location.reload();
+            }, 1500);
+        })
+        .catch(err => {
+            showToast("Error: " + err.message);
+            btn.innerHTML = originalText;
+            btn.disabled = false;
+        });
 }
 
 // THIS PART WAS MISSING:
