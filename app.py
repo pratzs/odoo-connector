@@ -2081,6 +2081,61 @@ def api_save_settings():
         db.session.rollback()
         return jsonify({"message": f"Save Error: {str(e)}"}), 500
 
+@app.route('/test/odoo_health', methods=['GET'])
+def test_odoo_health():
+    shop_url = request.args.get('shop')
+    if not shop_url: return "Missing shop param"
+    
+    import time
+    log = []
+    
+    def add_log(msg):
+        print(msg)
+        log.append(msg + "<br>")
+
+    add_log(f"--- DIAGNOSTIC START FOR {shop_url} ---")
+    
+    try:
+        # 1. Test Connection & Auth
+        start = time.time()
+        odoo = get_odoo_connection(shop_url)
+        if not odoo:
+            return "FAILED: Could not authenticate (Check credentials)."
+        auth_time = round(time.time() - start, 2)
+        add_log(f"✅ Authentication successful ({auth_time}s)")
+        
+        # 2. Test Version (Lightweight Ping)
+        start = time.time()
+        version = odoo.common.version()
+        ping_time = round(time.time() - start, 2)
+        add_log(f"✅ Odoo Ping (Version Check): Alive ({ping_time}s)")
+        add_log(f"Server Version: {version.get('server_version')}")
+
+        # 3. Test SIMPLE Search (The step failing in Sync)
+        add_log("Attempting to search for 1 product (limit=1)...")
+        start = time.time()
+        
+        # We search for ANY product, just to test the DB read
+        ids = odoo.models.execute_kw(
+            odoo.db, odoo.uid, odoo.password,
+            'product.product', 'search', 
+            [[['active', '=', True]]], 
+            {'limit': 1}
+        )
+        search_time = round(time.time() - start, 2)
+        
+        if ids:
+            add_log(f"✅ Search successful! Found ID: {ids[0]} ({search_time}s)")
+        else:
+            add_log(f"✅ Search successful but returned 0 items ({search_time}s)")
+
+        add_log("--- DIAGNOSTIC PASSED ---")
+        return "".join(log)
+
+    except Exception as e:
+        add_log(f"❌ CRITICAL FAILURE: {str(e)}")
+        return "".join(log)
+
 
 def process_cancellation(data, shop_url):
     """
