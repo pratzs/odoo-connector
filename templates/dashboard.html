@@ -190,6 +190,19 @@
                                 <label class="form-label-sm">Locations</label>
                                 <div id="locationList" class="small">Loading...</div>
                             </div>
+                            <div class="card p-4 mt-3">
+                            <div class="section-header">📧 Inventory Alerts</div>
+                            <div class="mb-3">
+                                <label class="form-label-sm">Alert Email Address</label>
+                                <input type="email" class="form-control" id="alertEmail" placeholder="alerts@yourstore.com" value="{{ config.alert_email if config.alert_email else '' }}">
+                                <div class="form-text">Reports are sent here when stock discrepancies exceed the threshold.</div>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label-sm">Discrepancy Threshold (Units)</label>
+                                <input type="number" class="form-control" id="alertThreshold" value="{{ config.alert_threshold if config.alert_threshold else 50 }}">
+                                <div class="form-text">Flag products if the Odoo vs Shopify difference is greater than this amount.</div>
+                            </div>
+                        </div>
                         </div>
                     </div>
                 </div>
@@ -433,6 +446,8 @@ document.addEventListener("DOMContentLoaded", function() {
             setCheck('checkZeroStock', SAVED_SETTINGS.sync_zero_stock); // Changed from sync_zero
             setCheck('checkCommitted', SAVED_SETTINGS.combine_committed);
             setVal('invType', SAVED_SETTINGS.inventory_field || 'qty_available'); // Changed from field
+            setVal('alertEmail', SAVED_SETTINGS.alert_email || '');
+            setVal('alertThreshold', SAVED_SETTINGS.alert_threshold || 50);
 
             // Customers
             setVal('custSyncDirection', SAVED_SETTINGS.cust_direction || 'bidirectional');
@@ -535,6 +550,8 @@ function saveSettings() {
         cust_sync_tags: document.getElementById('custSyncTagsSwitch').checked,
         cust_whitelist_tags: document.getElementById('custWhitelistTags').value,
         cust_blacklist_tags: document.getElementById('custBlacklistTags').value
+        alert_email: document.getElementById('alertEmail').value,
+        alert_threshold: parseInt(document.getElementById('alertThreshold').value) || 50,
     };
 
     showToast("Saving...");
