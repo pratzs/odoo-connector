@@ -2776,10 +2776,49 @@ def fix_variant_mess_task(shop_url):
         log_event('Cleanup', 'Success', f"Done. Scanned {processed}, Repaired {repaired}.", shop_url=shop_url)
 
 
-# --- SYSTEM STARTUP ---
-print("**************************************************")
-print(">>> SYSTEM STARTUP: VERSION 6.0 - FINAL FIXES <<<")
-print("**************************************************")
+# --- GDPR WEBHOOKS ---
+@app.route('/gdpr/customers/data_request', methods=['POST'])
+def gdpr_customer_data_request():
+    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')):
+        return "Unauthorized", 401
+    # You are supposed to email the merchant data here. 
+    # For now, acknowledge receipt.
+    return "Acknowledged", 200
+
+@app.route('/gdpr/customers/redact', methods=['POST'])
+def gdpr_customer_redact():
+    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')):
+        return "Unauthorized", 401
+    
+    # Logic: Remove customer mapping from your DB if it exists
+    try:
+        data = request.json
+        shop_url = request.headers.get('X-Shopify-Shop-Domain')
+        shopify_customer_id = str(data.get('customer', {}).get('id'))
+        
+        with app.app_context():
+            CustomerMap.query.filter_by(shop_url=shop_url, shopify_customer_id=shopify_customer_id).delete()
+            db.session.commit()
+    except: pass
+    
+    return "Acknowledged", 200
+
+@app.route('/gdpr/shop/redact', methods=['POST'])
+def gdpr_shop_redact():
+    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')):
+        return "Unauthorized", 401
+    
+    # Logic: Mark shop as inactive or delete config
+    try:
+        shop_url = request.headers.get('X-Shopify-Shop-Domain')
+        with app.app_context():
+            shop = Shop.query.filter_by(shop_url=shop_url).first()
+            if shop:
+                shop.is_active = False # Soft delete
+                db.session.commit()
+    except: pass
+
+    return "Acknowledged", 200
 
 # Start scheduler thread
 # t = threading.Thread(target=run_schedule, daemon=True)
