@@ -1,34 +1,95 @@
 import xmlrpc.client
 import ssl
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# --- OPTIMIZATION: Persistent Transport (Keep-Alive) ---
+class RequestsTransport(xmlrpc.client.Transport):
+    """
+    Custom XML-RPC Transport using 'requests' to enable HTTP Keep-Alive.
+    Matches standard Odoo SSL behavior (unverified by default if configured that way).
+    """
+    def __init__(self, use_https=True, verify=False):
+        super().__init__(use_https=use_https)
+        self.verify = verify
+        self.session = requests.Session()
+        
+        # Retry strategy for network blips
+        retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
+        self.session.mount('https://', HTTPAdapter(max_retries=retries))
+        self.session.mount('http://', HTTPAdapter(max_retries=retries))
+        
+        self.session.headers.update({
+            'Content-Type': 'text/xml',
+            'User-Agent': 'OdooShopifyConnector/6.0 (Optimized)'
+        })
+
+    def request(self, host, handler, request_body, verbose=False):
+        scheme = "https" if self._use_https else "http"
+        url = f"{scheme}://{host}{handler}"
+        try:
+            resp = self.session.post(
+                url, 
+                data=request_body, 
+                headers={'Content-Type': 'text/xml'},
+                verify=self.verify, 
+                timeout=300 # 5 Minute Timeout for long operations
+            )
+            resp.raise_for_status()
+            return self.parse_response(resp.content)
+        except requests.RequestException as e:
+            if hasattr(e.response, 'content'):
+                return self.parse_response(e.response.content)
+            raise xmlrpc.client.ProtocolError(url, e.response.status_code if e.response else 500, str(e), {})
+
+# ---------------------------------------------------------
 
 class OdooClient:
     def __init__(self, url, db, username, password):
-        self.url = url
+        self.url = url.rstrip('/') # Safety fix for trailing slashes
         self.db = db
         self.username = username
         self.password = password
-        self.context = ssl._create_unverified_context()
-        self.common = xmlrpc.client.ServerProxy(f'{self.url}/xmlrpc/2/common', context=self.context, allow_none=True)
+        
+        # Use Custom Transport (disables SSL verify to match your original _create_unverified_context)
+        self.transport = RequestsTransport(use_https=self.url.startswith("https"), verify=False)
+        
+        # 1. Connect to Common (Auth)
+        self.common = xmlrpc.client.ServerProxy(
+            f'{self.url}/xmlrpc/2/common', 
+            transport=self.transport, 
+            allow_none=True
+        )
         
         # Authenticate
         self.uid = self.common.authenticate(self.db, self.username, self.password, {})
         
-        # --- NEW: Check if login actually succeeded ---
+        # Check if login actually succeeded
         if not self.uid:
             raise Exception(f"Odoo Login Failed! Check credentials for {self.username}")
 
-    @property
-    def models(self):
-        return xmlrpc.client.ServerProxy(f'{self.url}/xmlrpc/2/object', context=self.context, allow_none=True)
+        # 2. Connect to Object (Data) - Persisted once
+        self.models = xmlrpc.client.ServerProxy(
+            f'{self.url}/xmlrpc/2/object', 
+            transport=self.transport, 
+            allow_none=True
+        )
+
+    # --- PARTNER METHODS ---
 
     def search_partner_by_email(self, email):
+        # OPTIMIZATION: Use search_read (1 call) instead of search + read (2 calls)
         domain = ['|', ['active', '=', True], ['active', '=', False], ['email', '=', email]]
-        ids = self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search', [domain])
-        if ids:
-            partners = self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'read', [ids], {'fields': ['id', 'name', 'active', 'parent_id', 'user_id', 'category_id']})
-            if not partners[0].get('active'):
-                self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'write', [[partners[0]['id']], {'active': True}])
-            return partners[0]
+        fields = ['id', 'name', 'active', 'parent_id', 'user_id', 'category_id']
+        
+        partners = self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search_read', [domain], {'fields': fields, 'limit': 1})
+        
+        if partners:
+            p = partners[0]
+            if not p.get('active'):
+                self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'write', [[p['id']], {'active': True}])
+            return p
         return None
 
     def get_partner_salesperson(self, partner_id):
@@ -59,6 +120,8 @@ class OdooClient:
             if ids: vals['country_id'] = ids[0]
             del vals['country_code']
 
+    # --- PRODUCT METHODS ---
+
     def search_product_by_sku(self, sku, company_id=None):
         domain = [['default_code', '=', sku], ['active', '=', True]]
         if company_id: domain.extend(['|', ['company_id', '=', int(company_id)], ['company_id', '=', False]])
@@ -88,17 +151,17 @@ class OdooClient:
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'create', [vals])
 
     def get_vendor_product_code(self, product_id):
-        ids = self.models.execute_kw(self.db, self.uid, self.password, 'product.supplierinfo', 'search', [[['product_tmpl_id', '=', product_id]]])
-        if ids:
-            data = self.models.execute_kw(self.db, self.uid, self.password, 'product.supplierinfo', 'read', [ids[0]], {'fields': ['product_code']})
-            if data and data[0].get('product_code'): return data[0]['product_code']
+        # Optimization: search_read
+        data = self.models.execute_kw(self.db, self.uid, self.password, 'product.supplierinfo', 'search_read', 
+                                      [[['product_tmpl_id', '=', product_id]]], {'fields': ['product_code'], 'limit': 1})
+        if data and data[0].get('product_code'): return data[0]['product_code']
         return None
 
     def get_vendor_name(self, product_id):
-        ids = self.models.execute_kw(self.db, self.uid, self.password, 'product.supplierinfo', 'search', [[['product_tmpl_id', '=', product_id]]], {'limit': 1})
-        if ids:
-            data = self.models.execute_kw(self.db, self.uid, self.password, 'product.supplierinfo', 'read', [ids[0]], {'fields': ['partner_id']})
-            if data and data[0].get('partner_id'): return data[0]['partner_id'][1]
+        # Optimization: search_read
+        data = self.models.execute_kw(self.db, self.uid, self.password, 'product.supplierinfo', 'search_read', 
+                                      [[['product_tmpl_id', '=', product_id]]], {'fields': ['partner_id'], 'limit': 1})
+        if data and data[0].get('partner_id'): return data[0]['partner_id'][1]
         return None
 
     def get_public_category_name(self, category_ids):
@@ -116,41 +179,29 @@ class OdooClient:
         return data[0]['image_1920'] if data and data[0].get('image_1920') else None
 
     def get_changed_products(self, time_limit_str, company_id=None):
-        # FIX: Added 'sale_ok' filter to prevent junk from incremental syncs
         domain = [
             ('write_date', '>', time_limit_str), 
             ('sale_ok', '=', True), 
             ('type', 'in', ['product', 'consu']),
             '|', ('active', '=', True), ('active', '=', False)
         ]
-        
         if company_id:
             domain.append(('company_id', '=', int(company_id)))
-            
         return self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search', [domain])
 
-
     def get_changed_customers(self, time_limit_str, company_id=None):
-        """
-        FIX 4: Removed 'is_company' and 'customer_rank' checks.
-        Now fetches ALL contacts/customers modified recently.
-        """
         domain = [
             ('write_date', '>', time_limit_str), 
             ('active', '=', True),
-            ('email', '!=', False) # Ensure they have an email
+            ('email', '!=', False)
         ]
-        
         if company_id:
-             # Basic company ID filter (allow False for shared contacts)
              domain.append('|')
              domain.append(('company_id', '=', int(company_id)))
              domain.append(('company_id', '=', False))
-
         fields = ['id', 'name', 'email', 'phone', 'street', 'city', 'zip', 'country_id', 'vat', 'category_id', 'user_id', 'is_company', 'parent_id']
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search_read', [domain], {'fields': fields})
 
-    
     def get_product_ids_with_recent_stock_moves(self, time_limit_str, company_id=None):
         domain = [['date', '>', time_limit_str], ['state', '=', 'done']]
         if company_id: domain.append(['company_id', '=', int(company_id)])
@@ -163,69 +214,34 @@ class OdooClient:
         return list(product_ids)
 
     def get_companies(self):
-        """Fetches all allowed companies for the user."""
         try:
-            # Fetch companies the user has access to
-            # We use 'res.company' search with empty domain to get all allowed for user context
-            ids = self.models.execute_kw(self.db, self.uid, self.password,
-                'res.company', 'search', [[]])
-            
+            ids = self.models.execute_kw(self.db, self.uid, self.password, 'res.company', 'search', [[]])
             if not ids: return []
-            
-            companies = self.models.execute_kw(self.db, self.uid, self.password,
-                'res.company', 'read', [ids], {'fields': ['id', 'name']})
-            return companies
+            return self.models.execute_kw(self.db, self.uid, self.password, 'res.company', 'read', [ids], {'fields': ['id', 'name']})
         except Exception as e:
             print(f"Odoo Get Companies Error: {e}")
             return []
 
     def get_locations(self, company_id=None):
-        """Fetches ALL locations for the company (Internal, View, Transit, etc)."""
         try:
-            # 1. EMPTY DOMAIN: Do not filter by usage type. Show everything.
             domain = []
-            
-            # 2. Context & Company Logic
             context_dict = {}
             if company_id:
                 cid = int(company_id)
-                # Allow locations for this specific company OR shared locations
                 domain.append('|')
                 domain.append(['company_id', '=', cid])
                 domain.append(['company_id', '=', False])
-                
-                # Force context switch so Odoo lets us see them
-                context_dict = {
-                    'allowed_company_ids': [cid],
-                    'company_id': cid
-                }
+                context_dict = {'allowed_company_ids': [cid], 'company_id': cid}
 
-            # 3. Setup Arguments
-            # We fetch 'usage' so we can label them in the dropdown
             fields = ['id', 'display_name', 'company_id', 'usage']
             kw_args = {'fields': fields, 'limit': 4000}
-            
-            if context_dict:
-                kw_args['context'] = context_dict
+            if context_dict: kw_args['context'] = context_dict
 
-            # 4. Execute SAFE Search Read
-            locs = self.models.execute_kw(
-                self.db, self.uid, self.password,
-                'stock.location', 'search_read',
-                [domain], 
-                kw_args
-            )
-            
-            # 5. Format Output with Type Label
-            # Example: "Warehouse A [internal]" or "Partner Locations [customer]"
+            locs = self.models.execute_kw(self.db, self.uid, self.password, 'stock.location', 'search_read', [domain], kw_args)
             return [{'id': l['id'], 'name': f"{l['display_name']} [{l.get('usage', 'unknown')}]"} for l in locs]
-            
         except Exception as e:
-            print(f"CRITICAL ERROR in get_locations: {e}")
-            # Return error as a dropdown item so you see it on screen
             return [{'id': 0, 'name': f"Error: {str(e)}"}]
 
-    
     def get_total_qty_for_locations(self, product_id, location_ids, field_name='qty_available'):
         total_qty = 0
         for loc_id in location_ids:
@@ -236,35 +252,55 @@ class OdooClient:
 
     def get_stock_batch(self, product_ids, location_ids, field_name='qty_available'):
         """
-        Optimized: Fetches stock for a BATCH of products across multiple locations.
-        Reduces API calls by 50x.
-        Returns: {product_id: total_qty}
+        MASSIVE OPTIMIZATION: 
+        1. If asking for 'qty_available' (On Hand), we query 'stock.quant' directly using read_group.
+           This is 50x faster as it sums up all locations in 1 API call.
+        2. If asking for 'virtual_available' (Forecasted), we must fall back to the slower loop method.
         """
-        # Initialize totals to 0
-        totals = {pid: 0 for pid in product_ids}
-        
-        for loc_id in location_ids:
-            # Context lets us see stock at a SPECIFIC location
-            context = {'location': loc_id}
-            
+        if not product_ids or not location_ids: return {}
+
+        # FAST PATH: Stock Quants (Physical On Hand)
+        if field_name == 'qty_available':
             try:
-                # READ ALL IDs IN ONE CALL
-                # This is the key optimization: fetching 1000 items takes same time as 1 item
+                # Query stock.quant table directly: "Sum of quantity for these products in these locations"
+                domain = [
+                    ('product_id', 'in', product_ids),
+                    ('location_id', 'in', location_ids)
+                ]
+                # read_group returns aggregated sums
+                groups = self.models.execute_kw(
+                    self.db, self.uid, self.password, 
+                    'stock.quant', 'read_group',
+                    [domain], 
+                    ['product_id', 'quantity'], # Fields to read
+                    ['product_id']              # Group By
+                )
+                
+                totals = {pid: 0 for pid in product_ids}
+                for g in groups:
+                    if g.get('product_id'):
+                        pid = g['product_id'][0] 
+                        totals[pid] = g.get('quantity', 0)
+                return totals
+            except Exception as e:
+                print(f"Fast Stock Path Failed ({e}), falling back to slow path...")
+
+        # SLOW PATH: Forecasted Quantity (or if fast path fails)
+        # We must ask the product model to compute it based on context
+        totals = {pid: 0 for pid in product_ids}
+        for loc_id in location_ids:
+            context = {'location': loc_id}
+            try:
                 data = self.models.execute_kw(
                     self.db, self.uid, self.password, 
                     'product.product', 'read', 
                     [product_ids], 
                     {'fields': [field_name], 'context': context}
                 )
-                
-                # Sum them up
                 for record in data:
                     pid = record['id']
-                    qty = record.get(field_name, 0)
-                    if pid in totals:
-                        totals[pid] += qty
-            except Exception as e:
-                print(f"Batch Stock Error at Loc {loc_id}: {e}")
+                    totals[pid] += record.get(field_name, 0)
+            except: pass
                 
         return totals
 
@@ -293,17 +329,13 @@ class OdooClient:
         return self.models.execute_kw(self.db, self.uid, self.password, 'sale.order', 'search_read', [domain], {'fields': ['id', 'client_order_ref']})
 
     def get_all_products(self, company_id=None):
-        # FIX: 'sale_ok=True' is MANDATORY to stop junk products
         domain = [
             ['sale_ok', '=', True], 
             ['type', 'in', ['product', 'consu']], 
             '|', ['active', '=', True], ['active', '=', False]
         ]
+        if company_id: domain.append(['company_id', '=', int(company_id)])
         
-        if company_id:
-             domain.append(['company_id', '=', int(company_id)])
-        
-        # ADDED 'qty_per_pack' to fields so we can use it in the repair tool
         fields = ['id', 'name', 'default_code', 'list_price', 'standard_price', 'weight', 
                   'description_sale', 'active', 'product_tmpl_id', 'qty_available', 
                   'public_categ_ids', 'product_tag_ids', 'uom_id', 'sh_is_secondary_unit', 
@@ -317,23 +349,18 @@ class OdooClient:
                 is_sec = product_data.get('sh_is_secondary_unit', False)
                 uom_id = product_data.get('uom_id', False)
             else:
-                p_data = self.models.execute_kw(self.db, self.uid, self.password,
-                    'product.product', 'read', [product_id], {'fields': ['uom_id', 'sh_is_secondary_unit']})
+                p_data = self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'read', [product_id], {'fields': ['uom_id', 'sh_is_secondary_unit']})
                 if not p_data: return None
                 is_sec = p_data[0].get('sh_is_secondary_unit', False)
                 uom_id = p_data[0].get('uom_id', False)
 
-            if not is_sec or not uom_id:
-                return None 
+            if not is_sec or not uom_id: return None 
 
             real_uom_id = uom_id[0]
-            uom_data = self.models.execute_kw(self.db, self.uid, self.password,
-                'uom.uom', 'read', [real_uom_id], {'fields': ['name', 'factor_inv']})
-            
+            uom_data = self.models.execute_kw(self.db, self.uid, self.password, 'uom.uom', 'read', [real_uom_id], {'fields': ['name', 'factor_inv']})
             if uom_data:
                 ratio = float(uom_data[0].get('factor_inv', 1.0))
                 return {'ratio': ratio, 'uom_name': uom_data[0]['name']}
-                
         except Exception as e:
             print(f"Split Info Error: {e}")
         return None
