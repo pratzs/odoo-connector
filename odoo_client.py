@@ -16,14 +16,14 @@ requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.
 class RequestsTransport(xmlrpc.client.Transport):
     """
     Custom XML-RPC Transport using 'requests' to enable HTTP Keep-Alive.
-    Matches standard Odoo SSL behavior (unverified by default if configured that way).
     """
     def __init__(self, use_https=True, verify=False):
-        # FIX: Do NOT pass use_https to super().__init__ in Python 3
+        # Initialize parent without arguments
         super().__init__()
         
         self._use_https = use_https
         self.verify = verify
+        self.verbose = False  # <--- FIX: Initialize verbose to prevent AttributeError
         self.session = requests.Session()
         
         # Retry strategy for network blips
@@ -45,11 +45,13 @@ class RequestsTransport(xmlrpc.client.Transport):
                 data=request_body, 
                 headers={'Content-Type': 'text/xml'},
                 verify=self.verify, 
-                timeout=300 # 5 Minute Timeout for long operations
+                timeout=300
             )
             resp.raise_for_status()
-            # FIX: Wrap content in BytesIO so xmlrpc can .read() it
+            
+            # FIX: Wrap bytes in BytesIO so xmlrpc can .read() it
             return self.parse_response(io.BytesIO(resp.content))
+            
         except requests.RequestException as e:
             if hasattr(e.response, 'content') and e.response.content:
                 # FIX: Wrap error response in BytesIO too
