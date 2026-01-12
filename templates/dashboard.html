@@ -166,45 +166,46 @@
                     </div>
 
                     <div class="col-md-6">
-                        <div class="card p-4 h-100">
-                            <div class="section-header">📊 Inventory Settings</div>
-                            
-                            <div class="mb-3">
-                                <label class="form-label-sm">Quantity Source</label>
-                                <select class="form-select" id="invType">
-                                    <option value="qty_available" {% if config.field == 'qty_available' %}selected{% endif %}>On Hand (Physical)</option>
-                                    <option value="virtual_available" {% if config.field == 'virtual_available' %}selected{% endif %}>Forecasted</option>
-                                </select>
-                            </div>
+    <div class="card p-4 mb-3">
+        <div class="section-header">📊 Inventory Settings</div>
+        
+        <div class="mb-3">
+            <label class="form-label-sm">Quantity Source</label>
+            <select class="form-select" id="invType">
+                <option value="qty_available" {% if config.inventory_field == 'qty_available' %}selected{% endif %}>On Hand (Physical)</option>
+                <option value="virtual_available" {% if config.inventory_field == 'virtual_available' %}selected{% endif %}>Forecasted</option>
+            </select>
+        </div>
 
-                            <div class="form-check form-switch mb-2">
-                                <input class="form-check-input" type="checkbox" id="checkZeroStock" {% if config.sync_zero %}checked{% endif %}>
-                                <label class="form-check-label" for="checkZeroStock">Do not sync zero stock</label>
-                            </div>
-                            <div class="form-check form-switch mb-3">
-                                <input class="form-check-input" type="checkbox" id="checkCommitted" {% if config.combine_committed %}checked{% endif %}>
-                                <label class="form-check-label" for="checkCommitted">Combine Committed Stock</label>
-                            </div>
+        <div class="form-check form-switch mb-2">
+            <input class="form-check-input" type="checkbox" id="checkZeroStock" {% if config.sync_zero_stock %}checked{% endif %}>
+            <label class="form-check-label" for="checkZeroStock">Do not sync zero stock</label>
+        </div>
+        <div class="form-check form-switch mb-3">
+            <input class="form-check-input" type="checkbox" id="checkCommitted" {% if config.combine_committed %}checked{% endif %}>
+            <label class="form-check-label" for="checkCommitted">Combine Committed Stock</label>
+        </div>
 
-                            <div class="bg-light p-3 rounded border">
-                                <label class="form-label-sm">Locations</label>
-                                <div id="locationList" class="small">Loading...</div>
-                            </div>
-                            <div class="card p-4 mt-3">
-                            <div class="section-header">📧 Inventory Alerts</div>
-                            <div class="mb-3">
-                                <label class="form-label-sm">Alert Email Address</label>
-                                <input type="email" class="form-control" id="alertEmail" placeholder="alerts@yourstore.com" value="{{ config.alert_email if config.alert_email else '' }}">
-                                <div class="form-text">Reports are sent here when stock discrepancies exceed the threshold.</div>
-                            </div>
-                            <div class="mb-3">
-                                <label class="form-label-sm">Discrepancy Threshold (Units)</label>
-                                <input type="number" class="form-control" id="alertThreshold" value="{{ config.alert_threshold if config.alert_threshold else 50 }}">
-                                <div class="form-text">Flag products if the Odoo vs Shopify difference is greater than this amount.</div>
-                            </div>
-                        </div>
-                        </div>
-                    </div>
+        <div class="bg-light p-3 rounded border">
+            <label class="form-label-sm">Locations</label>
+            <div id="locationList" class="small">Loading...</div>
+        </div>
+    </div>
+
+    <div class="card p-4">
+        <div class="section-header">📧 Inventory Alerts</div>
+        <div class="mb-3">
+            <label class="form-label-sm">Alert Email Address</label>
+            <input type="email" class="form-control" id="alertEmail" placeholder="alerts@yourstore.com" value="{{ config.alert_email if config.alert_email else '' }}">
+            <div class="form-text">Reports are sent here when stock discrepancies exceed the threshold.</div>
+        </div>
+        <div class="mb-3">
+            <label class="form-label-sm">Discrepancy Threshold (Units)</label>
+            <input type="number" class="form-control" id="alertThreshold" value="{{ config.alert_threshold if config.alert_threshold else 50 }}">
+            <div class="form-text">Flag products if the Odoo vs Shopify difference is greater than this amount.</div>
+        </div>
+    </div>
+</div>
                 </div>
 
                 <div class="row mt-3">
