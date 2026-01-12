@@ -463,25 +463,22 @@ def process_order_data(data, odoo_client):
             partner_id = odoo.create_partner(vals)
             partner = {'id': partner_id, 'name': final_name}
             
-            if shopify_id and data.get('customer', {}).get('id'):
+         if shopify_id and data.get('customer', {}).get('id'):
                 try:
-                    if shopify_id and data.get('customer', {}).get('id'):
-    try:
-        sh_cust_id = str(data['customer']['id'])
-        # FIX: Use filter_by, not get()
-        cust_map_exists = CustomerMap.query.filter_by(shopify_customer_id=sh_cust_id).first()
-        
-        if not cust_map_exists:
-            db.session.add(CustomerMap(
-                shopify_customer_id=sh_cust_id, 
-                odoo_partner_id=partner_id, 
-                email=email,
-                shop_url=get_config('shop_url') # Ensure this helper grabs the context or pass it in
-            ))
-            db.session.commit()
-    except Exception as e:
-        print(f"Customer Map Error: {e}")
-        db.session.rollback()
+                    # FIX: Use filter_by because shopify_id is NOT the primary key
+                    sh_cust_id = str(data['customer']['id'])
+                    cust_map_exists = CustomerMap.query.filter_by(shopify_customer_id=sh_cust_id).first()
+                    
+                    if not cust_map_exists:
+                        # FIX: shop_url is required for the DB model
+                        db.session.add(CustomerMap(
+                            shop_url=request.args.get('shop') or 'System',
+                            shopify_customer_id=sh_cust_id, 
+                            odoo_partner_id=partner_id, 
+                            email=email
+                        ))
+                        db.session.commit()
+                except: db.session.rollback()
 
         # 2. Handle Addresses
         main_partner_id = partner['id']
@@ -2216,6 +2213,7 @@ def api_save_settings():
         return jsonify({"message": f"Save Error: {str(e)}"}), 500
 
 @app.route('/test/odoo_health', methods=['GET'])
+@require_shopify_session
 def test_odoo_health():
     shop_url = request.args.get('shop')
     if not shop_url: return "Missing shop param"
