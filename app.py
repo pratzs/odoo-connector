@@ -1805,25 +1805,31 @@ def register_webhooks_manual():
     return jsonify({"message": "Webhook Registration Complete", "details": results})
 
 
-  @app.route('/maintenance/clear_product_map', methods=['POST'])
-  def clear_product_map():
+@app.route('/maintenance/clear_product_map', methods=['POST'])
+def clear_product_map():
     shop_url = request.args.get('shop')
+    if not shop_url:
+        return jsonify({"error": "Missing shop parameter"}), 400
+        
     try:
-        # This deletes the local cache of ID links
-        ProductMap.query.filter_by(shop_url=shop_url).delete()
-        db.session.commit()
+        with app.app_context():
+            # This deletes the local cache of ID links
+            ProductMap.query.filter_by(shop_url=shop_url).delete()
+            db.session.commit()
+            
         log_event('Maintenance', 'Success', "Product ID map cleared. Next sync will re-link all items.", shop_url=shop_url)
         return jsonify({"message": "Product map cleared successfully."})
     except Exception as e:
+        db.session.rollback() # Always rollback on error
         return jsonify({"error": str(e)}), 500
-        
 
 @app.route('/sync/fulfillments', methods=['GET'])
 def trigger_fulfillment_sync():
     shop_url = request.args.get('shop')
-    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+    if not shop_url:
+        return jsonify({"error": "Missing shop parameter"}), 400
 
-    # CHANGED: Use Queue instead of Threading
+    # Ensure 'q' (the Redis queue) and 'sync_odoo_fulfillments' are defined
     q.enqueue(sync_odoo_fulfillments, shop_url, job_timeout=600)
     return jsonify({"message": "Started checking for shipments (Queued)."})
 
