@@ -549,7 +549,7 @@ function saveSettings() {
         cust_auto_sync: document.getElementById('custAutoSync').checked,
         cust_sync_tags: document.getElementById('custSyncTagsSwitch').checked,
         cust_whitelist_tags: document.getElementById('custWhitelistTags').value,
-        cust_blacklist_tags: document.getElementById('custBlacklistTags').value
+        cust_blacklist_tags: document.getElementById('custBlacklistTags').value,
         alert_email: document.getElementById('alertEmail').value,
         alert_threshold: parseInt(document.getElementById('alertThreshold').value) || 50,
     };
@@ -653,9 +653,6 @@ function handleSidebarNavigation() {
         });
 }
 
-// THIS PART WAS MISSING:
-window.addEventListener('hashchange', handleSidebarNavigation);
-window.addEventListener('load', handleSidebarNavigation);
 
 function switchTab(id) { window.location.hash = id; }
 
