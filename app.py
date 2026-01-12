@@ -1673,7 +1673,7 @@ def api_live_logs():
         # FIX: Filter logs by the current shop OR global system messages
         logs = SyncLog.query.filter(
             (SyncLog.shop_url == shop_url) | (SyncLog.shop_url == 'System')
-        ).order_by(SyncLog.timestamp.desc()).limit(50).all()
+        ).order_by(SyncLog.timestamp.desc()).limit(500).all()
         
         data = []
         for log in logs:
