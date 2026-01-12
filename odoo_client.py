@@ -203,7 +203,7 @@ class OdooClient:
             # 3. Setup Arguments
             # We fetch 'usage' so we can label them in the dropdown
             fields = ['id', 'display_name', 'company_id', 'usage']
-            kw_args = {'fields': fields, 'limit': 100}
+            kw_args = {'fields': fields, 'limit': 4000}
             
             if context_dict:
                 kw_args['context'] = context_dict
