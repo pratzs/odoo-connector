@@ -17,7 +17,8 @@ if __name__ == '__main__':
     t = threading.Thread(target=run_schedule, daemon=True)
     t.start()
 
-    with app.app_context():
-        with Connection(conn):
-            worker = Worker(map(Queue, listen))
-            worker.work()
+    # CRITICAL FIX: Do NOT use 'with app.app_context():' here.
+    # We want the worker to create a FRESH connection for every job.
+    with Connection(conn):
+        worker = Worker(map(Queue, listen))
+        worker.work()
