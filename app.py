@@ -2219,7 +2219,7 @@ def run_schedule():
                 # OLD: threading.Thread(target=target_func, args=(shop.shop_url,)).start()
                 
                 # NEW: Enqueue to Redis
-                q.enqueue(target_func, shop.shop_url, job_timeout=600)
+                q.enqueue(target_func, shop.shop_url, job_timeout=3600)
 
     # Schedule Jobs
     schedule.every().day.at("03:00").do(lambda: run_job_for_all_shops(sync_customers_master, "Customer Sync"))
