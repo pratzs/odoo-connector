@@ -1424,14 +1424,13 @@ def sync_odoo_fulfillments(shop_url):
 
 def scheduled_inventory_sync(shop_url):
     with app.app_context():
-        # Log start
         # log_event('Inventory', 'Info', "Starting periodic inventory check...", shop_url=shop_url)
         
-        # Run sync
-        c, u = perform_inventory_sync(shop_url, lookback_minutes=35) 
+        # FIX: Just call the function. It handles its own logging now.
+        perform_inventory_sync(shop_url) 
         
-        # Always log result, even if 0 updates, so you know it worked
-        log_event('Inventory', 'Success', f"Sync Run: Checked {c} items, Updated {u} items.", shop_url=shop_url)
+        # No need to log "Success" here because perform_inventory_sync 
+        # already logs "Sync Complete" at the very end.
 
 # ==========================================
 # SHOPIFY OAUTH ROUTES
