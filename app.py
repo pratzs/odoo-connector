@@ -1694,6 +1694,37 @@ def api_live_logs():
         return jsonify(data)
     except: return jsonify([])
 
+
+@app.route('/api/odoo/refresh_locations', methods=['GET'])
+@require_shopify_session 
+def api_refresh_locations():
+    shop_url = request.args.get('shop')
+    if not shop_url: 
+        return jsonify({'error': 'Missing shop param'}), 400
+
+    # 1. Connect to Odoo
+    odoo = get_odoo_connection(shop_url)
+    if not odoo: 
+        return jsonify({'error': 'Could not connect to Odoo'}), 500
+
+    try:
+        # 2. Fetch Locations from Odoo
+        # We try to get the company_id to filter correctly, strictly optional
+        company_id = get_config('odoo_company_id', shop_url=shop_url)
+        locations = odoo.get_locations(company_id=company_id)
+
+        # 3. Cache them in the Database (AppSetting table)
+        # This uses your existing set_config helper which saves to AppSetting
+        set_config('available_locations', locations)
+
+        return jsonify({
+            "message": f"Success! Found {len(locations)} locations in Odoo.",
+            "locations": locations
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/maintenance/wipe_logs', methods=['GET'])
 def maintenance_wipe_logs():
     """Deletes ALL logs to give a clean slate."""
