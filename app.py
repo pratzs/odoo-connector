@@ -1193,14 +1193,40 @@ def cleanup_shopify_products(shop_url):
 def perform_inventory_sync(shop_url):
     """
     Runs inside the Worker Process.
-    STRATEGY: ID-Based Sync (Skips Odoo Search).
-    Uses local ProductMap table to find Odoo IDs instantly.
+    STRATEGY: ID-Based Sync + Auto-Detect Shopify Location.
     """
     with app.app_context():
-        log_event('Inventory', 'Info', "Starting ID-Based Sync (Fast Mode)...", shop_url=shop_url)
+        log_event('Inventory', 'Info', "Starting Inventory Sync...", shop_url=shop_url)
         
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): return
+
+        # --- NEW: AUTO-DETECT SHOPIFY LOCATION ---
+        # We need to know WHICH Shopify location to update.
+        # Since this is multi-tenant, we ask Shopify for the first active location.
+        shopify_location_id = None
+        try:
+            # 1. Check if we saved a specific setting (Future proofing)
+            saved_id = get_config('shopify_target_location_id', None, shop_url=shop_url)
+            
+            if saved_id:
+                shopify_location_id = int(saved_id)
+            else:
+                # 2. Auto-Detect: Get the first active location from Shopify
+                locs = shopify.Location.find()
+                active_locs = [l for l in locs if l.active]
+                
+                if active_locs:
+                    # Usually the first one is the primary/default location
+                    shopify_location_id = active_locs[0].id
+                    log_event('Inventory', 'Info', f"Auto-selected Shopify Location: {active_locs[0].name} (ID: {shopify_location_id})", shop_url=shop_url)
+                else:
+                    log_event('Inventory', 'Error', "No active locations found in Shopify!", shop_url=shop_url)
+                    return
+        except Exception as e:
+            log_event('Inventory', 'Error', f"Failed to detect Shopify Location: {e}", shop_url=shop_url)
+            return
+        # -----------------------------------------
 
         # Load Configs
         target_locations = get_config('inventory_locations', [], shop_url=shop_url)
@@ -1225,29 +1251,20 @@ def perform_inventory_sync(shop_url):
             return
 
         total_shopify = len(shopify_variants)
-        log_event('Inventory', 'Info', f"Found {total_shopify} variants. Mapping IDs...", shop_url=shop_url)
-
-        # 2. RESOLVE ODOO IDs LOCALLY (Crucial Optimization)
-        # Instead of asking Odoo to search, we look up the ID in our own DB
-        # This bypasses the step where Odoo hangs.
         
+        # 2. RESOLVE ODOO IDs LOCALLY
         sku_to_odoo_id = {}
         all_skus = list(shopify_variants.keys())
         
-        # Batch query local DB for speed
         mappings = ProductMap.query.filter(ProductMap.shop_url == shop_url, ProductMap.sku.in_(all_skus)).all()
-        
         for m in mappings:
             sku_to_odoo_id[m.sku] = m.odoo_product_id
             
-        # Identify SKUs that are missing from our map (New products?)
         missing_skus = [sku for sku in all_skus if sku not in sku_to_odoo_id]
         
-        # Only if we have missing mappings do we ask Odoo (Safety Fallback)
         if missing_skus:
-            log_event('Inventory', 'Info', f"Found {len(missing_skus)} unmapped items. Searching Odoo for them...", shop_url=shop_url)
+            log_event('Inventory', 'Info', f"Found {len(missing_skus)} unmapped items. Searching Odoo...", shop_url=shop_url)
             try:
-                # Search in small chunks to prevent hang
                 CHUNK = 10
                 for i in range(0, len(missing_skus), CHUNK):
                     chunk = missing_skus[i:i+CHUNK]
@@ -1259,31 +1276,24 @@ def perform_inventory_sync(shop_url):
             except Exception as e:
                 log_event('Inventory', 'Warning', f"Fallback search failed: {e}", shop_url=shop_url)
 
-        # 3. BATCH SYNC USING IDs
-        # Now we have a clean map: SKU -> Odoo ID
-        # We can just call 'read' directly.
-        
-        map_items = list(sku_to_odoo_id.items()) # [(sku, id), (sku, id)...]
+        # 3. BATCH SYNC
+        map_items = list(sku_to_odoo_id.items())
         updates = 0
         processed = 0
-        
-        # Batch Size 50 (Safe for 'read' operations)
         BATCH_SIZE = 50
         
         for i in range(0, len(map_items), BATCH_SIZE):
             batch = map_items[i:i+BATCH_SIZE]
             batch_ids = [item[1] for item in batch]
-            batch_skus = {item[1]: item[0] for item in batch} # ID -> SKU
+            batch_skus = {item[1]: item[0] for item in batch}
             
             try:
-                # READ STOCK DIRECTLY (Fastest Method)
+                # Read Odoo Stock
                 qty_map = {pid: 0 for pid in batch_ids}
-                
                 for loc_id in target_locations:
                     ctx = {'location': loc_id}
                     stock_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                         'product.product', 'read', [batch_ids], {'fields': [target_field], 'context': ctx})
-                    
                     for record in stock_data:
                         qty_map[record['id']] += record.get(target_field, 0)
                 
@@ -1299,8 +1309,9 @@ def perform_inventory_sync(shop_url):
                     
                     if int(total_qty) != current_shopify_qty:
                         try:
+                            # USE THE AUTO-DETECTED LOCATION ID HERE
                             shopify.InventoryLevel.set(
-                                location_id=SHOPIFY_LOCATION_ID,
+                                location_id=shopify_location_id, 
                                 inventory_item_id=sp_variant.inventory_item_id,
                                 available=int(total_qty)
                             )
@@ -1313,7 +1324,7 @@ def perform_inventory_sync(shop_url):
                      log_event('Inventory', 'Info', f"Checked {processed}/{total_shopify} items...", shop_url=shop_url)
                      
             except Exception as e:
-                log_event('Inventory', 'Error', f"Batch Read Error: {e}", shop_url=shop_url)
+                log_event('Inventory', 'Error', f"Batch Error: {e}", shop_url=shop_url)
 
         log_event('Inventory', 'Success', f"Sync Complete. Checked {total_shopify} items. Updated {updates}.", shop_url=shop_url)
 
