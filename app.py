@@ -796,7 +796,7 @@ def sync_products_master(shop_url):
 
                 if is_pack:
                     sp.options = [{'name': 'Pack Size'}] 
-                elif sp.options and sp.options[0].name != 'Title':
+                elif hasattr(sp, 'options') and sp.options and sp.options[0].name != 'Title':
                     sp.options = [{'name': 'Title', 'values': ['Default Title']}]
 
                 try:
@@ -805,11 +805,12 @@ def sync_products_master(shop_url):
                     print(f"Error saving product {sku}: {e}")
                     continue
 
-                existing_vars = sp.variants
+                existing_vars = getattr(sp, 'variants', [])
                 final_vars = []
                 
                 for des in desired_variants:
-                    match = next((v for v in existing_vars if v.sku == des['sku']), None)
+                    # Safely look for matches in existing variants
+                    match = next((v for v in existing_vars if getattr(v, 'sku', None) == des['sku']), None)
                     if not match and des['option1'] == 'Default Title':
                           match = next((v for v in existing_vars), None)
                     if not match: match = shopify.Variant({'product_id': sp.id})
@@ -852,7 +853,8 @@ def sync_products_master(shop_url):
                     except: pass
 
                 if sync_images and p.get('image_1920'):
-                      if not sp.images:
+                      # --- SAFE ATTRIBUTE ACCESS FOR IMAGES ---
+                      if not hasattr(sp, 'images') or not sp.images:
                           try:
                             img_data = p['image_1920']
                             if isinstance(img_data, bytes): img_data = img_data.decode('utf-8')
