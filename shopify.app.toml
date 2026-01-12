@@ -1,0 +1,7 @@
+[webhooks]
+api_version = "2025-10"
+
+[webhooks.privacy_compliance]
+customer_data_request_url = "https://odoo-connector-oivx.onrender.com/gdpr/customers/data_request"
+customer_redaction_url = "https://odoo-connector-oivx.onrender.com/gdpr/customers/redact"
+shop_redaction_url = "https://odoo-connector-oivx.onrender.com/gdpr/shop/redact"
