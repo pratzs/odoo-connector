@@ -1781,6 +1781,18 @@ def register_webhooks_manual():
     return jsonify({"message": "Webhook Registration Complete", "details": results})
     
     
+    @app.route('/maintenance/clear_product_map', methods=['POST'])
+def clear_product_map():
+    shop_url = request.args.get('shop')
+    try:
+        # This deletes the local cache of ID links
+        ProductMap.query.filter_by(shop_url=shop_url).delete()
+        db.session.commit()
+        log_event('Maintenance', 'Success', "Product ID map cleared. Next sync will re-link all items.", shop_url=shop_url)
+        return jsonify({"message": "Product map cleared successfully."})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+        
 
 @app.route('/sync/fulfillments', methods=['GET'])
 def trigger_fulfillment_sync():
