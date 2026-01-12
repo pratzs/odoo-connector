@@ -2139,32 +2139,43 @@ def test_odoo_health():
         auth_time = round(time.time() - start, 2)
         add_log(f"✅ Authentication successful ({auth_time}s)")
         
-        # 2. Test Version (Lightweight Ping)
-        start = time.time()
+        # 2. Test Version
         version = odoo.common.version()
-        ping_time = round(time.time() - start, 2)
-        add_log(f"✅ Odoo Ping (Version Check): Alive ({ping_time}s)")
-        add_log(f"Server Version: {version.get('server_version')}")
+        add_log(f"✅ Odoo Ping: Alive (Version: {version.get('server_version')})")
 
-        # 3. Test SIMPLE Search (The step failing in Sync)
-        add_log("Attempting to search for 1 product (limit=1)...")
-        start = time.time()
-        
-        # We search for ANY product, just to test the DB read
+        # 3. Test Search
         ids = odoo.models.execute_kw(
             odoo.db, odoo.uid, odoo.password,
-            'product.product', 'search', 
-            [[['active', '=', True]]], 
-            {'limit': 1}
+            'product.product', 'search', [[['active', '=', True]]], {'limit': 1}
         )
-        search_time = round(time.time() - start, 2)
-        
         if ids:
-            add_log(f"✅ Search successful! Found ID: {ids[0]} ({search_time}s)")
+            add_log(f"✅ DB Read successful (Found ID: {ids[0]})")
+
+        # --- NEW: AUTO-REFRESH LOCATIONS DURING DIAGNOSTIC ---
+        add_log("<b>Refreshing Warehouse Locations...</b>")
+        odoo_locations = odoo.models.execute_kw(
+            odoo.db, odoo.uid, odoo.password,
+            'stock.location', 'search_read',
+            [[['usage', '=', 'internal']]],
+            {'fields': ['complete_name', 'usage']}
+        )
+        
+        new_loc_list = [{"id": loc['id'], "name": loc['complete_name'], "type": loc['usage']} for loc in odoo_locations]
+        
+        # Update Database Config
+        from models import Config
+        conf = Config.query.filter_by(shop_url=shop_url, key='available_locations').first()
+        if conf:
+            conf.value = new_loc_list
         else:
-            add_log(f"✅ Search successful but returned 0 items ({search_time}s)")
+            db.session.add(Config(shop_url=shop_url, key='available_locations', value=new_loc_list))
+        
+        db.session.commit()
+        add_log(f"✅ Successfully refreshed {len(new_loc_list)} locations in database.")
+        # ----------------------------------------------------
 
         add_log("--- DIAGNOSTIC PASSED ---")
+        add_log("<i>You can now go back to settings to see WPW01/PICK</i>")
         return "".join(log)
 
     except Exception as e:
