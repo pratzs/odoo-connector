@@ -1,8 +1,15 @@
 import xmlrpc.client
 import ssl
 import requests
+import urllib3
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+# --- SILENCE SSL WARNINGS (ROBUST) ---
+# Disable for standard urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# Disable for requests' internal urllib3 (just in case)
+requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
 # --- OPTIMIZATION: Persistent Transport (Keep-Alive) ---
 class RequestsTransport(xmlrpc.client.Transport):
