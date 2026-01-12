@@ -182,25 +182,27 @@ def verify_shopify(data, hmac_header):
 def get_odoo_connection(shop_url):
     """
     Factory Function: Creates a dynamic Odoo connection for a specific shop.
+    REMOVED inner app_context to prevent DB Session conflicts.
     """
-    with app.app_context():
-        shop = Shop.query.filter_by(shop_url=shop_url).first()
-        if not shop:
-            print(f"Error: No credentials found for {shop_url}")
-            return None
-        
-        try:
-            # Create a fresh client using the DB credentials
-            client = OdooClient(
-                url=shop.odoo_url,
-                db=shop.odoo_db,
-                username=shop.odoo_username,
-                password=shop.odoo_password
-            )
-            return client
-        except Exception as e:
-            log_event('System', 'Error', f"Connection failed for {shop_url}: {e}")
-            return None
+    # Note: We rely on the caller (the sync function) to provide the app_context
+    shop = Shop.query.filter_by(shop_url=shop_url).first()
+    if not shop:
+        print(f"Error: No credentials found for {shop_url}")
+        return None
+    
+    try:
+        # Create a fresh client using the DB credentials
+        client = OdooClient(
+            url=shop.odoo_url,
+            db=shop.odoo_db,
+            username=shop.odoo_username,
+            password=shop.odoo_password
+        )
+        return client
+    except Exception as e:
+        log_event('System', 'Error', f"Connection failed for {shop_url}: {e}", shop_url=shop_url)
+        return None
+
 
 def log_event(entity, status, message, shop_url=None):
     # 1. If shop_url not provided manually, try to grab from Request Context
