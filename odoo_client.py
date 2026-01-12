@@ -11,7 +11,10 @@ class RequestsTransport(xmlrpc.client.Transport):
     Matches standard Odoo SSL behavior (unverified by default if configured that way).
     """
     def __init__(self, use_https=True, verify=False):
-        super().__init__(use_https=use_https)
+        # FIX: Do NOT pass use_https to super().__init__ in Python 3
+        super().__init__()
+        
+        self._use_https = use_https
         self.verify = verify
         self.session = requests.Session()
         
@@ -76,12 +79,17 @@ class OdooClient:
             allow_none=True
         )
 
+    # --- HELPER TO REDUCE BOILERPLATE ---
+    def execute(self, model, method, *args, **kwargs):
+        """Wrapper to call execute_kw cleaner."""
+        return self.models.execute_kw(self.db, self.uid, self.password, model, method, args, kwargs)
+
     # --- PARTNER METHODS ---
 
     def search_partner_by_email(self, email):
         # OPTIMIZATION: Use search_read (1 call) instead of search + read (2 calls)
         domain = ['|', ['active', '=', True], ['active', '=', False], ['email', '=', email]]
-        fields = ['id', 'name', 'active', 'parent_id', 'user_id', 'category_id']
+        fields = ['id', 'name', 'active', 'parent_id', 'user_id', 'category_id', 'vat', 'phone', 'street', 'city', 'zip', 'country_id']
         
         partners = self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search_read', [domain], {'fields': fields, 'limit': 1})
         
