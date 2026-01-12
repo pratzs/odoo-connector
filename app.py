@@ -2235,13 +2235,21 @@ def test_odoo_health():
         
         new_loc_list = [{"id": loc['id'], "name": loc['complete_name'], "type": loc['usage']} for loc in odoo_locations]
         
-        # Update Database Config
-        from models import Config
-        conf = Config.query.filter_by(shop_url=shop_url, key='available_locations').first()
-        if conf:
-            conf.value = new_loc_list
-        else:
-            db.session.add(Config(shop_url=shop_url, key='available_locations', value=new_loc_list))
+        # Update Database Config (Fixed for AppSetting)
+        # We just use the helper function you already wrote!
+        import json
+        
+        # set_config handles looking up the row, creating it if missing, 
+        # and converting the list to JSON automatically.
+        set_config('available_locations', new_loc_list)
+        
+        # If you prefer manual SQLalchemy for some reason:
+        # setting = AppSetting.query.filter_by(shop_url=shop_url, key='available_locations').first()
+        # val_str = json.dumps(new_loc_list)
+        # if setting:
+        #     setting.value = val_str
+        # else:
+        #     db.session.add(AppSetting(shop_url=shop_url, key='available_locations', value=val_str))
         
         db.session.commit()
         add_log(f"✅ Successfully refreshed {len(new_loc_list)} locations in database.")
