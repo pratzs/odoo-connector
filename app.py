@@ -1260,6 +1260,8 @@ def perform_inventory_sync(shop_url):
         target_locations = get_config('inventory_locations', [], shop_url=shop_url)
         target_field = get_config('inventory_field', 'qty_available', shop_url=shop_url)
         sync_zero = get_config('sync_zero_stock', False, shop_url=shop_url)
+        alert_threshold = int(get_config('alert_threshold', 50, shop_url=shop_url))
+        alert_email = get_config('alert_email', None, shop_url=shop_url)
 
         # 1. FETCH SHOPIFY VARIANTS
         shopify_variants = {} 
@@ -1334,6 +1336,13 @@ def perform_inventory_sync(shop_url):
                     if sync_zero and total_qty <= 0: continue
                     
                     current_shopify_qty = int(sp_variant.inventory_quantity) if sp_variant.inventory_quantity else 0
+
+                    diff = abs(int(total_qty) - current_shopify_qty)
+                    if diff >= alert_threshold:
+                        discrepancy_list.append({
+                            'sku': sku, 'odoo': int(total_qty), 
+                            'shopify': current_shopify_qty, 'diff': diff
+                        })
                     
                     if int(total_qty) != current_shopify_qty:
                         try:
@@ -1353,6 +1362,9 @@ def perform_inventory_sync(shop_url):
                      
             except Exception as e:
                 log_event('Inventory', 'Error', f"Batch Error: {e}", shop_url=shop_url)
+
+        if discrepancy_list and alert_email:
+            send_inventory_alert(shop_url, alert_email, discrepancy_list)
 
         log_event('Inventory', 'Success', f"Sync Complete. Checked {total_shopify} items. Updated {updates}.", shop_url=shop_url)
 
