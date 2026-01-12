@@ -1193,21 +1193,21 @@ def cleanup_shopify_products(shop_url):
 def perform_inventory_sync(shop_url):
     """
     Runs inside the Worker Process.
-    STRATEGY: Shopify-Driven + ULTRA SAFE MODE (Batch Size 5).
+    STRATEGY: ID-Based Sync (Skips Odoo Search).
+    Uses local ProductMap table to find Odoo IDs instantly.
     """
     with app.app_context():
-        log_event('Inventory', 'Info', "Starting Ultra-Safe Sync (Batch Size 5)...", shop_url=shop_url)
+        log_event('Inventory', 'Info', "Starting ID-Based Sync (Fast Mode)...", shop_url=shop_url)
         
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): return
 
         # Load Configs
-        company_id = get_config('odoo_company_id', shop_url=shop_url)
         target_locations = get_config('inventory_locations', [], shop_url=shop_url)
         target_field = get_config('inventory_field', 'qty_available', shop_url=shop_url)
         sync_zero = get_config('sync_zero_stock', False, shop_url=shop_url)
 
-        # 1. FETCH SHOPIFY PRODUCTS
+        # 1. FETCH SHOPIFY VARIANTS
         shopify_variants = {} 
         try:
             page = shopify.Product.find(limit=250)
@@ -1225,47 +1225,71 @@ def perform_inventory_sync(shop_url):
             return
 
         total_shopify = len(shopify_variants)
-        log_event('Inventory', 'Info', f"Found {total_shopify} variants. Syncing 5 at a time...", shop_url=shop_url)
+        log_event('Inventory', 'Info', f"Found {total_shopify} variants. Mapping IDs...", shop_url=shop_url)
 
-        # 2. BATCH FETCH FROM ODOO (Chunk Size 5)
+        # 2. RESOLVE ODOO IDs LOCALLY (Crucial Optimization)
+        # Instead of asking Odoo to search, we look up the ID in our own DB
+        # This bypasses the step where Odoo hangs.
+        
+        sku_to_odoo_id = {}
         all_skus = list(shopify_variants.keys())
+        
+        # Batch query local DB for speed
+        mappings = ProductMap.query.filter(ProductMap.shop_url == shop_url, ProductMap.sku.in_(all_skus)).all()
+        
+        for m in mappings:
+            sku_to_odoo_id[m.sku] = m.odoo_product_id
+            
+        # Identify SKUs that are missing from our map (New products?)
+        missing_skus = [sku for sku in all_skus if sku not in sku_to_odoo_id]
+        
+        # Only if we have missing mappings do we ask Odoo (Safety Fallback)
+        if missing_skus:
+            log_event('Inventory', 'Info', f"Found {len(missing_skus)} unmapped items. Searching Odoo for them...", shop_url=shop_url)
+            try:
+                # Search in small chunks to prevent hang
+                CHUNK = 10
+                for i in range(0, len(missing_skus), CHUNK):
+                    chunk = missing_skus[i:i+CHUNK]
+                    domain = [['default_code', 'in', chunk], ['active', '=', True]]
+                    res = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                        'product.product', 'search_read', [domain], {'fields': ['default_code']})
+                    for r in res:
+                        sku_to_odoo_id[r['default_code']] = r['id']
+            except Exception as e:
+                log_event('Inventory', 'Warning', f"Fallback search failed: {e}", shop_url=shop_url)
+
+        # 3. BATCH SYNC USING IDs
+        # Now we have a clean map: SKU -> Odoo ID
+        # We can just call 'read' directly.
+        
+        map_items = list(sku_to_odoo_id.items()) # [(sku, id), (sku, id)...]
         updates = 0
         processed = 0
         
-        # CHANGED: 5 items per batch to prevent Odoo freeze
-        CHUNK_SIZE = 5
-        for i in range(0, len(all_skus), CHUNK_SIZE):
-            sku_chunk = all_skus[i:i + CHUNK_SIZE]
+        # Batch Size 50 (Safe for 'read' operations)
+        BATCH_SIZE = 50
+        
+        for i in range(0, len(map_items), BATCH_SIZE):
+            batch = map_items[i:i+BATCH_SIZE]
+            batch_ids = [item[1] for item in batch]
+            batch_skus = {item[1]: item[0] for item in batch} # ID -> SKU
             
             try:
-                # A. Find Odoo IDs
-                domain = [['default_code', 'in', sku_chunk], ['active', '=', True]]
-                if company_id: domain.append(['company_id', '=', int(company_id)])
-                
-                odoo_products = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                    'product.product', 'search_read', [domain], {'fields': ['default_code']})
-                
-                id_to_sku = {p['id']: p['default_code'] for p in odoo_products}
-                found_ids = list(id_to_sku.keys())
-                
-                if not found_ids: 
-                    processed += len(sku_chunk)
-                    continue
-
-                # B. Get Stock Quantities
-                qty_map = {pid: 0 for pid in found_ids}
+                # READ STOCK DIRECTLY (Fastest Method)
+                qty_map = {pid: 0 for pid in batch_ids}
                 
                 for loc_id in target_locations:
                     ctx = {'location': loc_id}
                     stock_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                        'product.product', 'read', [found_ids], {'fields': [target_field], 'context': ctx})
+                        'product.product', 'read', [batch_ids], {'fields': [target_field], 'context': ctx})
                     
                     for record in stock_data:
                         qty_map[record['id']] += record.get(target_field, 0)
-
-                # C. Compare and Update
+                
+                # Update Shopify
                 for pid, total_qty in qty_map.items():
-                    sku = id_to_sku[pid]
+                    sku = batch_skus[pid]
                     sp_variant = shopify_variants.get(sku)
                     
                     if not sp_variant: continue
@@ -1284,14 +1308,12 @@ def perform_inventory_sync(shop_url):
                         except Exception as e:
                             print(f"Failed to update {sku}: {e}")
 
-                processed += len(sku_chunk)
-                
-                # Log often so you know it's working
-                if processed % 25 == 0:
+                processed += len(batch)
+                if processed % 100 == 0:
                      log_event('Inventory', 'Info', f"Checked {processed}/{total_shopify} items...", shop_url=shop_url)
-
+                     
             except Exception as e:
-                log_event('Inventory', 'Error', f"Batch Error: {e}", shop_url=shop_url)
+                log_event('Inventory', 'Error', f"Batch Read Error: {e}", shop_url=shop_url)
 
         log_event('Inventory', 'Success', f"Sync Complete. Checked {total_shopify} items. Updated {updates}.", shop_url=shop_url)
 
