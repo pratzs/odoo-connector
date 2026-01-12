@@ -402,7 +402,7 @@ def process_product_data(data, odoo_client):
 def process_order_data(data, odoo_client):
     """
     Syncs order with SQL-Based Locking and Smart UOM Switching.
-    FIXED: Strips '-UNIT' suffix to find the correct Odoo product.
+    FIXED: Indentation and CustomerMap lookup.
     """
     odoo = odoo_client
     shopify_id = str(data.get('id', ''))
@@ -463,22 +463,27 @@ def process_order_data(data, odoo_client):
             partner_id = odoo.create_partner(vals)
             partner = {'id': partner_id, 'name': final_name}
             
-         if shopify_id and data.get('customer', {}).get('id'):
+            # --- FIX: Correct Indentation & Logic ---
+            if shopify_id and data.get('customer', {}).get('id'):
                 try:
-                    # FIX: Use filter_by because shopify_id is NOT the primary key
                     sh_cust_id = str(data['customer']['id'])
+                    # FIX: Use filter_by, not get()
                     cust_map_exists = CustomerMap.query.filter_by(shopify_customer_id=sh_cust_id).first()
                     
                     if not cust_map_exists:
-                        # FIX: shop_url is required for the DB model
+                        # Attempt to get shop_url from context, fallback to 'System'
+                        s_url = request.args.get('shop') if request else 'System'
+                        
                         db.session.add(CustomerMap(
-                            shop_url=request.args.get('shop') or 'System',
+                            shop_url=s_url,
                             shopify_customer_id=sh_cust_id, 
                             odoo_partner_id=partner_id, 
                             email=email
                         ))
                         db.session.commit()
-                except: db.session.rollback()
+                except Exception as e: 
+                    db.session.rollback()
+                    print(f"Customer Map Error: {e}")
 
         # 2. Handle Addresses
         main_partner_id = partner['id']
@@ -512,7 +517,6 @@ def process_order_data(data, odoo_client):
             
             if uom_ids: 
                 unit_uom_id = uom_ids[0]
-                log_event('System', 'Info', f"[UOM DEBUG] Found 'Unit' UOM ID: {unit_uom_id}")
             else:
                 log_event('System', 'Warning', "[UOM DEBUG] Could not find any UOM named Unit/Piece in Odoo.")
         except Exception as e:
@@ -592,7 +596,7 @@ def process_order_data(data, odoo_client):
         }
         if company_id: vals['company_id'] = int(company_id)
         
-       # FIX: Check the tax setting
+        # FIX: Check the tax setting
         sync_tax_included = get_config('order_sync_tax', False)
         
         # Pass to Odoo Context
@@ -610,6 +614,7 @@ def process_order_data(data, odoo_client):
                 db.session.commit()
         except: pass
         return False, str(e)
+
 
 def sync_products_master(shop_url):
     """
