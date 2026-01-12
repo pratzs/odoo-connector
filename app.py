@@ -2337,34 +2337,64 @@ def cleanup_old_logs():
             db.session.rollback()
             print(f"Maintenance Error: {e}")
 
+# --- SCHEDULER LOGIC (Runs in Clock Process) ---
 def run_schedule():
     """
-    Multi-Tenant Scheduler: Runs tasks for ALL active shops in the database.
+    Robust Scheduler: Uses Redis keys to track job timing.
+    This survives server restarts/crashes because the 'timer' is in Redis, not RAM.
     """
-    def run_job_for_all_shops(target_func, job_name="Job"):
-        with app.app_context():
-            shops = Shop.query.filter_by(is_active=True).all()
-            for shop in shops:
-                # OLD: threading.Thread(target=target_func, args=(shop.shop_url,)).start()
-                
-                # NEW: Enqueue to Redis
-                q.enqueue(target_func, shop.shop_url, job_timeout=3600)
-
-    # Schedule Jobs
-    schedule.every().day.at("03:00").do(lambda: run_job_for_all_shops(sync_customers_master, "Customer Sync"))
-    schedule.every().day.at("04:00").do(lambda: run_job_for_all_shops(sync_products_master, "Product Sync"))
-    schedule.every(3).days.at("05:00").do(lambda: run_job_for_all_shops(archive_shopify_duplicates, "Duplicate Archive"))
-    schedule.every(10).minutes.do(lambda: run_job_for_all_shops(scheduled_inventory_sync, "Inventory Sync"))
-    schedule.every(60).minutes.do(lambda: run_job_for_all_shops(sync_odoo_fulfillments, "Fulfillment Sync"))
-    schedule.every(3).minutes.do(lambda: run_job_for_all_shops(sync_odoo_cancellations, "Cancellation Sync"))
-    
-    
-    # Global maintenance (once per day)
-    schedule.every().day.at("06:00").do(lambda: threading.Thread(target=cleanup_old_logs).start())
+    print("🕒 Scheduler Started")
     
     while True:
-        schedule.run_pending()
-        time.sleep(1)
+        with app.app_context():
+            # 1. Fetch all active shops
+            active_shops = Shop.query.filter_by(is_active=True).all()
+            
+            for shop in active_shops:
+                shop_url = shop.shop_url
+                
+                # --- A. HIGH FREQUENCY TASKS ---
+                
+                # 1. Inventory Sync (Every 10 mins = 600s)
+                if not conn.get(f"last_inv_{shop_url}"):
+                    q.enqueue(scheduled_inventory_sync, shop_url, job_timeout=3600)
+                    conn.setex(f"last_inv_{shop_url}", 600, "done")
+                    print(f"⏰ Triggered Inventory Sync for {shop_url}")
+
+                # 2. Fulfillment Sync (Every 60 mins = 3600s)
+                if not conn.get(f"last_ful_{shop_url}"):
+                    q.enqueue(sync_odoo_fulfillments, shop_url, job_timeout=600)
+                    conn.setex(f"last_ful_{shop_url}", 3600, "done")
+                    print(f"⏰ Triggered Fulfillment Sync for {shop_url}")
+                    
+                # 3. Cancellation Sync (Every 5 mins = 300s)
+                if not conn.get(f"last_cancel_{shop_url}"):
+                    q.enqueue(sync_odoo_cancellations, shop_url, job_timeout=600)
+                    conn.setex(f"last_cancel_{shop_url}", 300, "done")
+
+                # --- B. DAILY TASKS (24 Hours = 86400s) ---
+                
+                # 4. Master Customer Sync (Once per day)
+                if not conn.get(f"last_cust_sync_{shop_url}"):
+                    q.enqueue(sync_customers_master, shop_url, job_timeout=1200)
+                    conn.setex(f"last_cust_sync_{shop_url}", 86400, "done")
+                    print(f"⏰ Triggered Daily Customer Sync for {shop_url}")
+
+                # 5. Master Product Sync (Once per day)
+                if not conn.get(f"last_prod_sync_{shop_url}"):
+                    q.enqueue(sync_products_master, shop_url, job_timeout=3600)
+                    conn.setex(f"last_prod_sync_{shop_url}", 86400, "done")
+                    print(f"⏰ Triggered Daily Product Sync for {shop_url}")
+
+            # --- C. GLOBAL MAINTENANCE ---
+            
+            # 6. Cleanup Logs (Once per day)
+            if not conn.get("last_log_cleanup"):
+                cleanup_old_logs()
+                conn.setex("last_log_cleanup", 86400, "done") 
+
+        # Sleep to prevent high CPU usage
+        time.sleep(60)
 
 def sync_images_only_manual(shop_url):
     """
