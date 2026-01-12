@@ -2,6 +2,7 @@ import xmlrpc.client
 import ssl
 import requests
 import urllib3
+import io
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -47,10 +48,12 @@ class RequestsTransport(xmlrpc.client.Transport):
                 timeout=300 # 5 Minute Timeout for long operations
             )
             resp.raise_for_status()
-            return self.parse_response(resp.content)
+            # FIX: Wrap content in BytesIO so xmlrpc can .read() it
+            return self.parse_response(io.BytesIO(resp.content))
         except requests.RequestException as e:
-            if hasattr(e.response, 'content'):
-                return self.parse_response(e.response.content)
+            if hasattr(e.response, 'content') and e.response.content:
+                # FIX: Wrap error response in BytesIO too
+                return self.parse_response(io.BytesIO(e.response.content))
             raise xmlrpc.client.ProtocolError(url, e.response.status_code if e.response else 500, str(e), {})
 
 # ---------------------------------------------------------
