@@ -23,6 +23,8 @@ import xmlrpc.client
 from sqlalchemy import text
 import ssl
 import gc
+import smtplib
+from email.message import EmailMessage
 
 socket.setdefaulttimeout(60) # Force 60-second timeout for all network calls
 
@@ -223,6 +225,27 @@ def log_event(entity, status, message, shop_url=None):
     except Exception as e: 
         print(f"DB LOG ERROR: {e}")
         db.session.rollback()
+
+def send_inventory_alert(shop_url, email_address, discrepancies):
+    """Sends a summary email of all flagged inventory differences."""
+    msg = EmailMessage()
+    msg['Subject'] = f"⚠️ Inventory Alert: {shop_url}"
+    msg['From'] = os.getenv('EMAIL_USER')
+    msg['To'] = email_address
+
+    content = f"Inventory Sync for {shop_url} found items exceeding your threshold:\n\n"
+    for item in discrepancies:
+        content += f"SKU: {item['sku']} | Odoo: {item['odoo']} | Shopify: {item['shopify']} | Difference: {item['diff']}\n"
+    
+    msg.set_content(content)
+
+    try:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+            smtp.login(os.getenv('EMAIL_USER'), os.getenv('EMAIL_PASS'))
+            smtp.send_message(msg)
+    except Exception as e:
+        print(f"Failed to send alert email: {e}")
+        
 
 def setup_shopify_session(shop_url=None):
     """
@@ -1193,6 +1216,7 @@ def cleanup_shopify_products(shop_url):
         log_event('System', 'Success', f"Cleanup Complete. Archived {archived_count} duplicates.")
         
 def perform_inventory_sync(shop_url):
+    discrepancy_list = []
     """
     Runs inside the Worker Process.
     STRATEGY: ID-Based Sync + Auto-Detect Shopify Location.
@@ -1779,10 +1803,10 @@ def register_webhooks_manual():
             results.append(f"⏭️ Exists {hook['topic']}")
 
     return jsonify({"message": "Webhook Registration Complete", "details": results})
-    
-    
-    @app.route('/maintenance/clear_product_map', methods=['POST'])
-def clear_product_map():
+
+
+  @app.route('/maintenance/clear_product_map', methods=['POST'])
+  def clear_product_map():
     shop_url = request.args.get('shop')
     try:
         # This deletes the local cache of ID links
