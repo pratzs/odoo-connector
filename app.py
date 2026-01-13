@@ -2183,7 +2183,6 @@ def api_get_locations():
 
 @app.route('/api/settings/save', methods=['POST'])
 def api_save_settings():
-    # 1. Get Params
     shop_url = request.args.get('shop')
     data = request.json
     
@@ -2191,23 +2190,20 @@ def api_save_settings():
         return jsonify({"message": "Error: Missing shop parameter"}), 400
 
     try:
-        # 2. Update Core Shop Settings (Table: Shop)
+        # 1. Update Core Shop Settings (Table: Shop)
         shop = Shop.query.filter_by(shop_url=shop_url).first()
         if shop:
-            # Update Company ID
             if 'odoo_company_id' in data:
                 shop.odoo_company_id = int(data['odoo_company_id'])
-            elif 'company_id' in data: # Handle potential naming mismatch
+            elif 'company_id' in data: 
                 shop.odoo_company_id = int(data['company_id'])
 
-            # Update Sync Start Date
             if 'sync_start_date' in data:
                 shop.sync_start_date = data['sync_start_date']
 
             db.session.add(shop)
 
-        # 3. Update App Settings (Table: AppSetting)
-        # These are key-value pairs stored as JSON or strings
+        # 2. Update App Settings (Table: AppSetting)
         configs = [
             'inventory_locations', 'inventory_field', 'sync_zero_stock', 'combine_committed',
             'cust_direction', 'cust_auto_sync', 'cust_sync_tags', 'cust_whitelist_tags', 'cust_blacklist_tags',
@@ -2218,8 +2214,9 @@ def api_save_settings():
         
         for key in configs:
             if key in data:
-                # Convert lists/dicts to JSON strings, keep strings as strings
-                if isinstance(data[key], (list, dict)):
+                # FIX: Explicitly handle boolean values so they save as "true"/"false" (JSON)
+                # instead of "True"/"False" (Python String)
+                if isinstance(data[key], (list, dict, bool)): 
                     val_str = json.dumps(data[key])
                 else:
                     val_str = str(data[key])
@@ -2231,7 +2228,7 @@ def api_save_settings():
                 else:
                     setting.value = val_str
 
-        # 4. Commit ALL changes in one go
+        # 3. Commit
         db.session.commit()
         return jsonify({"message": "Settings Saved Successfully"})
 
