@@ -399,15 +399,39 @@ def process_product_data(data, odoo_client, shop_url=None):
 
     return processed_count
 
-# [UPDATED FUNCTION]
-def process_order_data(data, odoo_client, shop_url): # <--- ADD shop_url HERE
+def process_order_data(data, odoo_client, shop_url): 
     """
-    Syncs order with SQL-Based Locking and Smart UOM Switching.
+    Syncs order with SQL-Based Locking, Smart UOM Switching, and Date Filtering.
     """
     odoo = odoo_client
     shopify_id = str(data.get('id', ''))
     shopify_name = data.get('name')
     
+    # --- GUARD 0: DATE CHECK (NEW) ---
+    try:
+        # Default fallback
+        start_date_str = '2000-01-01' 
+        
+        # Fetch Shop settings directly to get the cutoff date
+        shop_record = Shop.query.filter_by(shop_url=shop_url).first()
+        if shop_record and getattr(shop_record, 'sync_start_date', None):
+            start_date_str = shop_record.sync_start_date
+
+        # Parse Shopify Order Date (ISO 8601 format: 2023-01-01T12:00:00...)
+        order_created_at = data.get('created_at', '')
+        if order_created_at:
+            # We only care about the YYYY-MM-DD part
+            order_date_iso = order_created_at.split('T')[0]
+            
+            order_date_dt = datetime.strptime(order_date_iso, "%Y-%m-%d")
+            start_date_dt = datetime.strptime(start_date_str, "%Y-%m-%d")
+
+            if order_date_dt < start_date_dt:
+                return True, f"Skipped: Order date ({order_date_iso}) is older than start date ({start_date_str})"
+    except Exception as e:
+        # If date parsing fails, log it but don't crash; proceed with sync
+        print(f"Date Check Warning for {shopify_name}: {e}")
+
     # --- GUARD 1: SQL DATABASE LOCK ---
     try:
         exists = ProcessedOrder.query.get(shopify_id)
@@ -2195,6 +2219,14 @@ def api_save_settings():
                     db.session.add(setting)
                 else:
                     setting.value = val_str
+
+        # NEW: Save the Sync Start Date
+        if 'sync_start_date' in data:
+            # Basic validation to ensure YYYY-MM-DD format
+            date_str = data['sync_start_date']
+            if date_str:
+                shop.sync_start_date = date_str
+                db.session.add(shop)
 
         # 3. Commit ALL changes in ONE atomic transaction (Fixes "Not Saved" issue)
         db.session.commit()
