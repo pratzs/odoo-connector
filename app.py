@@ -698,6 +698,7 @@ def sync_products_master(shop_url):
         # --- CONFIGS (FIX: Pass shop_url to everything) ---
         sync_title = get_config('prod_sync_title', True, shop_url=shop_url)
         sync_price = get_config('prod_sync_price', True, shop_url=shop_url)
+        sync_cost = get_config('prod_sync_cost', True, shop_url=shop_url)
         sync_desc = get_config('prod_sync_desc', True, shop_url=shop_url)
         sync_tags = get_config('prod_sync_tags', False, shop_url=shop_url)
         sync_images = get_config('prod_sync_images', False, shop_url=shop_url)
@@ -857,7 +858,7 @@ def sync_products_master(shop_url):
                 if sp.variants:
                     for v in sp.variants:
                         d_data = next((d for d in desired_variants if d['sku'] == v.sku), None)
-                        if d_data and v.inventory_item_id:
+                        if d_data and v.inventory_item_id and sync_cost:
                             try:
                                 inv_item = shopify.InventoryItem.find(v.inventory_item_id)
                                 if inv_item:
@@ -2208,7 +2209,7 @@ def api_save_settings():
             'inventory_locations', 'inventory_field', 'sync_zero_stock', 'combine_committed',
             'cust_direction', 'cust_auto_sync', 'cust_sync_tags', 'cust_whitelist_tags', 'cust_blacklist_tags',
             'prod_auto_create', 'prod_auto_publish', 'prod_sync_images', 'prod_sync_tags', 'prod_sync_meta_vendor_code',
-            'prod_sync_price', 'prod_sync_title', 'prod_sync_desc', 'prod_sync_type', 'prod_sync_vendor',
+            'prod_sync_price', 'prod_sync_cost', 'prod_sync_title', 'prod_sync_desc', 'prod_sync_type', 'prod_sync_vendor',
             'order_sync_tax', 'alert_email', 'alert_threshold'
         ]
         
