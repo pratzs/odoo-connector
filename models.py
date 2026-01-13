@@ -16,6 +16,8 @@ class Shop(db.Model):
     # STORE ENCRYPTED PASSWORD
     odoo_password_enc = db.Column(db.String(500)) 
 
+    sync_start_date = db.Column(db.String(20), default='2000-01-01')
+
     # Helper property to handle encryption automatically
     @property
     def odoo_password(self):
