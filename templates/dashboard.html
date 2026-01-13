@@ -162,6 +162,7 @@
                                 <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldTags" {% if config.prod_sync_tags %}checked{% endif %}> <label>Tags</label></div>
                                 <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldMetaVendorCode" {% if config.prod_sync_meta_vendor_code %}checked{% endif %}> <label>Vendor Code</label></div>
                                 <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldCost" {% if config.prod_sync_cost %}checked{% endif %}> <label>Cost Price</label></div>
+                                <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldBarcode" {% if config.prod_sync_barcode %}checked{% endif %}> <label>Barcode</label></div>
                             </div>
                         </div>
                     </div>
@@ -252,6 +253,16 @@
                             <div id="tagFilterFields" class="mt-2 p-2 bg-light border rounded" style="{% if not config.cust_sync_tags %}display: none;{% endif %}">
                                 <input type="text" class="form-control form-control-sm mb-1" id="custWhitelistTags" placeholder="Whitelist: tag1, tag2" value="{{ config.cust_whitelist_tags }}">
                                 <input type="text" class="form-control form-control-sm" id="custBlacklistTags" placeholder="Blacklist: tagA, tagB" value="{{ config.cust_blacklist_tags }}">
+                            </div>
+                            <hr>
+                            <label class="form-label-sm mb-2">Field Mapping</label>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="custSyncVat" {% if config.cust_sync_vat %}checked{% endif %}>
+                                <label class="form-check-label" for="custSyncVat">Sync VAT & Tax Exempt Status</label>
+                            </div>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="custSyncSalesRep" {% if config.cust_sync_salesrep %}checked{% endif %}>
+                                <label class="form-check-label" for="custSyncSalesRep">Sync Salesperson (Metafield)</label>
                             </div>
                         </div>
                     </div>
@@ -459,6 +470,7 @@ document.addEventListener("DOMContentLoaded", function() {
             setCheck('fieldDesc', SAVED_SETTINGS.prod_sync_desc);
             setCheck('fieldProductType', SAVED_SETTINGS.prod_sync_type);
             setCheck('fieldVendor', SAVED_SETTINGS.prod_sync_vendor);
+            setCheck('fieldBarcode', SAVED_SETTINGS.prod_sync_barcode);
 
             // Orders
             setCheck('orderSyncTax', SAVED_SETTINGS.order_sync_tax);
@@ -477,6 +489,8 @@ document.addEventListener("DOMContentLoaded", function() {
             setCheck('custSyncTagsSwitch', SAVED_SETTINGS.cust_sync_tags);
             setVal('custWhitelistTags', SAVED_SETTINGS.cust_whitelist_tags || '');
             setVal('custBlacklistTags', SAVED_SETTINGS.cust_blacklist_tags || '');
+            setCheck('custSyncVat', SAVED_SETTINGS.cust_sync_vat);
+            setCheck('custSyncSalesRep', SAVED_SETTINGS.cust_sync_salesrep);
 
             toggleTagFields(); 
             if(CURRENT_SHOP_URL) fetchCompanies();
@@ -563,6 +577,7 @@ function saveSettings() {
         prod_sync_meta_vendor_code: document.getElementById('fieldMetaVendorCode').checked,
         prod_sync_price: document.getElementById('fieldPrice').checked,
         prod_sync_cost: document.getElementById('fieldCost').checked,
+        prod_sync_barcode: document.getElementById('fieldBarcode').checked,
         prod_sync_title: document.getElementById('fieldTitle').checked,
         prod_sync_desc: document.getElementById('fieldDesc').checked,
         prod_sync_type: document.getElementById('fieldProductType').checked,
@@ -572,6 +587,8 @@ function saveSettings() {
         cust_auto_sync: document.getElementById('custAutoSync').checked,
         sync_start_date: document.getElementById('syncStartDate').value,
         cust_sync_tags: document.getElementById('custSyncTagsSwitch').checked,
+        cust_sync_vat: document.getElementById('custSyncVat').checked,
+        cust_sync_salesrep: document.getElementById('custSyncSalesRep').checked,
         cust_whitelist_tags: document.getElementById('custWhitelistTags').value,
         cust_blacklist_tags: document.getElementById('custBlacklistTags').value,
         alert_email: document.getElementById('alertEmail').value,
