@@ -2188,6 +2188,7 @@ def api_get_locations():
 
 @app.route('/api/settings/save', methods=['POST'])
 def api_save_settings():
+    # 1. Get Params
     shop_url = request.args.get('shop')
     data = request.json
     
@@ -2195,24 +2196,39 @@ def api_save_settings():
         return jsonify({"message": "Error: Missing shop parameter"}), 400
 
     try:
-        # 1. Update Core Shop Settings (Company ID)
+        # 2. Update Core Shop Settings (Table: Shop)
         shop = Shop.query.filter_by(shop_url=shop_url).first()
-        if shop and 'company_id' in data:
-            shop.odoo_company_id = int(data['company_id'])
+        if shop:
+            # Update Company ID
+            if 'odoo_company_id' in data:
+                shop.odoo_company_id = int(data['odoo_company_id'])
+            elif 'company_id' in data: # Handle potential naming mismatch
+                shop.odoo_company_id = int(data['company_id'])
+
+            # Update Sync Start Date
+            if 'sync_start_date' in data:
+                shop.sync_start_date = data['sync_start_date']
+
             db.session.add(shop)
 
-        # 2. Update App Settings (Bulk Update Transaction)
+        # 3. Update App Settings (Table: AppSetting)
+        # These are key-value pairs stored as JSON or strings
         configs = [
             'inventory_locations', 'inventory_field', 'sync_zero_stock', 'combine_committed',
             'cust_direction', 'cust_auto_sync', 'cust_sync_tags', 'cust_whitelist_tags', 'cust_blacklist_tags',
             'prod_auto_create', 'prod_auto_publish', 'prod_sync_images', 'prod_sync_tags', 'prod_sync_meta_vendor_code',
             'prod_sync_price', 'prod_sync_title', 'prod_sync_desc', 'prod_sync_type', 'prod_sync_vendor',
-            'order_sync_tax'
+            'order_sync_tax', 'alert_email', 'alert_threshold'
         ]
         
         for key in configs:
             if key in data:
-                val_str = json.dumps(data[key])
+                # Convert lists/dicts to JSON strings, keep strings as strings
+                if isinstance(data[key], (list, dict)):
+                    val_str = json.dumps(data[key])
+                else:
+                    val_str = str(data[key])
+
                 setting = AppSetting.query.filter_by(shop_url=shop_url, key=key).first()
                 if not setting:
                     setting = AppSetting(shop_url=shop_url, key=key, value=val_str)
@@ -2220,17 +2236,10 @@ def api_save_settings():
                 else:
                     setting.value = val_str
 
-        # NEW: Save the Sync Start Date
-        if 'sync_start_date' in data:
-            # Basic validation to ensure YYYY-MM-DD format
-            date_str = data['sync_start_date']
-            if date_str:
-                shop.sync_start_date = date_str
-                db.session.add(shop)
-
-        # 3. Commit ALL changes in ONE atomic transaction (Fixes "Not Saved" issue)
+        # 4. Commit ALL changes in one go
         db.session.commit()
         return jsonify({"message": "Settings Saved Successfully"})
+
     except Exception as e:
         db.session.rollback()
         return jsonify({"message": f"Save Error: {str(e)}"}), 500
