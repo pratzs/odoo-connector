@@ -1681,7 +1681,8 @@ def home():
         'odoo_url': shop.odoo_url,
         'odoo_db': shop.odoo_db,
         'odoo_username': shop.odoo_username,
-        'odoo_company_id': shop.odoo_company_id
+        'odoo_company_id': shop.odoo_company_id,
+        'sync_start_date': shop.sync_start_date
     }
 
     settings = AppSetting.query.filter_by(shop_url=shop_url).all()
