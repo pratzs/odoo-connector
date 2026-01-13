@@ -154,13 +154,14 @@
                             <hr>
                             <label class="form-label-sm mb-2">Field Mapping</label>
                             <div class="d-flex flex-wrap gap-3">
-                                <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldPrice" {% if config.prod_sync_price %}checked{% endif %}> <label>Price</label></div>
                                 <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldTitle" {% if config.prod_sync_title %}checked{% endif %}> <label>Title</label></div>
+                                <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldPrice" {% if config.prod_sync_price %}checked{% endif %}> <label>Price</label></div>
                                 <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldDesc" {% if config.prod_sync_desc %}checked{% endif %}> <label>Desc</label></div>
                                 <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldProductType" {% if config.prod_sync_type %}checked{% endif %}> <label>Type</label></div>
                                 <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldVendor" {% if config.prod_sync_vendor %}checked{% endif %}> <label>Vendor</label></div>
                                 <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldTags" {% if config.prod_sync_tags %}checked{% endif %}> <label>Tags</label></div>
                                 <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldMetaVendorCode" {% if config.prod_sync_meta_vendor_code %}checked{% endif %}> <label>Vendor Code</label></div>
+                                <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldCost" {% if config.prod_sync_cost %}checked{% endif %}> <label>Cost Price</label></div>
                             </div>
                         </div>
                     </div>
@@ -453,6 +454,7 @@ document.addEventListener("DOMContentLoaded", function() {
             setCheck('fieldTags', SAVED_SETTINGS.prod_sync_tags);
             setCheck('fieldMetaVendorCode', SAVED_SETTINGS.prod_sync_meta_vendor_code);
             setCheck('fieldPrice', SAVED_SETTINGS.prod_sync_price);
+            setCheck('fieldCost', SAVED_SETTINGS.prod_sync_cost);
             setCheck('fieldTitle', SAVED_SETTINGS.prod_sync_title);
             setCheck('fieldDesc', SAVED_SETTINGS.prod_sync_desc);
             setCheck('fieldProductType', SAVED_SETTINGS.prod_sync_type);
@@ -560,6 +562,7 @@ function saveSettings() {
         prod_sync_tags: document.getElementById('fieldTags').checked,
         prod_sync_meta_vendor_code: document.getElementById('fieldMetaVendorCode').checked,
         prod_sync_price: document.getElementById('fieldPrice').checked,
+        prod_sync_cost: document.getElementById('fieldCost').checked,
         prod_sync_title: document.getElementById('fieldTitle').checked,
         prod_sync_desc: document.getElementById('fieldDesc').checked,
         prod_sync_type: document.getElementById('fieldProductType').checked,
