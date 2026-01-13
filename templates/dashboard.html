@@ -433,7 +433,17 @@ function formatLocalTime(utcString) {
 }
 
 document.addEventListener("DOMContentLoaded", function() {
-            const setCheck = (id, val) => { const el = document.getElementById(id); if(el) el.checked = !!val; };
+            const setCheck = (id, val) => { 
+    const el = document.getElementById(id); 
+    if(el) {
+        // Smart Check: Handles Boolean true/false AND String "true"/"false"/"True"/"False"
+        if (typeof val === 'string') {
+            el.checked = (val.toLowerCase() === 'true');
+        } else {
+            el.checked = !!val;
+        }
+    }
+};
             const setVal = (id, val) => { const el = document.getElementById(id); if(el) el.value = val; };
 
             // Products
