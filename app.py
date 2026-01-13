@@ -1259,22 +1259,17 @@ def perform_inventory_sync(shop_url):
         if not odoo or not setup_shopify_session(shop_url): return
 
         # --- NEW: AUTO-DETECT SHOPIFY LOCATION ---
-        # We need to know WHICH Shopify location to update.
-        # Since this is multi-tenant, we ask Shopify for the first active location.
         shopify_location_id = None
         try:
-            # 1. Check if we saved a specific setting (Future proofing)
             saved_id = get_config('shopify_target_location_id', None, shop_url=shop_url)
             
             if saved_id:
                 shopify_location_id = int(saved_id)
             else:
-                # 2. Auto-Detect: Get the first active location from Shopify
                 locs = shopify.Location.find()
                 active_locs = [l for l in locs if l.active]
                 
                 if active_locs:
-                    # Usually the first one is the primary/default location
                     shopify_location_id = active_locs[0].id
                     log_event('Inventory', 'Info', f"Auto-selected Shopify Location: {active_locs[0].name} (ID: {shopify_location_id})", shop_url=shop_url)
                 else:
@@ -1283,7 +1278,6 @@ def perform_inventory_sync(shop_url):
         except Exception as e:
             log_event('Inventory', 'Error', f"Failed to detect Shopify Location: {e}", shop_url=shop_url)
             return
-        # -----------------------------------------
 
         # Load Configs
         target_locations = get_config('inventory_locations', [], shop_url=shop_url)
@@ -1322,6 +1316,7 @@ def perform_inventory_sync(shop_url):
         missing_skus = [sku for sku in all_skus if sku not in sku_to_odoo_id]
         
         if missing_skus:
+            # Only log this once at start, not repeatedly
             log_event('Inventory', 'Info', f"Found {len(missing_skus)} unmapped items. Searching Odoo...", shop_url=shop_url)
             try:
                 CHUNK = 10
@@ -1375,7 +1370,6 @@ def perform_inventory_sync(shop_url):
                     
                     if int(total_qty) != current_shopify_qty:
                         try:
-                            # USE THE AUTO-DETECTED LOCATION ID HERE
                             shopify.InventoryLevel.set(
                                 location_id=shopify_location_id, 
                                 inventory_item_id=sp_variant.inventory_item_id,
@@ -1386,16 +1380,16 @@ def perform_inventory_sync(shop_url):
                             print(f"Failed to update {sku}: {e}")
 
                 processed += len(batch)
-                if processed % 100 == 0:
-                     log_event('Inventory', 'Info', f"Checked {processed}/{total_shopify} items...", shop_url=shop_url)
-                     
+                # REMOVED: The "Checked X/Y items..." log call.
+                    
             except Exception as e:
                 log_event('Inventory', 'Error', f"Batch Error: {e}", shop_url=shop_url)
 
         if discrepancy_list and alert_email:
             send_inventory_alert(shop_url, alert_email, discrepancy_list)
 
-        log_event('Inventory', 'Success', f"Sync Complete. Checked {total_shopify} items. Updated {updates}.", shop_url=shop_url)
+        # Final Summary Log
+        log_event('Inventory', 'Success', f"Sync Complete. Checked {total_shopify} items. Updated {updates} products.", shop_url=shop_url)
 
 
 def sync_odoo_cancellations(shop_url):
@@ -2374,7 +2368,6 @@ def cleanup_old_logs():
 def run_schedule():
     """
     Robust Scheduler: Uses Redis keys to track job timing.
-    This survives server restarts/crashes because the 'timer' is in Redis, not RAM.
     """
     print("🕒 Scheduler Started")
     
@@ -2388,10 +2381,10 @@ def run_schedule():
                 
                 # --- A. HIGH FREQUENCY TASKS ---
                 
-                # 1. Inventory Sync (Every 10 mins = 600s)
+                # 1. Inventory Sync (Every 30 mins = 1800s) <--- CHANGED FROM 600
                 if not conn.get(f"last_inv_{shop_url}"):
                     q.enqueue(scheduled_inventory_sync, shop_url, job_timeout=3600)
-                    conn.setex(f"last_inv_{shop_url}", 600, "done")
+                    conn.setex(f"last_inv_{shop_url}", 1800, "done") # 1800 seconds = 30 mins
                     print(f"⏰ Triggered Inventory Sync for {shop_url}")
 
                 # 2. Fulfillment Sync (Every 60 mins = 3600s)
