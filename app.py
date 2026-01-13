@@ -703,6 +703,7 @@ def sync_products_master(shop_url):
         sync_tags = get_config('prod_sync_tags', False, shop_url=shop_url)
         sync_images = get_config('prod_sync_images', False, shop_url=shop_url)
         sync_vendor = get_config('prod_sync_vendor', True, shop_url=shop_url) 
+        sync_barcode = get_config('prod_sync_barcode', True, shop_url=shop_url)
         
         auto_create = get_config('prod_auto_create', False, shop_url=shop_url)
         auto_publish = get_config('prod_auto_publish', False, shop_url=shop_url)
@@ -847,8 +848,10 @@ def sync_products_master(shop_url):
                     
                     match.option1 = des['option1']
                     match.sku = des['sku']
-                    if des['barcode']: match.barcode = des['barcode'] 
-                    if sync_price: match.price = des['price']
+                    if sync_price: 
+                        match.price = des['price']
+                    if sync_barcode and des['barcode']: 
+                        match.barcode = des['barcode']
                     match.inventory_management = 'shopify'
                     final_vars.append(match)
 
@@ -914,39 +917,46 @@ def sync_products_master(shop_url):
 
 def sync_customers_master(shop_url):
     """
-    Odoo -> Shopify Customer Sync (Master - Fixed 'tags' Crash). 
+    Odoo -> Shopify Customer Sync (Master). 
     - Pushes VAT and Company Name.
     - Merges Odoo Tags (Preserves existing Shopify tags).
     - Maps Odoo Salesperson -> Shopify 'custom.salesrep' Metafield.
     """
     with app.app_context():
         # --- NEW CONNECTION LOGIC ---
-        odoo = get_odoo_connection(shop_url) # <--- Connect Dynamically
+        odoo = get_odoo_connection(shop_url) 
         if not odoo or not setup_shopify_session(shop_url): 
-            log_event('System', 'Error', "Customer Sync Failed: Connection Error")
+            log_event('System', 'Error', "Customer Sync Failed: Connection Error", shop_url=shop_url)
             return
         # ----------------------------
 
-        # 1. Configuration
-        direction = get_config('cust_direction', 'bidirectional')
+        # 1. Configuration (Read all configs at start)
+        direction = get_config('cust_direction', 'bidirectional', shop_url=shop_url)
         if direction == 'shopify_to_odoo':
-            log_event('Customer Sync', 'Skipped', "Sync direction is set to Shopify -> Odoo only.")
+            log_event('Customer Sync', 'Skipped', "Sync direction is set to Shopify -> Odoo only.", shop_url=shop_url)
             return
 
-        company_id = get_config('odoo_company_id')
-        whitelist = [t.strip() for t in get_config('cust_whitelist_tags', '').split(',') if t.strip()]
-        blacklist = [t.strip() for t in get_config('cust_blacklist_tags', '').split(',') if t.strip()]
-        use_tags_filter = get_config('cust_sync_tags', False)
+        company_id = get_config('odoo_company_id', shop_url=shop_url)
+        
+        # Parse Tag lists
+        w_tag = get_config('cust_whitelist_tags', '', shop_url=shop_url)
+        b_tag = get_config('cust_blacklist_tags', '', shop_url=shop_url)
+        whitelist = [t.strip() for t in w_tag.split(',') if t.strip()]
+        blacklist = [t.strip() for t in b_tag.split(',') if t.strip()]
+        
+        use_tags_filter = get_config('cust_sync_tags', False, shop_url=shop_url)
+        sync_vat = get_config('cust_sync_vat', True, shop_url=shop_url)
+        sync_salesrep = get_config('cust_sync_salesrep', True, shop_url=shop_url)
 
-        # 2. Fetch Odoo Customers (Active Companies & Individuals)
+        # 2. Fetch Odoo Customers
         last_run = "2000-01-01 00:00:00" 
         try:
             odoo_customers = odoo.get_changed_customers(last_run, company_id)
         except Exception as e:
-            log_event('Customer Sync', 'Error', f"Odoo Fetch Failed: {e}")
+            log_event('Customer Sync', 'Error', f"Odoo Fetch Failed: {e}", shop_url=shop_url)
             return
         
-        log_event('Customer Sync', 'Info', f"Found {len(odoo_customers)} customers in Odoo. Processing...")
+        log_event('Customer Sync', 'Info', f"Found {len(odoo_customers)} customers in Odoo. Processing...", shop_url=shop_url)
         
         synced_count = 0
         
@@ -971,9 +981,7 @@ def sync_customers_master(shop_url):
                     c = shopify.Customer()
                     c.email = email
                 
-                # --- FIX STARTS HERE ---
-                # 5. Map Basic Fields (Handle Odoo 'False' for empty names)
-                # Odoo returns False for empty fields, so we use "or ''" to force it to a string
+                # 5. Map Basic Fields
                 raw_name = p.get('name') or '' 
                 
                 # Safe Split
@@ -981,7 +989,6 @@ def sync_customers_master(shop_url):
                 c.first_name = name_parts[0] if name_parts else 'Customer'
                 c.last_name = ' '.join(name_parts[1:]) if len(name_parts) > 1 else 'Customer'
                 
-                # Phone might also be False
                 c.phone = (p.get('phone') or p.get('mobile') or '').strip()
                 c.verified_email = True
                 
@@ -1000,7 +1007,6 @@ def sync_customers_master(shop_url):
                 c.addresses = [shopify.Address(address_data)]
                 
                 # 7. TAG SYNC (Merge Strategy)
-                # FIX: Use getattr() to safely read tags, preventing KeyError if they don't exist
                 tags_str = getattr(c, 'tags', '')
                 current_shopify_tags = [t.strip() for t in tags_str.split(',')] if tags_str else []
                 
@@ -1010,18 +1016,18 @@ def sync_customers_master(shop_url):
                 # 8. PREPARE METAFIELDS
                 metafields_to_save = []
 
-                # VAT Metafield
+                # VAT Logic
                 vat = p.get('vat')
-                if vat:
+                if vat and sync_vat: # Check Setting
                     c.note = f"VAT Number: {vat}"
                     metafields_to_save.append(shopify.Metafield({
                         'key': 'vat_number', 'value': vat, 'type': 'single_line_text_field', 'namespace': 'custom'
                     }))
                     c.tax_exempt = True 
 
-                # SALESPERSON Metafield
+                # Salesperson Logic
                 salesperson_field = p.get('user_id')
-                if salesperson_field:
+                if salesperson_field and sync_salesrep: # Check Setting
                     rep_name = salesperson_field[1]
                     metafields_to_save.append(shopify.Metafield({
                         'key': 'salesrep', 'value': rep_name, 'type': 'single_line_text_field', 'namespace': 'custom'
@@ -1033,9 +1039,7 @@ def sync_customers_master(shop_url):
                 c.save()
                 
                 # 9. Link in DB
-               # FIX: Check existence by shop_url too
                 if not CustomerMap.query.filter_by(shopify_customer_id=str(c.id), shop_url=shop_url).first():
-                    # FIX: Pass 'shop_url' to the model to prevent NotNullViolation
                     new_map = CustomerMap(
                         shop_url=shop_url, 
                         shopify_customer_id=str(c.id), 
@@ -1048,9 +1052,9 @@ def sync_customers_master(shop_url):
                 synced_count += 1
 
             except Exception as e:
-                log_event('Customer Sync', 'Error', f"Failed {email}: {e}")
+                log_event('Customer Sync', 'Error', f"Failed {email}: {e}", shop_url=shop_url)
 
-        log_event('Customer Sync', 'Success', f"Sync Complete. Processed {synced_count} customers.")
+        log_event('Customer Sync', 'Success', f"Sync Complete. Processed {synced_count} customers.", shop_url=shop_url)
 
 def archive_shopify_duplicates(shop_url):
     """Scans Shopify for duplicate SKUs and archives the older ones."""
@@ -2207,9 +2211,9 @@ def api_save_settings():
         # 2. Update App Settings (Table: AppSetting)
         configs = [
             'inventory_locations', 'inventory_field', 'sync_zero_stock', 'combine_committed',
-            'cust_direction', 'cust_auto_sync', 'cust_sync_tags', 'cust_whitelist_tags', 'cust_blacklist_tags',
+            'cust_direction', 'cust_auto_sync', 'cust_sync_tags', 'cust_whitelist_tags', 'cust_blacklist_tags', 'cust_sync_vat', 'cust_sync_salesrep',
             'prod_auto_create', 'prod_auto_publish', 'prod_sync_images', 'prod_sync_tags', 'prod_sync_meta_vendor_code',
-            'prod_sync_price', 'prod_sync_cost', 'prod_sync_title', 'prod_sync_desc', 'prod_sync_type', 'prod_sync_vendor',
+            'prod_sync_price', 'prod_sync_cost', 'prod_sync_barcode', 'prod_sync_title', 'prod_sync_desc', 'prod_sync_type', 'prod_sync_vendor',
             'order_sync_tax', 'alert_email', 'alert_threshold'
         ]
         
