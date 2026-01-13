@@ -347,7 +347,7 @@ def get_shopify_variant_inv_by_sku(sku, shop_url=None):
         return None
 
 
-def process_product_data(data, odoo_client):
+def process_product_data(data, odoo_client, shop_url=None):
     """
     Handles Shopify Product Webhooks (Update Only).
     Restored: Updates Odoo Category based on Shopify Product Type.
@@ -386,7 +386,7 @@ def process_product_data(data, odoo_client):
                     if cat_id not in current_cat_ids:
                         odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                             'product.product', 'write', [[product_id], {'public_categ_ids': [(4, cat_id)]}])
-                        log_event('Product', 'Info', f"Webhook: Updated Category for {sku} to '{product_type}'")
+                        log_event('Product', 'Info', f"Webhook: Updated Category for {sku} to '{product_type}'", shop_url=shop_url)
                         processed_count += 1
                 except Exception as e:
                     err_msg = str(e)
@@ -399,10 +399,10 @@ def process_product_data(data, odoo_client):
 
     return processed_count
 
-def process_order_data(data, odoo_client):
+# [UPDATED FUNCTION]
+def process_order_data(data, odoo_client, shop_url): # <--- ADD shop_url HERE
     """
     Syncs order with SQL-Based Locking and Smart UOM Switching.
-    FIXED: Indentation and CustomerMap lookup.
     """
     odoo = odoo_client
     shopify_id = str(data.get('id', ''))
@@ -434,7 +434,9 @@ def process_order_data(data, odoo_client):
     try:
         email = data.get('email') or data.get('contact_email')
         client_ref = f"ONLINE_{shopify_name}"
-        company_id = get_config('odoo_company_id')
+        
+        # FIX: Pass shop_url explicitely so it works in Background Worker
+        company_id = get_config('odoo_company_id', shop_url=shop_url) 
         
         # Double Check Odoo
         try:
@@ -463,19 +465,16 @@ def process_order_data(data, odoo_client):
             partner_id = odoo.create_partner(vals)
             partner = {'id': partner_id, 'name': final_name}
             
-            # --- FIX: Correct Indentation & Logic ---
             if shopify_id and data.get('customer', {}).get('id'):
                 try:
                     sh_cust_id = str(data['customer']['id'])
-                    # FIX: Use filter_by, not get()
-                    cust_map_exists = CustomerMap.query.filter_by(shopify_customer_id=sh_cust_id).first()
+                    # FIX: Pass shop_url to filter
+                    cust_map_exists = CustomerMap.query.filter_by(shopify_customer_id=sh_cust_id, shop_url=shop_url).first()
                     
                     if not cust_map_exists:
-                        # Attempt to get shop_url from context, fallback to 'System'
-                        s_url = request.args.get('shop') if request else 'System'
-                        
+                        # FIX: Use passed shop_url
                         db.session.add(CustomerMap(
-                            shop_url=s_url,
+                            shop_url=shop_url,
                             shopify_customer_id=sh_cust_id, 
                             odoo_partner_id=partner_id, 
                             email=email
@@ -505,12 +504,10 @@ def process_order_data(data, odoo_client):
         # 3. SMART UOM LOOKUP
         unit_uom_id = None
         try:
-            # Step A: Look for common names
             uom_names = ['Units', 'Unit', 'Piece', 'Pieces', 'PCE', 'ea', 'Each']
             uom_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
                 'uom.uom', 'search', [[['name', 'in', uom_names]]])
             
-            # Step B: If failed, try fuzzy search for anything containing "Unit"
             if not uom_ids:
                 uom_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
                     'uom.uom', 'search', [[['name', 'ilike', 'Unit']]])
@@ -518,7 +515,7 @@ def process_order_data(data, odoo_client):
             if uom_ids: 
                 unit_uom_id = uom_ids[0]
             else:
-                log_event('System', 'Warning', "[UOM DEBUG] Could not find any UOM named Unit/Piece in Odoo.")
+                log_event('System', 'Warning', "[UOM DEBUG] Could not find any UOM named Unit/Piece in Odoo.", shop_url=shop_url)
         except Exception as e:
             print(f"UOM Lookup Error: {e}")
 
@@ -527,7 +524,6 @@ def process_order_data(data, odoo_client):
             raw_sku = item.get('sku')
             if not raw_sku: continue
 
-            # --- FIX: SKU CLEANER (Remove -UNIT to find product) ---
             sku = raw_sku
             is_unit_variant = False
 
@@ -537,7 +533,6 @@ def process_order_data(data, odoo_client):
 
             product_id = odoo.search_product_by_sku(sku, company_id)
             
-            # Auto-Create Product if missing (using the CLEAN sku)
             if not product_id:
                 if not odoo.check_product_exists_by_sku(sku, company_id):
                     try:
@@ -555,14 +550,12 @@ def process_order_data(data, odoo_client):
                 
                 line_vals = {'product_id': product_id, 'product_uom_qty': qty, 'price_unit': price, 'name': item['name'], 'discount': pct}
                 
-                # --- APPLY UOM SWITCH ---
-                # Logic: If SKU had '-UNIT' suffix OR title has keywords -> Force Unit UOM
                 variant_title = (item.get('variant_title') or '').lower()
                 title_indicates_unit = any(x in variant_title for x in ['unit', 'single', 'each', 'bottle', 'can', 'pce'])
                 
                 if unit_uom_id and (is_unit_variant or title_indicates_unit):
                     line_vals['product_uom'] = unit_uom_id
-                    log_event('Order', 'Info', f"[UOM] Switched {raw_sku} to Unit UOM (ID: {unit_uom_id})")
+                    log_event('Order', 'Info', f"[UOM] Switched {raw_sku} to Unit UOM (ID: {unit_uom_id})", shop_url=shop_url)
                 
                 lines.append((0, 0, line_vals))
 
@@ -596,17 +589,15 @@ def process_order_data(data, odoo_client):
         }
         if company_id: vals['company_id'] = int(company_id)
         
-        # FIX: Check the tax setting
-        sync_tax_included = get_config('order_sync_tax', False)
+        # FIX: Pass shop_url
+        sync_tax_included = get_config('order_sync_tax', False, shop_url=shop_url)
         
-        # Pass to Odoo Context
         odoo.create_sale_order(vals, context={'manual_price': True, 'tax_included': sync_tax_included})
-        log_event('Order', 'Success', f"Synced {client_ref}")
+        log_event('Order', 'Success', f"Synced {client_ref}", shop_url=shop_url)
         return True, "Synced"
 
     except Exception as e:
-        log_event('Order', 'Error', f"Error {shopify_name}: {e}")
-        # IF IT FAILED, UNLOCK IT SO WE CAN RETRY LATER
+        log_event('Order', 'Error', f"Error {shopify_name}: {e}", shop_url=shop_url)
         try:
             l = ProcessedOrder.query.get(shopify_id)
             if l: 
@@ -1391,12 +1382,12 @@ def sync_odoo_cancellations(shop_url):
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): return
 
-        # 1. Look back 60 minutes for cancelled orders
-        cutoff = datetime.utcnow() - timedelta(minutes=60)
+        # FIX: Increased lookback from 60 minutes to 7 days
+        # Cancellations often happen days later (returns, fraud, etc.)
+        cutoff = datetime.utcnow() - timedelta(days=7) 
         company_id = get_config('odoo_company_id', shop_url=shop_url)
 
         try:
-            # Re-use the client helper method
             cancelled_orders = odoo.get_recently_cancelled_orders(str(cutoff), company_id)
         except Exception as e:
             log_event('Cancel Sync', 'Error', f"Odoo Search Failed: {e}", shop_url=shop_url)
@@ -1410,19 +1401,16 @@ def sync_odoo_cancellations(shop_url):
             shopify_name = ref.replace('ONLINE_', '').strip()
             
             try:
-                # 2. Find in Shopify
                 orders = shopify.Order.find(name=shopify_name, status='any')
                 if not orders: continue
                 sp_order = orders[0]
 
-                # 3. Cancel if open
                 if sp_order.cancelled_at is None:
-                    sp_order.cancel(reason="other", email=False) # email=False prevents spamming customer
+                    sp_order.cancel(reason="other", email=False)
                     sync_count += 1
-                    log_event('Cancel Sync', 'Success', f"Cancelled Shopify Order {shopify_name} (Source: Odoo)", shop_url=shop_url)
+                    log_event('Cancel Sync', 'Success', f"Cancelled Shopify Order {shopify_name}", shop_url=shop_url)
             
             except Exception as e:
-                # 422 usually means "Already cancelled" or "Cannot cancel fulfilled order"
                 if "422" not in str(e):
                     log_event('Cancel Sync', 'Error', f"Failed to cancel {shopify_name}: {e}", shop_url=shop_url)
 
@@ -1822,44 +1810,44 @@ def register_webhooks_manual():
     if not setup_shopify_session(shop_url):
         return jsonify({"error": "Auth failed"}), 401
 
-    # Ensure HOST is set in your .env (e.g., https://odoo-connector-oivx.onrender.com)
     app_host = os.getenv('HOST') 
     if not app_host:
-        return jsonify({"error": "HOST env var is missing! Cannot register webhooks."}), 500
+        return jsonify({"error": "HOST env var missing"}), 500
 
-    # Define the hooks we need
-    required_hooks = [
-        {'topic': 'orders/create', 'address': f'{app_host}/webhook/orders'},
-        {'topic': 'orders/updated', 'address': f'{app_host}/webhook/orders'},
-        {'topic': 'orders/cancelled', 'address': f'{app_host}/webhook/orders'},
-        {'topic': 'products/create', 'address': f'{app_host}/webhook/products/create'},
-        {'topic': 'products/update', 'address': f'{app_host}/webhook/products/update'}
+    # FIX: Point ALL topics to the SINGLE endpoint defined in shopify.app.toml
+    # This matches the "uri = '/webhooks/shopify'" in your config.
+    target_address = f"{app_host}/webhooks/shopify"
+    
+    required_topics = [
+        'orders/create',
+        'orders/updated',
+        'orders/cancelled',
+        'products/create',
+        'products/update',
+        'inventory_levels/update' # Don't forget inventory!
     ]
 
     results = []
-    
-    # Fetch existing to avoid duplicates
     existing_hooks = shopify.Webhook.find()
-    existing_addresses = [h.address for h in existing_hooks]
 
-    for hook in required_hooks:
-        # Check if a hook with this topic AND address already exists
-        match = next((h for h in existing_hooks if h.topic == hook['topic'] and h.address == hook['address']), None)
+    for topic in required_topics:
+        # Check if hook exists
+        match = next((h for h in existing_hooks if h.topic == topic and h.address == target_address), None)
         
         if not match:
             new_hook = shopify.Webhook()
-            new_hook.topic = hook['topic']
-            new_hook.address = hook['address']
+            new_hook.topic = topic
+            new_hook.address = target_address
             new_hook.format = 'json'
             try:
                 if new_hook.save():
-                    results.append(f"✅ Created {hook['topic']}")
+                    results.append(f"✅ Created {topic}")
                 else:
-                    results.append(f"❌ Failed {hook['topic']}: {new_hook.errors.full_messages()}")
+                    results.append(f"❌ Failed {topic}: {new_hook.errors.full_messages()}")
             except Exception as e:
-                results.append(f"❌ Error {hook['topic']}: {str(e)}")
+                results.append(f"❌ Error {topic}: {str(e)}")
         else:
-            results.append(f"⏭️ Exists {hook['topic']}")
+            results.append(f"⏭️ Exists {topic}")
 
     return jsonify({"message": "Webhook Registration Complete", "details": results})
 
@@ -1906,21 +1894,18 @@ def run_initial_category_import():
 def background_product_sync(shop_url, product_data):
     """
     Runs inside the Worker Process. 
-    Handles connection, processing, and logging safely.
     """
     with app.app_context():
-        # Connect
         odoo = get_odoo_connection(shop_url)
         if not odoo:
-            log_event('Product', 'Error', "Auto Sync Failed: Could not connect to Odoo.", shop_url=shop_url)
+            log_event('Product', 'Error', "Auto Sync Failed: No Odoo Connection.", shop_url=shop_url)
             return
 
         product_title = product_data.get('title', 'Unknown')
         try:
-            # Sync
-            process_product_data(product_data, odoo)
+            # FIX: Pass shop_url explicitly
+            process_product_data(product_data, odoo, shop_url=shop_url)
             
-            # Log Success
             log_event('Product', 'Success', f"Webhook Sync: '{product_title}' updated.", shop_url=shop_url)
             
         except Exception as e:
@@ -2054,7 +2039,7 @@ def import_selected_orders():
         res = requests.get(f"https://{shop_url}/admin/api/{SHOPIFY_API_VERSION}/orders/{oid}.json", headers=headers)
         if res.status_code == 200:
             # We handle the return type safely here
-            result = process_order_data(res.json().get('order'), odoo)
+            result = process_order_data(res.json().get('order'), odoo, shop_url=shop_url)
             if isinstance(result, tuple):
                 success = result[0]
             else:
@@ -2077,7 +2062,8 @@ def background_order_sync(shop_url, order_data):
 
         # 2. Sync with CRASH PROTECTION
         try:
-            result = process_order_data(order_data, odoo)
+            # FIX: Passed shop_url explicitly so get_config works inside the helper
+            result = process_order_data(order_data, odoo, shop_url=shop_url)
             
             # Handle tuple return (success, message) vs boolean (True/False)
             if isinstance(result, tuple):
@@ -2488,7 +2474,7 @@ def sync_images_only_manual(shop_url):
                 if pm and pm.image_hash == current_hash: continue
 
                 # Sync to Shopify
-                sid = find_shopify_product_by_sku(sku)
+                sid = find_shopify_product_by_sku(sku, shop_url=shop_url)
                 if sid:
                     try:
                         sp = shopify.Product.find(sid)
@@ -2521,7 +2507,7 @@ def emergency_purge_junk_products(shop_url):
             log_event('Cleanup', 'Error', "Connection failed. Aborting.")
             return
 
-        company_id = get_config('odoo_company_id')
+        company_id = get_config('odoo_company_id', shop_url=shop_url)
         if not company_id:
             log_event('Cleanup', 'Error', "No Company ID set. Aborting.")
             return
