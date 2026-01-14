@@ -32,10 +32,10 @@
         .section-header { font-weight: 600; font-size: 15px; border-bottom: 1px solid var(--p-border); padding-bottom: 12px; margin-bottom: 15px; color: var(--p-on-surface); }
 
         /* TABS */
-        .custom-tabs { display: flex; background: transparent; border-bottom: 1px solid var(--p-border); padding: 0; margin-bottom: 20px; box-shadow: none; gap: 20px; }
+       /* .custom-tabs { display: flex; background: transparent; border-bottom: 1px solid var(--p-border); padding: 0; margin-bottom: 20px; box-shadow: none; gap: 20px; }
         .tab-btn { padding: 10px 0; cursor: pointer; font-weight: 500; color: var(--p-subdued); border-bottom: 3px solid transparent; margin-bottom: -1px; transition: all 0.2s; }
         .tab-btn:hover { color: var(--p-primary); }
-        .tab-btn.active { color: var(--p-primary); border-bottom: 3px solid var(--p-primary); font-weight: 600; }
+        .tab-btn.active { color: var(--p-primary); border-bottom: 3px solid var(--p-primary); font-weight: 600; } */
         .tab-content-area { display: none; }
         .tab-content-area.active { display: block; animation: fadeIn 0.2s; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
@@ -86,16 +86,10 @@
 </head>
 <body>
 <ui-nav-menu>
-    <a href="/?shop={{ shop_url }}#overview" rel="home">Overview & Logs</a>
-    <a href="#settings">Configuration</a>
+    <a href="#overview" rel="home">Overview</a>
+    <a href="#settings">Settings</a>
     <a href="#maintenance">Maintenance</a>
 </ui-nav-menu>
-
-<div class="custom-tabs">
-    <div class="tab-btn active" id="btn-overview" onclick="switchTab('overview')">Overview</div>
-    <div class="tab-btn" id="btn-settings" onclick="switchTab('settings')">Settings</div>
-    <div class="tab-btn" id="btn-maintenance" onclick="switchTab('maintenance')">Maintenance</div>
-</div>
 
     <div id="tab-overview" class="tab-content-area active">
     <div class="row">
@@ -508,23 +502,27 @@
 }
 
 function handleNavigation() {
-    const hash = window.location.hash || '#overview';
-    
-    // Remove active states from all buttons and content areas
-    document.querySelectorAll('.tab-content-area').forEach(el => el.classList.remove('active'));
-    document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+        // 1. Get current hash (default to #overview if empty)
+        const hash = window.location.hash || '#overview';
+        
+        // 2. Hide ALL content areas first
+        document.querySelectorAll('.tab-content-area').forEach(el => {
+            el.classList.remove('active');
+            el.style.display = 'none'; // Ensure they are hidden
+        });
 
-    if (hash === '#settings') {
-        document.getElementById('tab-settings').classList.add('active');
-        document.getElementById('btn-settings').classList.add('active');
-    } else if (hash === '#maintenance') {
-        document.getElementById('tab-maintenance').classList.add('active');
-        document.getElementById('btn-maintenance').classList.add('active');
-    } else {
-        document.getElementById('tab-overview').classList.add('active');
-        document.getElementById('btn-overview').classList.add('active');
+        // 3. Determine which tab to show
+        let targetId = 'tab-overview';
+        if (hash === '#settings') targetId = 'tab-settings';
+        if (hash === '#maintenance') targetId = 'tab-maintenance';
+
+        // 4. Show the target content
+        const targetEl = document.getElementById(targetId);
+        if (targetEl) {
+            targetEl.classList.add('active');
+            targetEl.style.display = 'block';
+        }
     }
-}
 
 // Listen for Sidebar clicks and initial load
 window.addEventListener('hashchange', handleNavigation);
