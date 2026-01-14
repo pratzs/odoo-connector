@@ -350,7 +350,7 @@ def get_shopify_variant_inv_by_sku(sku, shop_url=None):
 def process_product_data(data, odoo_client, shop_url=None):
     """
     Handles Shopify Product Webhooks (Update Only).
-    Restored: Updates Odoo Category based on Shopify Product Type.
+    FIXED: Now correctly passes shop_url to get_config so Company ID is found.
     """
     odoo = odoo_client
     product_type = data.get('product_type', '')
@@ -369,7 +369,9 @@ def process_product_data(data, odoo_client, shop_url=None):
 
     variants = data.get('variants', [])
     processed_count = 0
-    company_id = get_config('odoo_company_id')
+    
+    # FIX: Passed shop_url=shop_url. Without this, background jobs fail to find the Company ID.
+    company_id = get_config('odoo_company_id', shop_url=shop_url)
     
     for v in variants:
         sku = v.get('sku')
@@ -1060,7 +1062,7 @@ def archive_shopify_duplicates(shop_url):
     """Scans Shopify for duplicate SKUs and archives the older ones."""
     if not setup_shopify_session(shop_url): return
 
-    log_event('Duplicate Scan', 'Info', "Starting scan for duplicate SKUs...")
+    log_event('Duplicate Scan', 'Info', "Starting scan for duplicate SKUs...", shop_url=shop_url)
     
     sku_map = {} # SKU -> List of Products
     page = shopify.Product.find(limit=250)
@@ -1093,39 +1095,41 @@ def archive_shopify_duplicates(shop_url):
                     p.status = 'archived'
                     p.save()
                     archived_count += 1
-                    # FIX: Pass shop_url so the log appears in the correct dashboard
                     log_event('Duplicate Scan', 'Warning', f"Archived Duplicate: {p.title} (SKU: {sku})", shop_url=shop_url)
                 except Exception as e:
                     print(f"Failed to archive {p.id}: {e}")
 
-    # FIX: Pass shop_url here too
     log_event('Duplicate Scan', 'Success', f"Scan Complete. Archived {archived_count} duplicates.", shop_url=shop_url)
     
 
 def sync_categories_only(shop_url):
     """
     Optimized ONE-TIME import of Categories from Shopify to Odoo.
-    STRATEGY: Reverse-Linking.
-    Updates the 'Category' to include the product, instead of updating the 'Product'.
-    This bypasses the Product-level POS crash.
+    STRATEGY: Reverse-Linking to bypass POS crashes.
+    FIX: Now passes shop_url to get_config so Company ID is found.
     """
     with app.app_context():
         # --- DYNAMIC CONNECT ---
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): 
-            log_event('System', 'Error', "Category Sync Failed: Connection Error")
+            log_event('System', 'Error', "Category Sync Failed: Connection Error", shop_url=shop_url)
             return
         # -----------------------
 
-        log_event('System', 'Info', "Starting eCommerce Category Sync (Reverse-Link Mode)...")
-        company_id = get_config('odoo_company_id')
+        log_event('System', 'Info', "Starting eCommerce Category Sync (Reverse-Link Mode)...", shop_url=shop_url)
+        
+        # FIX: Added shop_url=shop_url here
+        company_id = get_config('odoo_company_id', shop_url=shop_url)
         
         # 1. Load Odoo Data
         try:
             # We need product_tmpl_id for the reverse link
+            domain = [['active', '=', True]]
+            if company_id: domain.append(['company_id', '=', int(company_id)])
+
             odoo_prods = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                 'product.product', 'search_read',
-                [[['active', '=', True], ['company_id', '=', int(company_id)]]],
+                [domain],
                 {'fields': ['default_code', 'product_tmpl_id', 'public_categ_ids']}
             )
             odoo_map = {p['default_code']: p for p in odoo_prods if p.get('default_code')}
@@ -1135,9 +1139,9 @@ def sync_categories_only(shop_url):
                 'product.public.category', 'search_read', [[]], {'fields': ['id', 'name']})
             for c in cats: cat_map[c['name']] = c['id']
             
-            log_event('System', 'Info', f"Loaded {len(odoo_map)} Products and {len(cat_map)} eCommerce Categories.")
+            log_event('System', 'Info', f"Loaded {len(odoo_map)} Products and {len(cat_map)} eCommerce Categories.", shop_url=shop_url)
         except Exception as e: 
-            log_event('System', 'Error', f"Category Setup Failed: {e}")
+            log_event('System', 'Error', f"Category Setup Failed: {e}", shop_url=shop_url)
             return
 
         updated_count = 0
@@ -1149,7 +1153,7 @@ def sync_categories_only(shop_url):
             for sp in page:
                 processed_count += 1
                 if processed_count % 50 == 0:
-                    log_event('System', 'Info', f"Scanned {processed_count} Shopify products...")
+                    log_event('System', 'Info', f"Scanned {processed_count} Shopify products...", shop_url=shop_url)
 
                 if not sp.product_type: continue
                 
@@ -1170,15 +1174,12 @@ def sync_categories_only(shop_url):
                     # Find or Create Category
                     cat_id = cat_map.get(cat_name)
                     if not cat_id:
-                        log_event('System', 'Info', f"Creating new eCommerce Category: '{cat_name}'")
+                        log_event('System', 'Info', f"Creating new eCommerce Category: '{cat_name}'", shop_url=shop_url)
                         cat_id = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
                             'product.public.category', 'create', [{'name': cat_name}])
                         cat_map[cat_name] = cat_id
                     
                     # --- THE FIX: Write to the CATEGORY, not the Product ---
-                    # This adds the product template to the category's list.
-                    # It achieves the same result but often bypasses Product-level triggers.
-                    
                     tmpl_id = odoo_prod['product_tmpl_id'][0]
                     
                     odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
@@ -1188,29 +1189,25 @@ def sync_categories_only(shop_url):
                     
                     updated_count += 1
                     odoo_prod['public_categ_ids'] = [cat_id]
-                    log_event('System', 'Success', f"Linked {sku} -> '{cat_name}' (via Category)")
+                    log_event('System', 'Success', f"Linked {sku} -> '{cat_name}' (via Category)", shop_url=shop_url)
 
                 except Exception as e:
-                    # If even this fails, we just log it and move on. We DO NOT delete POS data.
-                    log_event('System', 'Warning', f"Skipped {sku} due to Odoo Lock: {e}")
+                    log_event('System', 'Warning', f"Skipped {sku} due to Odoo Lock: {e}", shop_url=shop_url)
 
             if page.has_next_page(): 
                 try: page = page.next_page()
                 except: break
             else: break
         
-        log_event('System', 'Success', f"Category Sync Finished. Updated {updated_count} products.")
+        log_event('System', 'Success', f"Category Sync Finished. Updated {updated_count} products.", shop_url=shop_url)
 
 def cleanup_shopify_products(shop_url):
     """
-    Safely cleans up Shopify:
-    1. Archives ACTUAL duplicates (if 2 products have same SKU, keeps one, archives others).
-    2. DOES NOT archive products just because they are missing in Odoo (Safety Fix).
+    Safely cleans up Shopify Duplicates (Archives duplicates, keeps original).
     """
     if not setup_shopify_session(shop_url): return
     seen_skus = set()
     
-    # Iterate through all Shopify products
     page = shopify.Product.find(limit=250)
     archived_count = 0
     
@@ -1223,11 +1220,7 @@ def cleanup_shopify_products(shop_url):
                 sku = variant.sku
                 needs_archive = False
                 
-                # --- SAFETY UPDATE ---
-                # REMOVED: "if sku not in odoo_active_skus" check.
-                # We do NOT want to archive products just because they seem missing in Odoo.
-                
-                # ONLY archive if we have already seen this SKU in this loop (Duplicate in Shopify)
+                # ONLY archive if we have already seen this SKU in this loop (Duplicate)
                 if sku in seen_skus: 
                     needs_archive = True
                 
@@ -1236,9 +1229,8 @@ def cleanup_shopify_products(shop_url):
                         sp.status = 'archived'
                         sp.save()
                         archived_count += 1
-                        log_event('System', 'Warning', f"Archived Duplicate in Shopify: {sku}")
+                        log_event('System', 'Warning', f"Archived Duplicate in Shopify: {sku}", shop_url=shop_url)
                 else: 
-                    # Mark SKU as seen so next time we encounter it (duplicate), we archive the second one
                     seen_skus.add(sku)
             
             if page.has_next_page(): 
@@ -1249,13 +1241,13 @@ def cleanup_shopify_products(shop_url):
         print(f"Cleanup Error: {e}")
         
     if archived_count > 0: 
-        log_event('System', 'Success', f"Cleanup Complete. Archived {archived_count} duplicates.")
+        log_event('System', 'Success', f"Cleanup Complete. Archived {archived_count} duplicates.", shop_url=shop_url)
         
 def perform_inventory_sync(shop_url):
     discrepancy_list = []
     """
     Runs inside the Worker Process.
-    STRATEGY: ID-Based Sync + Auto-Detect Shopify Location.
+    STRATEGY: ID-Based Sync + Active Only Filter.
     """
     with app.app_context():
         log_event('Inventory', 'Info', "Starting Inventory Sync...", shop_url=shop_url)
@@ -1263,7 +1255,7 @@ def perform_inventory_sync(shop_url):
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): return
 
-        # --- NEW: AUTO-DETECT SHOPIFY LOCATION ---
+        # --- AUTO-DETECT SHOPIFY LOCATION ---
         shopify_location_id = None
         try:
             saved_id = get_config('shopify_target_location_id', None, shop_url=shop_url)
@@ -1291,10 +1283,12 @@ def perform_inventory_sync(shop_url):
         alert_threshold = int(get_config('alert_threshold', 50, shop_url=shop_url))
         alert_email = get_config('alert_email', None, shop_url=shop_url)
 
-        # 1. FETCH SHOPIFY VARIANTS
+        # 1. FETCH SHOPIFY VARIANTS (ACTIVE ONLY)
         shopify_variants = {} 
         try:
+            # FIX: Added status='active' to ignore Archived/Draft products
             page = shopify.Product.find(limit=250, status='active')
+            
             while page:
                 for p in page:
                     for v in p.variants:
@@ -1325,14 +1319,36 @@ def perform_inventory_sync(shop_url):
             log_event('Inventory', 'Info', f"Found {len(missing_skus)} unmapped items. Searching Odoo...", shop_url=shop_url)
             try:
                 CHUNK = 10
+                found_skus = set() 
+
                 for i in range(0, len(missing_skus), CHUNK):
                     chunk = missing_skus[i:i+CHUNK]
                     domain = [['default_code', 'in', chunk], ['active', '=', True]]
                     res = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                         'product.product', 'search_read', [domain], {'fields': ['default_code']})
+                    
                     for r in res:
-                        sku_to_odoo_id[r['default_code']] = r['id']
+                        sku = r['default_code']
+                        sku_to_odoo_id[sku] = r['id']
+                        found_skus.add(sku)
+                        
+                        # SAVE MAPPING
+                        if not ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first():
+                            db.session.add(ProductMap(shop_url=shop_url, sku=sku, odoo_product_id=r['id']))
+
+                db.session.commit()
+
+                # --- IGNORE LOGIC ---
+                # Save failures as -1 so we don't ask Odoo again
+                for sku in missing_skus:
+                    if sku not in found_skus:
+                        if not ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first():
+                            db.session.add(ProductMap(shop_url=shop_url, sku=sku, odoo_product_id=-1))
+                
+                db.session.commit()
+
             except Exception as e:
+                db.session.rollback()
                 log_event('Inventory', 'Warning', f"Fallback search failed: {e}", shop_url=shop_url)
 
         # 3. BATCH SYNC
@@ -1343,9 +1359,11 @@ def perform_inventory_sync(shop_url):
         
         for i in range(0, len(map_items), BATCH_SIZE):
             batch = map_items[i:i+BATCH_SIZE]
-            batch_ids = [item[1] for item in batch]
-            batch_skus = {item[1]: item[0] for item in batch}
+            batch_ids = [item[1] for item in batch if item[1] > 0] # Skip ignored items (-1)
+            batch_skus = {item[1]: item[0] for item in batch if item[1] > 0}
             
+            if not batch_ids: continue
+
             try:
                 # Read Odoo Stock
                 qty_map = {pid: 0 for pid in batch_ids}
@@ -1385,7 +1403,6 @@ def perform_inventory_sync(shop_url):
                             print(f"Failed to update {sku}: {e}")
 
                 processed += len(batch)
-                # REMOVED: The "Checked X/Y items..." log call.
                     
             except Exception as e:
                 log_event('Inventory', 'Error', f"Batch Error: {e}", shop_url=shop_url)
@@ -1394,7 +1411,7 @@ def perform_inventory_sync(shop_url):
             send_inventory_alert(shop_url, alert_email, discrepancy_list)
 
         # Final Summary Log
-        log_event('Inventory', 'Success', f"Sync Complete. Checked {total_shopify} items. Updated {updates} products.", shop_url=shop_url)
+        log_event('Inventory', 'Success', f"Sync Complete. Checked {total_shopify} active items. Updated {updates} products.", shop_url=shop_url)
 
 
 def sync_odoo_cancellations(shop_url):
@@ -1406,7 +1423,6 @@ def sync_odoo_cancellations(shop_url):
         if not odoo or not setup_shopify_session(shop_url): return
 
         # FIX: Increased lookback from 60 minutes to 7 days
-        # Cancellations often happen days later (returns, fraud, etc.)
         cutoff = datetime.utcnow() - timedelta(days=7) 
         company_id = get_config('odoo_company_id', shop_url=shop_url)
 
@@ -1508,10 +1524,10 @@ def sync_odoo_fulfillments(shop_url):
                 new_fulfillment = shopify.Fulfillment.create(fulfillment_payload)
                 
                 if new_fulfillment.errors:
-                     log_event('Fulfillment', 'Error', f"Shopify Error {shopify_order_name}: {new_fulfillment.errors.full_messages()}")
+                      log_event('Fulfillment', 'Error', f"Shopify Error {shopify_order_name}: {new_fulfillment.errors.full_messages()}")
                 else:
-                     synced_count += 1
-                     log_event('Fulfillment', 'Success', log_msg)
+                      synced_count += 1
+                      log_event('Fulfillment', 'Success', log_msg)
 
             except Exception as e:
                 if "422" not in str(e): 
@@ -1522,13 +1538,8 @@ def sync_odoo_fulfillments(shop_url):
 
 def scheduled_inventory_sync(shop_url):
     with app.app_context():
-        # log_event('Inventory', 'Info', "Starting periodic inventory check...", shop_url=shop_url)
-        
         # FIX: Just call the function. It handles its own logging now.
         perform_inventory_sync(shop_url) 
-        
-        # No need to log "Success" here because perform_inventory_sync 
-        # already logs "Sync Complete" at the very end.
 
 # ==========================================
 # SHOPIFY OAUTH ROUTES
@@ -1554,7 +1565,6 @@ def auth_callback():
     params = dict(request.args)
     
     # 2. Security Check: Validate the request actually came from Shopify
-    # Note: shopify.Session.setup() at the top of the file makes this work
     try:
         if not shopify.Session.validate_params(params):
             return "Auth Failed: Invalid HMAC (Signature Mismatch). Check Client Secret.", 400
@@ -1563,7 +1573,6 @@ def auth_callback():
 
    # 3. Exchange Code for Token
     try:
-        # UPDATED: Use Unified Version
         session = shopify.Session(shop_url, SHOPIFY_API_VERSION)
         access_token = session.request_token(params) 
     except Exception as e:
@@ -1593,7 +1602,6 @@ def save_public_settings():
         shop.odoo_db = request.form.get('odoo_db')
         shop.odoo_username = request.form.get('odoo_user')
         
-        # Only update password if user typed something new
         new_pass = request.form.get('odoo_pass')
         if new_pass and new_pass.strip():
             shop.odoo_password = new_pass
@@ -1616,7 +1624,6 @@ def home():
     if not shop: 
         return redirect(url_for('install', shop=shop_url))
 
-    # Check for 'mode=connect' to force the connect form
     mode = request.args.get('mode')
 
     # --- 1. SHOW CONNECT FORM (If credentials missing OR user requested edit) ---
@@ -1691,7 +1698,6 @@ def home():
         except:
             config[s.key] = s.value
 
-    # B. Render the Dashboard (Indented Fix)
     clean_shop = shop_url.replace("https://", "").replace("http://", "").split('/')[0]
     return render_template('dashboard.html', 
                            shop_url=shop_url, 
@@ -1749,12 +1755,10 @@ def api_refresh_locations():
 
     try:
         # 2. Fetch Locations from Odoo
-        # We try to get the company_id to filter correctly, strictly optional
         company_id = get_config('odoo_company_id', shop_url=shop_url)
         locations = odoo.get_locations(company_id=company_id)
 
-        # 3. Cache them in the Database (AppSetting table)
-        # This uses your existing set_config helper which saves to AppSetting
+        # 3. Cache them in the Database
         set_config('available_locations', locations)
 
         return jsonify({
@@ -1784,7 +1788,6 @@ def sync_inventory_endpoint():
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
     
     # CHANGED: Increase timeout from 1200 to 3600 (1 Hour)
-    # This gives your slow Odoo server enough time to finish.
     job = q.enqueue(perform_inventory_sync, shop_url, job_timeout=3600)
     
     return jsonify({"message": f"Full Inventory Sync Queued (Job ID: {job.get_id()})"})
@@ -1825,8 +1828,6 @@ def trigger_fix_variants():
     q.enqueue(fix_variant_mess_task, shop_url, job_timeout=900)
     return jsonify({"message": "Variant Cleanup Queued."})
 
-# In app.py
-
 @app.route('/maintenance/register_webhooks', methods=['GET'])
 @require_shopify_session
 def register_webhooks_manual():
@@ -1838,8 +1839,6 @@ def register_webhooks_manual():
     if not app_host:
         return jsonify({"error": "HOST env var missing"}), 500
 
-    # FIX: Point ALL topics to the SINGLE endpoint defined in shopify.app.toml
-    # This matches the "uri = '/webhooks/shopify'" in your config.
     target_address = f"{app_host}/webhooks/shopify"
     
     required_topics = [
@@ -1848,14 +1847,13 @@ def register_webhooks_manual():
         'orders/cancelled',
         'products/create',
         'products/update',
-        'inventory_levels/update' # Don't forget inventory!
+        'inventory_levels/update' 
     ]
 
     results = []
     existing_hooks = shopify.Webhook.find()
 
     for topic in required_topics:
-        # Check if hook exists
         match = next((h for h in existing_hooks if h.topic == topic and h.address == target_address), None)
         
         if not match:
@@ -1884,7 +1882,6 @@ def clear_product_map():
         
     try:
         with app.app_context():
-            # This deletes the local cache of ID links
             ProductMap.query.filter_by(shop_url=shop_url).delete()
             db.session.commit()
             
@@ -1909,7 +1906,6 @@ def run_initial_category_import():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
 
-    # CHANGED: Use Queue instead of Threading
     q.enqueue(sync_categories_only, shop_url, job_timeout=600)
     return jsonify({"message": "Category Sync Job Queued"})
 
@@ -1932,12 +1928,11 @@ def background_product_sync(shop_url, product_data):
             # Sync Logic
             process_product_data(product_data, odoo, shop_url=shop_url)
             
-            # --- NEW: AGGREGATION LOGIC ---
-            # Instead of logging immediately, increment a counter in Redis
+            # --- AGGREGATION LOGIC ---
             # Key format: log_buffer_products_{shop_url}
             redis_key = f"log_buffer_products_{shop_url}"
             conn.incr(redis_key)
-            # ------------------------------
+            # -------------------------
             
         except Exception as e:
             # We still log errors immediately because they are important
