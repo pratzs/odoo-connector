@@ -2565,7 +2565,8 @@ def sync_images_only_manual(shop_url):
 
 def emergency_purge_junk_products(shop_url):
     """
-    EMERGENCY TOOL: Destroys products in Shopify not found in Odoo.
+    EMERGENCY TOOL: Destroys ACTIVE products in Shopify not found in Odoo.
+    UPDATED: Now ignores 'Archived' and 'Draft' products to protect history.
     """
     with app.app_context():
         odoo = get_odoo_connection(shop_url)
@@ -2605,28 +2606,30 @@ def emergency_purge_junk_products(shop_url):
             log_event('Cleanup', 'Error', "Safety Stop: Too few products found. Aborting.")
             return
 
-        log_event('Cleanup', 'Info', f"Found {len(valid_skus)} valid SKUs. Starting Purge...")
+        log_event('Cleanup', 'Info', f"Found {len(valid_skus)} valid SKUs. Scanning Active Shopify Products...")
 
-        page = shopify.Product.find(limit=250)
+        # FIX: Added status='active' to protect Archived/Draft items
+        page = shopify.Product.find(limit=250, status='active')
         deleted_count = 0
         
         while page:
             for sp in page:
                 sku = sp.variants[0].sku if sp.variants else None
                 
+                # If SKU is missing or NOT in our valid list, delete it
                 if not sku or sku not in valid_skus:
                     try:
                         sp.destroy()
                         deleted_count += 1
                         if deleted_count % 50 == 0:
-                            log_event('Cleanup', 'Warning', f"Purged {deleted_count} junk products...")
+                            log_event('Cleanup', 'Warning', f"Purged {deleted_count} active junk products...")
                     except Exception as e:
                         print(f"Failed to delete {sp.id}: {e}")
             
             if page.has_next_page(): page = page.next_page()
             else: break
         
-        log_event('Cleanup', 'Success', f"Purge Complete. Deleted {deleted_count} junk products.")
+        log_event('Cleanup', 'Success', f"Purge Complete. Deleted {deleted_count} active junk products.")
 
 def check_for_corrupted_categories(shop_url):
     with app.app_context():
