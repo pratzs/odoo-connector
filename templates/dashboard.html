@@ -376,6 +376,49 @@
         </div>
     </div>
 
+    <div class="modal fade" id="unmappedModal" tabindex="-1">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header bg-warning">
+                <h5 class="modal-title text-dark">Unmapped Products Report</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body bg-light">
+                <div class="alert alert-info">
+                    <strong>How to fix:</strong><br>
+                    1. Copy the SKU.<br>
+                    2. Go to Odoo and ensure a product exists with this <strong>exact</strong> Internal Reference.<br>
+                    3. If the product is missing in Odoo, create it.<br>
+                    4. Once fixed, the next Inventory Sync will automatically link them.
+                </div>
+                <div id="unmappedLoading" class="text-center p-5">
+                    <div class="spinner-border text-warning" role="status"></div>
+                    <p class="mt-2">Scanning Shopify Inventory... (This may take a moment)</p>
+                </div>
+                <div class="table-responsive bg-white rounded shadow-sm" id="unmappedTableContainer" style="display:none;">
+                    <table class="table table-hover align-middle">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Image</th>
+                                <th>Product Title</th>
+                                <th>Variant</th>
+                                <th>Shopify SKU</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="unmappedTableBody">
+                            </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <span class="me-auto text-muted" id="unmappedCount"></span>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
     <div class="toast-container position-fixed bottom-0 end-0 p-3">
         <div id="liveToast" class="toast" role="alert"><div class="toast-header"><strong class="me-auto">System</strong><button type="button" class="btn-close" data-bs-dismiss="toast"></button></div><div class="toast-body" id="toastMessage"></div></div>
     </div>
@@ -651,6 +694,63 @@ function runBatchImport() {
     }).then(r => r.json()).then(data => {
         if(modal) modal.hide(); showToast(data.message); setTimeout(() => location.reload(), 2000);
     });
+}
+
+        // --- UNMAPPED PRODUCTS MODAL ---
+const unmappedModalElement = document.getElementById('unmappedModal');
+const unmappedModal = unmappedModalElement ? new bootstrap.Modal(unmappedModalElement) : null;
+
+function openUnmappedModal() {
+    if(unmappedModal) unmappedModal.show();
+    
+    const loadingEl = document.getElementById('unmappedLoading');
+    const tableContainer = document.getElementById('unmappedTableContainer');
+    
+    // Reset UI
+    if(loadingEl) loadingEl.style.display = 'block';
+    if(tableContainer) tableContainer.style.display = 'none';
+    if(loadingEl) loadingEl.innerHTML = '<div class="spinner-border text-warning" role="status"></div><p class="mt-2">Scanning Shopify Inventory... (This may take a moment)</p>';
+    
+    fetch(`/api/diagnostics/unmapped_products?shop=${CURRENT_SHOP_URL}`)
+        .then(r => r.json())
+        .then(data => {
+            if(loadingEl) loadingEl.style.display = 'none';
+            if(tableContainer) tableContainer.style.display = 'block';
+            
+            const tbody = document.getElementById('unmappedTableBody');
+            if(tbody) tbody.innerHTML = '';
+            
+            const countEl = document.getElementById('unmappedCount');
+            if(countEl) countEl.innerText = `Total Unmapped: ${data.count || 0}`;
+
+            if (!data.items || data.items.length === 0) {
+                if(tbody) tbody.innerHTML = '<tr><td colspan="5" class="text-center text-success fw-bold p-5">🎉 Great job! All active products are mapped.</td></tr>';
+                return;
+            }
+
+            data.items.forEach(item => {
+                const img = item.image ? `<img src="${item.image}" style="width:50px; height:50px; object-fit:cover; border-radius:4px;">` : '<span class="text-muted">No Img</span>';
+                
+                if(tbody) {
+                    tbody.innerHTML += `
+                        <tr>
+                            <td>${img}</td>
+                            <td class="fw-500">${item.title}</td>
+                            <td class="text-muted small">${item.variant_title}</td>
+                            <td><code class="bg-light px-2 py-1 rounded border border-danger text-danger fw-bold">${item.sku}</code></td>
+                            <td>
+                                <a href="https://${CURRENT_SHOP_URL}/admin/products/${item.shopify_id}" target="_blank" class="btn btn-sm btn-outline-secondary">
+                                    Edit in Shopify <i class="bi bi-box-arrow-up-right"></i>
+                                </a>
+                            </td>
+                        </tr>
+                    `;
+                }
+            });
+        })
+        .catch(err => {
+            if(loadingEl) loadingEl.innerHTML = `<div class="text-danger">Error loading report: ${err}</div>`;
+        });
 }
 
 // --- SIDEBAR & HASH NAVIGATION ---
