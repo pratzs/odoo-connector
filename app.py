@@ -920,9 +920,7 @@ def sync_products_master(shop_url):
 def sync_customers_master(shop_url):
     """
     Odoo -> Shopify Customer Sync (Master). 
-    - Pushes VAT and Company Name.
-    - Merges Odoo Tags (Preserves existing Shopify tags).
-    - Maps Odoo Salesperson -> Shopify 'custom.salesrep' Metafield.
+    UPDATED: Added 'Heartbeat' logging every 50 customers.
     """
     with app.app_context():
         # --- NEW CONNECTION LOGIC ---
@@ -958,7 +956,8 @@ def sync_customers_master(shop_url):
             log_event('Customer Sync', 'Error', f"Odoo Fetch Failed: {e}", shop_url=shop_url)
             return
         
-        log_event('Customer Sync', 'Info', f"Found {len(odoo_customers)} customers in Odoo. Processing...", shop_url=shop_url)
+        total_count = len(odoo_customers)
+        log_event('Customer Sync', 'Info', f"Found {total_count} customers in Odoo. Processing...", shop_url=shop_url)
         
         synced_count = 0
         
@@ -1052,6 +1051,11 @@ def sync_customers_master(shop_url):
                     db.session.commit()
                 
                 synced_count += 1
+
+                # --- NEW HEARTBEAT LOGGING ---
+                if synced_count % 50 == 0:
+                     log_event('Customer Sync', 'Info', f"Progress: Synced {synced_count}/{total_count} customers...", shop_url=shop_url)
+                # -----------------------------
 
             except Exception as e:
                 log_event('Customer Sync', 'Error', f"Failed {email}: {e}", shop_url=shop_url)
