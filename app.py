@@ -919,8 +919,8 @@ def sync_products_master(shop_url):
 
 def sync_customers_master(shop_url):
     """
-    Odoo -> Shopify Customer Sync (Master). 
-    UPDATED: Added 'Heartbeat' logging every 50 customers.
+    Odoo -> Shopify Customer Sync (Master).
+    UPDATED: Now INCREMENTAL. Remembers the last run time to speed up future syncs.
     """
     with app.app_context():
         # --- NEW CONNECTION LOGIC ---
@@ -930,7 +930,7 @@ def sync_customers_master(shop_url):
             return
         # ----------------------------
 
-        # 1. Configuration (Read all configs at start)
+        # 1. Configuration
         direction = get_config('cust_direction', 'bidirectional', shop_url=shop_url)
         if direction == 'shopify_to_odoo':
             log_event('Customer Sync', 'Skipped', "Sync direction is set to Shopify -> Odoo only.", shop_url=shop_url)
@@ -948,8 +948,13 @@ def sync_customers_master(shop_url):
         sync_vat = get_config('cust_sync_vat', True, shop_url=shop_url)
         sync_salesrep = get_config('cust_sync_salesrep', True, shop_url=shop_url)
 
-        # 2. Fetch Odoo Customers
-        last_run = "2000-01-01 00:00:00" 
+        # 2. SMART TIMESTAMP LOGIC
+        # Try to get the last successful run time from DB
+        last_run = get_config('last_customer_sync_time', '2000-01-01 00:00:00', shop_url=shop_url)
+        
+        # Capture current time BEFORE the sync starts (to ensure we don't miss changes happening right now)
+        current_run_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+
         try:
             odoo_customers = odoo.get_changed_customers(last_run, company_id)
         except Exception as e:
@@ -957,7 +962,7 @@ def sync_customers_master(shop_url):
             return
         
         total_count = len(odoo_customers)
-        log_event('Customer Sync', 'Info', f"Found {total_count} customers in Odoo. Processing...", shop_url=shop_url)
+        log_event('Customer Sync', 'Info', f"Found {total_count} changed customers since {last_run}. Processing...", shop_url=shop_url)
         
         synced_count = 0
         
@@ -985,7 +990,6 @@ def sync_customers_master(shop_url):
                 # 5. Map Basic Fields
                 raw_name = p.get('name') or '' 
                 
-                # Safe Split
                 name_parts = raw_name.split(' ')
                 c.first_name = name_parts[0] if name_parts else 'Customer'
                 c.last_name = ' '.join(name_parts[1:]) if len(name_parts) > 1 else 'Customer'
@@ -1007,7 +1011,7 @@ def sync_customers_master(shop_url):
                 }
                 c.addresses = [shopify.Address(address_data)]
                 
-                # 7. TAG SYNC (Merge Strategy)
+                # 7. TAG SYNC
                 tags_str = getattr(c, 'tags', '')
                 current_shopify_tags = [t.strip() for t in tags_str.split(',')] if tags_str else []
                 
@@ -1019,7 +1023,7 @@ def sync_customers_master(shop_url):
 
                 # VAT Logic
                 vat = p.get('vat')
-                if vat and sync_vat: # Check Setting
+                if vat and sync_vat: 
                     c.note = f"VAT Number: {vat}"
                     metafields_to_save.append(shopify.Metafield({
                         'key': 'vat_number', 'value': vat, 'type': 'single_line_text_field', 'namespace': 'custom'
@@ -1028,7 +1032,7 @@ def sync_customers_master(shop_url):
 
                 # Salesperson Logic
                 salesperson_field = p.get('user_id')
-                if salesperson_field and sync_salesrep: # Check Setting
+                if salesperson_field and sync_salesrep: 
                     rep_name = salesperson_field[1]
                     metafields_to_save.append(shopify.Metafield({
                         'key': 'salesrep', 'value': rep_name, 'type': 'single_line_text_field', 'namespace': 'custom'
@@ -1052,13 +1056,16 @@ def sync_customers_master(shop_url):
                 
                 synced_count += 1
 
-                # --- NEW HEARTBEAT LOGGING ---
                 if synced_count % 50 == 0:
                      log_event('Customer Sync', 'Info', f"Progress: Synced {synced_count}/{total_count} customers...", shop_url=shop_url)
-                # -----------------------------
 
             except Exception as e:
                 log_event('Customer Sync', 'Error', f"Failed {email}: {e}", shop_url=shop_url)
+
+        # --- SAVE THE TIMESTAMP ---
+        # Only save if we successfully finished the loop
+        set_config('last_customer_sync_time', current_run_time)
+        # --------------------------
 
         log_event('Customer Sync', 'Success', f"Sync Complete. Processed {synced_count} customers.", shop_url=shop_url)
 
