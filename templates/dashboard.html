@@ -12,29 +12,52 @@
     
     <style>
         :root {
-            --p-surface: #f1f2f4;
-            --p-text: #202223;
-            --p-primary: #008060;
+            --p-surface: #f6f6f7;
+            --p-on-surface: #202223;
+            --p-subdued: #6d7175;
+            --p-primary: #008060; /* Shopify Green */
             --p-primary-hover: #006e52;
             --p-critical: #d82c0d;
+            --p-warning-bg: #fff5ea;
+            --p-warning-border: #ffc453;
             --p-border: #e1e3e5;
-            --p-shadow-card: 0px 0px 5px rgba(23, 24, 24, 0.05), 0px 1px 2px rgba(0, 0, 0, 0.15);
+            --p-shadow: 0 0 0 1px rgba(63, 63, 68, 0.05), 0 1px 3px 0 rgba(63, 63, 68, 0.15);
+            --p-radius: 8px;
         }
-        body { background-color: var(--p-surface); font-family: -apple-system, sans-serif; color: var(--p-text); font-size: 14px; padding: 20px; }
-        .card { border: none; border-radius: 8px; box-shadow: var(--p-shadow-card); background: white; margin-bottom: 20px; }
-        .section-header { font-weight: 600; font-size: 15px; border-bottom: 1px solid var(--p-border); padding-bottom: 10px; margin-bottom: 15px; color: var(--p-text); }
-        .custom-tabs { display: flex; background: white; border-bottom: 1px solid #dcdcdc; padding: 0 20px; margin-bottom: 20px; border-radius: 8px; box-shadow: var(--p-shadow-card); }
-        .tab-btn { padding: 15px 20px; cursor: pointer; font-weight: 500; color: #6d7175; border-bottom: 3px solid transparent; margin-bottom: -1px; }
+
+        body { background-color: var(--p-surface); font-family: -apple-system, BlinkMacSystemFont, "San Francisco", "Segoe UI", Roboto, sans-serif; color: var(--p-on-surface); font-size: 14px; padding: 20px; }
+        
+        /* CARDS */
+        .card { border: none; border-radius: var(--p-radius); box-shadow: var(--p-shadow); background: white; margin-bottom: 20px; }
+        .section-header { font-weight: 600; font-size: 15px; border-bottom: 1px solid var(--p-border); padding-bottom: 12px; margin-bottom: 15px; color: var(--p-on-surface); }
+
+        /* TABS (Underlined Style) */
+        .custom-tabs { display: flex; background: transparent; border-bottom: 1px solid var(--p-border); padding: 0; margin-bottom: 20px; box-shadow: none; gap: 20px; }
+        .tab-btn { padding: 10px 0; cursor: pointer; font-weight: 500; color: var(--p-subdued); border-bottom: 3px solid transparent; margin-bottom: -1px; transition: all 0.2s; }
+        .tab-btn:hover { color: var(--p-primary); }
         .tab-btn.active { color: var(--p-primary); border-bottom: 3px solid var(--p-primary); font-weight: 600; }
         .tab-content-area { display: none; }
-        .tab-content-area.active { display: block; }
-        .btn { border-radius: 4px; font-weight: 500; font-size: 13px; padding: 8px 16px; border: 1px solid transparent; }
-        .btn-primary { background-color: #303030; color: white; }
-        .btn-secondary { background-color: white; color: var(--p-text); border-color: var(--p-border); }
-        .btn-success { background-color: var(--p-primary); color: white; }
-        .form-label-sm { font-weight: 500; margin-bottom: 4px; display: block; }
-        .log-frame-container { height: 600px; border: 1px solid var(--p-border); background: #1e1e1e; }
-        ui-nav-menu { display: none !important; } /* Hide the blue links from the app frame */
+        .tab-content-area.active { display: block; animation: fadeIn 0.2s; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* BUTTONS (Clean & Flat) */
+        .btn { border-radius: 4px; font-weight: 500; font-size: 13px; padding: 8px 16px; border: 1px solid var(--p-border); box-shadow: 0 1px 0 rgba(0,0,0,0.05); transition: 0.2s; }
+        .btn-primary { background-color: #202223; color: white; border-color: #202223; } /* Primary actions are Black */
+        .btn-primary:hover { background-color: #444; border-color: #444; }
+        .btn-secondary { background-color: white; color: var(--p-on-surface); }
+        .btn-secondary:hover { background-color: #f6f6f7; border-color: #c9cccf; }
+        .btn-success { background-color: var(--p-primary); border-color: var(--p-primary); color: white; } /* "Save" is Green */
+        .btn-danger-subtle { background: #fff4f4; color: var(--p-critical); border-color: #fca5a5; }
+        .btn-danger-subtle:hover { background: #ffeaea; }
+        
+        /* Badges */
+        .badge-status { padding: 4px 8px; border-radius: 4px; font-weight: 500; font-size: 12px; }
+        .badge-success { background: #e3f1df; color: #008060; border: 1px solid #cce5cc; }
+        .badge-danger { background: #ffeaea; color: #d82c0d; border: 1px solid #fca5a5; }
+
+        .form-label-sm { font-weight: 600; margin-bottom: 6px; display: block; color: #444; }
+        .log-frame-container { height: 600px; border: 1px solid var(--p-border); background: #fafbfb; border-radius: 4px; }
+        ui-nav-menu { display: none !important; }
     </style>
 </head>
 <body>
@@ -45,71 +68,77 @@
 </ui-nav-menu>
 
 <div class="custom-tabs">
-    <div class="tab-btn active" id="btn-overview" onclick="switchTab('overview')">Overview & Logs</div>
-    <div class="tab-btn" id="btn-settings" onclick="switchTab('settings')">Configuration</div>
+    <div class="tab-btn active" id="btn-overview" onclick="switchTab('overview')">Overview</div>
+    <div class="tab-btn" id="btn-settings" onclick="switchTab('settings')">Settings</div>
     <div class="tab-btn" id="btn-maintenance" onclick="switchTab('maintenance')">Maintenance</div>
 </div>
 
     <div id="tab-overview" class="tab-content-area active">
-        <div class="row">
-            <div class="col-md-4">
-                <div class="card p-3">
-                    <div class="section-header">System Status</div>
-                    <div class="d-flex justify-content-between mb-2">
-                        <span>Shopify Connection:</span>
-                        <strong>Active</strong>
-                    </div>
-                    <div class="d-flex justify-content-between">
-                        <span>Odoo Connection:</span>
-                        <span class="badge bg-success">Active</span>
-                    </div>
-                    <hr>
-                    <a href="/install?shop={{ shop_url }}" class="btn btn-sm btn-secondary w-100" target="_top">
-                        <i class="bi bi-shield-lock"></i> Re-Authenticate Shopify
-                    </a>
-                    <button id="btnSyncLocs" onclick="syncLocations()" class="btn btn-sm btn-info w-100 text-white">
-                    <i class="bi bi-geo-alt"></i> Sync Warehouse Locations
-                    </button>
+    <div class="row">
+        <div class="col-md-4">
+            <div class="card p-3">
+                <div class="section-header">System Status</div>
+                <div class="d-flex justify-content-between mb-3 align-items-center">
+                    <span class="text-muted">Shopify Connection</span>
+                    <span class="badge-status badge-success">Active</span>
                 </div>
-
-                <div class="card p-3">
-                    <div class="section-header">Common Actions</div>
-                    <div class="d-grid gap-2">
-                        <button onclick="openOrderImportModal()" class="btn btn-primary text-start">
-                            <i class="bi bi-cloud-download me-2"></i> Import Recent Orders
-                        </button>
-                        <button onclick="triggerAction('/sync/inventory')" class="btn btn-secondary text-start">
-                            <i class="bi bi-box-seam me-2"></i> Force Inventory Sync
-                        </button>
-                        <button onclick="triggerAction('/sync/products/master', 'POST')" class="btn btn-secondary text-start">
-                        <i class="bi bi-arrow-repeat me-2"></i> Force Product Sync
-                       </button>
-                        <button onclick="triggerAction('/sync/images/manual')" class="btn btn-secondary text-start">
-                            <i class="bi bi-images me-2"></i> Force Image Sync
-                        </button>
-                        <button onclick="triggerAction('/sync/fulfillments')" class="btn btn-secondary text-start">
-                            <i class="bi bi-truck me-2"></i> Push Fulfillment (Odoo -> Shopify)
-                        </button>
-                        <button onclick="triggerAction('/sync/customers/master', 'POST')" class="btn btn-secondary text-start">
-                        <i class="bi bi-people me-2"></i> Force Customer Sync
-                        </button>
-                    </div>
+                <div class="d-flex justify-content-between align-items-center">
+                    <span class="text-muted">Odoo Connection</span>
+                    <span class="badge-status badge-success">Active</span>
+                </div>
+                <hr style="border-color: var(--p-border);">
+                
+                <div class="d-grid gap-2">
+                    <button id="btnSyncLocs" onclick="syncLocations()" class="btn btn-secondary text-start">
+                        <i class="bi bi-geo-alt me-2"></i> Sync Locations
+                    </button>
+                    <a href="/install?shop={{ shop_url }}" class="btn btn-secondary text-start text-muted" style="font-size: 12px;">
+                        <i class="bi bi-shield-lock me-1"></i> Re-Authenticate
+                    </a>
                 </div>
             </div>
 
-            <div class="col-md-8">
-                <div class="card p-3 h-100">
-                    <div class="d-flex justify-content-between align-items-center mb-2">
-                        <div class="section-header mb-0" style="border:none;">Live Logs</div>
-                        <button onclick="document.querySelector('iframe').contentWindow.location.reload();" class="btn btn-sm btn-secondary">Refresh Logs</button>
-                    </div>
-                    <div class="log-frame-container">
-                        <iframe src="/live_logs?shop={{ shop_url }}" width="100%" height="100%" frameborder="0"></iframe>
-                    </div>
+            <div class="card p-3">
+                <div class="section-header">Quick Actions</div>
+                <div class="d-grid gap-2">
+                    <button onclick="openOrderImportModal()" class="btn btn-primary text-start">
+                        <i class="bi bi-cloud-download me-2"></i> Import Recent Orders
+                    </button>
+                    
+                    <div class="text-muted small mt-2 fw-bold text-uppercase" style="font-size: 11px; letter-spacing: 0.5px;">Sync Triggers</div>
+                    
+                    <button onclick="triggerAction('/sync/inventory')" class="btn btn-secondary text-start">
+                        Force Inventory Sync
+                    </button>
+                    <button onclick="triggerAction('/sync/products/master', 'POST')" class="btn btn-secondary text-start">
+                        Force Product Sync
+                    </button>
+                    <button onclick="triggerAction('/sync/images/manual')" class="btn btn-secondary text-start">
+                        Force Image Sync
+                    </button>
+                    <button onclick="triggerAction('/sync/fulfillments')" class="btn btn-secondary text-start">
+                        Push Fulfillment
+                    </button>
+                    <button onclick="triggerAction('/sync/customers/master', 'POST')" class="btn btn-secondary text-start">
+                        Force Customer Sync
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-8">
+            <div class="card p-3 h-100">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <div class="section-header mb-0" style="border:none;">Activity Log</div>
+                    <button onclick="document.querySelector('iframe').contentWindow.location.reload();" class="btn btn-sm btn-secondary">Refresh</button>
+                </div>
+                <div class="log-frame-container">
+                    <iframe src="/live_logs?shop={{ shop_url }}" width="100%" height="100%" frameborder="0"></iframe>
                 </div>
             </div>
         </div>
     </div>
+</div>
 
     <div id="tab-settings" class="tab-content-area">
         <div class="row justify-content-center">
@@ -279,63 +308,86 @@
     </div>
 
     <div id="tab-maintenance" class="tab-content-area">
-        <div class="row justify-content-center">
-            <div class="col-md-8">
-                <div class="card p-4 border-top border-4 border-danger">
-                    <div class="section-header text-danger">⚠️ Maintenance Zone</div>
-                    <p class="text-muted mb-4">Advanced tools to fix data corruption. Use with caution.</p>
+    <div class="row justify-content-center">
+        <div class="col-md-8">
+            <div class="card p-4" style="border-top: 4px solid var(--p-critical);">
+                <div class="d-flex align-items-center mb-3">
+                    <i class="bi bi-exclamation-octagon-fill text-danger fs-4 me-2"></i>
+                    <h5 class="mb-0 fw-bold">Maintenance Zone</h5>
+                </div>
+                <p class="text-muted mb-4 small">Advanced data tools. Use these only if you notice data corruption or sync issues.</p>
 
-                    <div class="d-grid gap-3">
-                        <button onclick="triggerAction('/maintenance/register_webhooks')" class="btn btn-info text-white text-start p-3">
-                            <strong>🔗 Register Webhooks</strong><br>
-                            <small>Tell Shopify to start sending order events.</small>
-                        </button>
-                        
-                        <button onclick="triggerAction('/maintenance/fix_variants', 'POST')" class="btn btn-secondary text-start p-3" style="border-left: 4px solid #f4c076;">
-                            <strong>🛠 Fix Variant Mess</strong><br>
-                            <small>Scans products. Fixes Pack/Unit logic. Deletes bad variants.</small>
-                        </button>
-
-                        <button onclick="triggerAction('/sync/products/archive_duplicates', 'POST')" class="btn btn-secondary text-start p-3">
-                            <strong>📦 Archive Duplicate SKUs</strong><br>
-                            <small>Archives products with duplicate SKUs in Shopify.</small>
-                        </button>
-
-                        <button onclick="triggerAction('/maintenance/purge_junk')" class="btn btn-secondary text-start p-3" style="border-left: 4px solid #d82c0d;">
-                            <strong>🗑 Purge Junk Products</strong><br>
-                            <small>Deletes Shopify products that do not exist in Odoo.</small>
-                        </button>
-
-                        <button onclick="triggerAction('/maintenance/clear_product_map', 'POST')" class="btn btn-outline-danger text-start p-3 mt-3">
-                        <strong>🧹 Clear Local Product Map</strong><br>
-                        <small>Force the app to re-link Shopify products to Odoo IDs from scratch.</small>
-                        </button>
-
-                        <button onclick="openUnmappedModal()" class="btn btn-warning text-dark text-start p-3 w-100 mb-3">
-                        <div class="d-flex align-items-center">
-                            <i class="bi bi-exclamation-triangle-fill fs-4 me-3"></i>
+                <div class="d-grid gap-3">
+                    <button onclick="triggerAction('/maintenance/register_webhooks')" class="btn btn-secondary text-start p-3">
+                        <div class="d-flex justify-content-between align-items-center">
                             <div>
-                                <strong>⚠️ View Unmapped Products</strong><br>
-                                <small>See the list of products that exist in Shopify but NOT in Odoo.</small>
+                                <strong>🔗 Register Webhooks</strong><br>
+                                <small class="text-muted">Ensure Shopify sends order & product events.</small>
+                            </div>
+                            <i class="bi bi-chevron-right text-muted"></i>
+                        </div>
+                    </button>
+                    
+                    <button onclick="triggerAction('/maintenance/fix_variants', 'POST')" class="btn btn-secondary text-start p-3">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <strong>🛠 Fix Variant Mess</strong><br>
+                                <small class="text-muted">Scans products. Fixes Pack/Unit logic.</small>
+                            </div>
+                            <i class="bi bi-chevron-right text-muted"></i>
+                        </div>
+                    </button>
+
+                    <button onclick="triggerAction('/sync/products/archive_duplicates', 'POST')" class="btn btn-secondary text-start p-3">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <strong>📦 Archive Duplicate SKUs</strong><br>
+                                <small class="text-muted">Archives older products with duplicate SKUs.</small>
+                            </div>
+                            <i class="bi bi-chevron-right text-muted"></i>
+                        </div>
+                    </button>
+
+                    <button onclick="triggerAction('/maintenance/purge_junk')" class="btn btn-danger-subtle text-start p-3">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <strong>🗑 Purge Junk Products</strong><br>
+                                <small>Deletes ACTIVE Shopify products not found in Odoo.</small>
+                            </div>
+                            <i class="bi bi-trash"></i>
+                        </div>
+                    </button>
+
+                    <button onclick="triggerAction('/maintenance/clear_product_map', 'POST')" class="btn btn-secondary text-danger text-start p-3">
+                        <strong>🧹 Clear Local Product Map</strong><br>
+                        <small class="text-muted">Force app to re-link products from scratch.</small>
+                    </button>
+
+                    <button onclick="openUnmappedModal()" class="btn btn-warning text-dark text-start p-3 bg-opacity-10 border-warning">
+                        <div class="d-flex align-items-center">
+                            <i class="bi bi-exclamation-triangle-fill text-warning me-3 fs-5"></i>
+                            <div>
+                                <strong>View Unmapped Products</strong><br>
+                                <small>See active products missing from Odoo.</small>
                             </div>
                         </div>
-                        </button>
-                        
-                        
-                        <div class="row">
-                             <div class="col-6">
-                                <button onclick="triggerAction('/sync/products/master', 'POST')" class="btn btn-warning w-100 h-100 text-dark">
-                                    Full Odoo Master Sync
-                                </button>
-                             </div>
-                             <div class="col-6">
-                                <button onclick="triggerAction('/test/simulate_order', 'POST')" class="btn btn-info w-100 h-100 text-white">
-                                    Simulate Order Test
-                                </button>
-                             </div>
-                        </div>
-                        
-                        <button onclick="triggerAction('/sync/categories/run_initial_import')" class="btn btn-outline-secondary">
+                    </button>
+                    
+                    <div class="row g-2">
+                         <div class="col-6">
+                            <button onclick="triggerAction('/sync/products/master', 'POST')" class="btn btn-secondary w-100 py-3">
+                                Full Master Sync
+                            </button>
+                         </div>
+                         <div class="col-6">
+                            <button onclick="triggerAction('/test/simulate_order', 'POST')" class="btn btn-secondary w-100 py-3">
+                                Simulate Order Test
+                            </button>
+                         </div>
+                    </div>
+                    
+                    <div class="text-center mt-2">
+                        <button onclick="triggerAction('/sync/categories/run_initial_import')" class="btn btn-link text-muted text-decoration-none small">
                             Run Initial Category Sync
                         </button>
                     </div>
@@ -343,6 +395,7 @@
             </div>
         </div>
     </div>
+</div>
 
     <div class="modal fade" id="orderImportModal" tabindex="-1">
         <div class="modal-dialog modal-lg">
@@ -378,41 +431,42 @@
 
     <div class="modal fade" id="unmappedModal" tabindex="-1">
     <div class="modal-dialog modal-xl modal-dialog-scrollable">
-        <div class="modal-content">
-            <div class="modal-header bg-warning">
-                <h5 class="modal-title text-dark">Unmapped Products Report</h5>
+        <div class="modal-content border-0 shadow">
+            <div class="modal-header">
+                <h5 class="modal-title fw-bold">Unmapped Products Report</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body bg-light">
-                <div class="alert alert-info">
+                <div class="alert alert-light border shadow-sm mb-4">
                     <strong>How to fix:</strong><br>
-                    1. Copy the SKU.<br>
-                    2. Go to Odoo and ensure a product exists with this <strong>exact</strong> Internal Reference.<br>
-                    3. If the product is missing in Odoo, create it.<br>
-                    4. Once fixed, the next Inventory Sync will automatically link them.
+                    1. Copy the SKU below.<br>
+                    2. Ensure Odoo has a product with this <strong>exact</strong> Internal Reference.<br>
+                    3. If missing in Odoo, create it.<br>
+                    4. The next Inventory Sync will link them automatically.
                 </div>
                 <div id="unmappedLoading" class="text-center p-5">
-                    <div class="spinner-border text-warning" role="status"></div>
-                    <p class="mt-2">Scanning Shopify Inventory... (This may take a moment)</p>
+                    <div class="spinner-border text-secondary" role="status"></div>
+                    <p class="mt-2 text-muted">Scanning Active Inventory...</p>
                 </div>
-                <div class="table-responsive bg-white rounded shadow-sm" id="unmappedTableContainer" style="display:none;">
-                    <table class="table table-hover align-middle">
-                        <thead class="table-light">
-                            <tr>
-                                <th>Image</th>
-                                <th>Product Title</th>
-                                <th>Variant</th>
-                                <th>Shopify SKU</th>
-                                <th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody id="unmappedTableBody">
-                            </tbody>
-                    </table>
+                <div class="card border-0 shadow-sm" id="unmappedTableContainer" style="display:none;">
+                    <div class="table-responsive">
+                        <table class="table table-hover align-middle mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th class="ps-3">Image</th>
+                                    <th>Product Title</th>
+                                    <th>Variant</th>
+                                    <th>Shopify SKU</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="unmappedTableBody"></tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
-            <div class="modal-footer">
-                <span class="me-auto text-muted" id="unmappedCount"></span>
+            <div class="modal-footer bg-white">
+                <span class="me-auto text-muted fw-bold" id="unmappedCount"></span>
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
             </div>
         </div>
