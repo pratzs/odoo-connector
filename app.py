@@ -15,7 +15,7 @@ from rq import Queue
 from flask import Flask, request, jsonify, render_template, session, url_for, render_template_string, redirect
 from models import db, ProductMap, SyncLog, AppSetting, CustomerMap, ProcessedOrder, Shop
 from odoo_client import OdooClient
-from security_utils import require_shopify_session # <--- NEW SECURITY TOOL
+from security_utils import require_shopify_session 
 import requests
 from datetime import datetime, timedelta
 import random
@@ -1294,7 +1294,7 @@ def perform_inventory_sync(shop_url):
         # 1. FETCH SHOPIFY VARIANTS
         shopify_variants = {} 
         try:
-            page = shopify.Product.find(limit=250)
+            page = shopify.Product.find(limit=250, status='active')
             while page:
                 for p in page:
                     for v in p.variants:
