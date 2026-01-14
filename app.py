@@ -2302,7 +2302,7 @@ def test_odoo_health():
         
         # set_config handles looking up the row, creating it if missing, 
         # and converting the list to JSON automatically.
-        set_config('available_locations', new_loc_list)
+        set_config('available_locations', new_loc_list, shop_url=shop_url)
         
         # If you prefer manual SQLalchemy for some reason:
         # setting = AppSetting.query.filter_by(shop_url=shop_url, key='available_locations').first()
@@ -2324,47 +2324,51 @@ def test_odoo_health():
         add_log(f"❌ CRITICAL FAILURE: {str(e)}")
         return "".join(log)
 
-# In app.py
-
 @app.route('/api/diagnostics/unmapped_products', methods=['GET'])
 def api_get_unmapped_products():
     shop_url = request.args.get('shop')
+    
+    # 1. Verify Session
     if not verify_shopify_session(shop_url): 
         return jsonify({'error': 'Unauthorized'}), 401
 
     try:
-        # 1. Fetch all mapped SKUs from your Database
-        # We assume odoo_product_id > 0 means it is successfully mapped
-        mapped_records = ProductMap.query.filter(ProductMap.shop_url == shop_url, ProductMap.odoo_product_id > 0).all()
-        mapped_skus = {m.sku for m in mapped_records}
+        with app.app_context():
+            # 2. Get all SKUs that we KNOW are mapped (odoo_product_id > 0)
+            mapped_records = ProductMap.query.filter(ProductMap.shop_url == shop_url, ProductMap.odoo_product_id > 0).all()
+            mapped_skus = {m.sku for m in mapped_records}
 
-        # 2. Fetch all Shopify Products (Live)
-        unmapped_items = []
-        page = shopify.Product.find(limit=250, fields="id,title,variants,images")
-        
-        while page:
-            for p in page:
-                image_url = p.images[0].src if p.images else ""
-                for v in p.variants:
-                    # If SKU exists but is NOT in our mapped list
-                    if v.sku and v.sku not in mapped_skus:
-                        unmapped_items.append({
-                            'shopify_id': p.id,
-                            'title': p.title,
-                            'variant_title': v.title,
-                            'sku': v.sku,
-                            'image': image_url
-                        })
+            # 3. Connect to Shopify
+            if not setup_shopify_session(shop_url):
+                 return jsonify({'error': 'Shopify Connection Failed'}), 500
+
+            # 4. Fetch all live Shopify Products
+            unmapped_items = []
+            page = shopify.Product.find(limit=250, fields="id,title,variants,images")
             
-            if page.has_next_page():
-                page = page.next_page()
-            else:
-                break
+            while page:
+                for p in page:
+                    image_url = p.images[0].src if p.images else ""
+                    for v in p.variants:
+                        # Logic: SKU exists AND it is NOT in our mapped list
+                        if v.sku and v.sku not in mapped_skus:
+                            unmapped_items.append({
+                                'shopify_id': p.id,
+                                'title': p.title,
+                                'variant_title': v.title,
+                                'sku': v.sku,
+                                'image': image_url
+                            })
+                
+                if page.has_next_page():
+                    page = page.next_page()
+                else:
+                    break
 
-        return jsonify({
-            'count': len(unmapped_items), 
-            'items': unmapped_items
-        })
+            return jsonify({
+                'count': len(unmapped_items), 
+                'items': unmapped_items
+            })
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
