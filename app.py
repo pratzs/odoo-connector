@@ -1633,9 +1633,10 @@ def save_public_settings():
         db.session.commit()
         return f"✅ Settings Saved! <script>window.location.href='/?shop={shop_url}';</script>"
     return "Error: Shop not found."
+    
 
     @app.route('/webhooks/shopify', methods=['POST'])
-    def shopify_webhook():
+def shopify_webhook():
     """
     Receives automated notifications from Shopify.
     """
