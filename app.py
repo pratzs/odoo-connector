@@ -1979,7 +1979,7 @@ def trigger_master_sync():
 def trigger_customer_master_sync():
     shop_url = request.args.get('shop')
     # CHANGED: Use RQ
-    job = q.enqueue(sync_customers_master, shop_url, job_timeout=1200)
+    job = q.enqueue(sync_customers_master, shop_url, job_timeout=3600)
     return jsonify({"message": f"Customer Sync Queued (ID: {job.get_id()})"})
 
 @app.route('/sync/products/archive_duplicates', methods=['POST'])
