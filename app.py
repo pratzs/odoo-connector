@@ -1634,6 +1634,30 @@ def save_public_settings():
         return f"✅ Settings Saved! <script>window.location.href='/?shop={shop_url}';</script>"
     return "Error: Shop not found."
 
+    @app.route('/webhooks/shopify', methods=['POST'])
+    def shopify_webhook():
+    """
+    Receives automated notifications from Shopify.
+    """
+    topic = request.headers.get('X-Shopify-Topic')
+    shop_url = request.headers.get('X-Shopify-Shop-Domain')
+    data = request.get_json()
+
+    if not shop_url or not data:
+        return "Missing data", 400
+
+    # 1. Handle Orders
+    if topic in ['orders/create', 'orders/updated', 'orders/paid']:
+        # Enqueue the background sync to prevent webhook timeout
+        q.enqueue(background_order_sync, shop_url, data)
+        return "Order Received", 200
+
+    # 2. Handle Products
+    elif topic in ['products/update', 'products/create']:
+        q.enqueue(background_product_sync, shop_url, data)
+        return "Product Received", 200
+
+    return "Topic ignored", 200
 
 @app.route('/', methods=['GET'])
 @app.route('/settings', methods=['GET'])
