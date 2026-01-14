@@ -1338,7 +1338,12 @@ def perform_inventory_sync(shop_url):
                         
                         # SAVE MAPPING
                         if not ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first():
-                            db.session.add(ProductMap(shop_url=shop_url, sku=sku, odoo_product_id=r['id']))
+                            db.session.add(ProductMap(
+                                shop_url=shop_url, 
+                                sku=sku, 
+                                odoo_product_id=r['id'],
+                                shopify_variant_id='0' 
+                            ))
 
                 db.session.commit()
 
