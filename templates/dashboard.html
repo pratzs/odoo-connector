@@ -425,6 +425,16 @@
                             </div>
                         </div>
                     </button>
+
+                    <button onclick="if(confirm('This will stop all pending syncs. Continue?')) triggerAction('/maintenance/clear_queue', 'POST')" class="btn btn-outline-danger text-start p-3">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <strong>🧹 Clear Background Queue</strong><br>
+                            <small class="text-muted">Force stop all pending background tasks if the app is stuck.</small>
+                        </div>
+                        <i class="bi bi-trash-fill"></i>
+                    </div>
+                    </button>
                     
                     <div class="row g-2">
                          <div class="col-6">
