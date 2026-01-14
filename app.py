@@ -2378,7 +2378,7 @@ def cleanup_old_logs():
 def run_schedule():
     """
     Robust Scheduler: Uses Redis keys to track job timing.
-    Includes Log Flusher to aggregate high-volume webhook logs.
+    Includes Log Flusher (10m Interval) to aggregate webhook logs.
     """
     print("🕒 Scheduler Started")
     
@@ -2390,19 +2390,24 @@ def run_schedule():
             for shop in active_shops:
                 shop_url = shop.shop_url
                 
-                # --- NEW: LOG FLUSHER (Runs every loop / 60s) ---
-                # This grabs the counter we incremented in background_product_sync
-                try:
-                    count_key = f"log_buffer_products_{shop_url}"
-                    pending_count = conn.get(count_key)
-                    
-                    if pending_count and int(pending_count) > 0:
-                        # Log the summary line
-                        log_event('Product', 'Success', f"Webhook Batch: Updated {int(pending_count)} products in the last minute.", shop_url=shop_url)
-                        # Reset counter to 0 (delete the key)
-                        conn.delete(count_key)
-                except Exception as e:
-                    print(f"Log Flush Error: {e}")
+                # --- LOG FLUSHER (Runs every 10 mins = 600s) ---
+                # This ensures we don't slow down the main loop, but only flush logs occasionally
+                if not conn.get(f"last_log_flush_{shop_url}"):
+                    try:
+                        count_key = f"log_buffer_products_{shop_url}"
+                        pending_count = conn.get(count_key)
+                        
+                        if pending_count and int(pending_count) > 0:
+                            # Log the summary line
+                            log_event('Product', 'Success', f"Webhook Batch: Updated {int(pending_count)} products in the last 10 minutes.", shop_url=shop_url)
+                            # Reset counter to 0 (delete the key)
+                            conn.delete(count_key)
+                        
+                        # Set the timer for 10 minutes
+                        conn.setex(f"last_log_flush_{shop_url}", 600, "done")
+                        
+                    except Exception as e:
+                        print(f"Log Flush Error: {e}")
                 # ------------------------------------------------
 
                 # --- A. HIGH FREQUENCY TASKS ---
@@ -2445,7 +2450,7 @@ def run_schedule():
                 cleanup_old_logs()
                 conn.setex("last_log_cleanup", 86400, "done") 
 
-        # Sleep to prevent high CPU usage (runs loop approx every 60s)
+        # Keep the main heartbeat at 60s so high-freq tasks (like cancellations) aren't delayed
         time.sleep(60)
 
 def sync_images_only_manual(shop_url):
