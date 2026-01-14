@@ -4,17 +4,33 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Live Logs</title>
-    <!-- Tailwind CSS for styling -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- React and ReactDOM -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-    <!-- Babel for JSX -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+
     <style>
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        
+        /* Polaris Empty State Styling */
+        .empty-state-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            padding: 40px;
+            text-align: center;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        .empty-state-icon {
+            font-size: 64px;
+            color: #babfc3;
+            margin-bottom: 16px;
+        }
     </style>
 </head>
 <body class="bg-white h-screen w-full overflow-hidden">
@@ -71,38 +87,25 @@
         const App = () => {
             const [logs, setLogs] = useState([]);
             const [loading, setLoading] = useState(true);
-            const [error, setError] = useState(null);
             const scrollContainerRef = useRef(null);
 
-            // Fetch Logs from Python API
             const fetchLogs = async () => {
                 try {
-                    // 1. Get shop param from URL (passed by dashboard iframe)
                     const urlParams = new URLSearchParams(window.location.search);
                     const shop = urlParams.get('shop');
-
-                    // 2. Pass shop to backend so it knows whose logs to fetch
                     const response = await fetch(`/api/logs/live?shop=${shop}&t=` + Date.now());
                     if (!response.ok) throw new Error("API Error");
                     const data = await response.json();
-                    
                     setLogs(data); 
-                    setError(null);
                 } catch (err) {
                     console.error("Fetch Error:", err);
-                    // Don't show error on every poll to avoid flicker, just stop updating
                 } finally {
                     setLoading(false);
                 }
             };
 
-            // Initial Load
             useEffect(() => {
                 fetchLogs();
-            }, []);
-
-            // Polling Loop (Every 2 seconds)
-            useEffect(() => {
                 const interval = setInterval(fetchLogs, 2000);
                 return () => clearInterval(interval);
             }, []);
@@ -120,16 +123,21 @@
                         </span>
                     </div>
 
-                    {/* Log List */}
+                    {/* Log List Area */}
                     <div ref={scrollContainerRef} className="flex-1 overflow-y-auto">
                          {loading && logs.length === 0 ? (
-                             <div className="p-10 flex flex-col items-center justify-center text-slate-400 gap-2">
-                                <span className="text-xs">Connecting...</span>
+                             <div className="empty-state-container">
+                                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-slate-300"></div>
+                                <span className="text-xs text-slate-400 mt-4">Connecting to Odoo stream...</span>
                              </div>
                          ) : logs.length === 0 ? (
-                             <div className="p-10 text-center text-slate-400 text-sm">
-                                Database is empty. <br/>
-                                <span className="text-xs opacity-75">Click "Test Connection" to generate a log.</span>
+                             /* PROFESSIONAL EMPTY STATE */
+                             <div className="empty-state-container">
+                                <i className="bi bi-terminal empty-state-icon"></i>
+                                <h3 className="text-slate-700 font-semibold mb-1 text-base">No activity recorded yet</h3>
+                                <p className="text-slate-500 text-sm max-w-xs">
+                                    Synchronization logs will appear here in real-time once you start a sync or receive an order.
+                                </p>
                              </div>
                          ) : (
                              logs.map(log => <LogItem key={log.id} log={log} />)
