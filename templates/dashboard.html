@@ -753,30 +753,7 @@ function openUnmappedModal() {
         });
 }
 
-// --- SIDEBAR & HASH NAVIGATION ---
-function handleSidebarNavigation() {
-    const hash = window.location.hash || '#overview';
-    
-    // 1. Hide all tab content areas and remove 'active' from buttons
-    document.querySelectorAll('.tab-content-area').forEach(el => el.classList.remove('active'));
-    document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
-
-    // 2. Open the correct section based on the hash
-    if (hash === '#settings') {
-        document.getElementById('tab-settings').classList.add('active');
-        document.getElementById('btn-settings').classList.add('active');
-    } else if (hash === '#maintenance') {
-        document.getElementById('tab-maintenance').classList.add('active');
-        document.getElementById('btn-maintenance').classList.add('active');
-    } else {
-        // Default to Overview
-        document.getElementById('tab-overview').classList.add('active');
-        document.getElementById('btn-overview').classList.add('active');
-    }
-}
-
-
-        function syncLocations() {
+    function syncLocations() {
     if(!confirm("Refresh warehouse locations from Odoo? This will update the list in your settings.")) return;
     
     const btn = document.getElementById('btnSyncLocs');
@@ -804,9 +781,6 @@ function handleSidebarNavigation() {
             btn.disabled = false;
         });
 }
-
-
-function switchTab(id) { window.location.hash = id; }
 
 const selectAll = document.getElementById('selectAllOrders');
 if(selectAll) selectAll.addEventListener('change', function() { document.querySelectorAll('.order-select').forEach(cb => cb.checked = this.checked); });
