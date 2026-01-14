@@ -1918,8 +1918,10 @@ def run_initial_category_import():
 def background_product_sync(shop_url, product_data):
     """
     Runs inside the Worker Process. 
+    UPDATED: Aggregates success logs to Redis instead of spamming the DB.
     """
     with app.app_context():
+        # Connect
         odoo = get_odoo_connection(shop_url)
         if not odoo:
             log_event('Product', 'Error', "Auto Sync Failed: No Odoo Connection.", shop_url=shop_url)
@@ -1927,12 +1929,18 @@ def background_product_sync(shop_url, product_data):
 
         product_title = product_data.get('title', 'Unknown')
         try:
-            # FIX: Pass shop_url explicitly
+            # Sync Logic
             process_product_data(product_data, odoo, shop_url=shop_url)
             
-            log_event('Product', 'Success', f"Webhook Sync: '{product_title}' updated.", shop_url=shop_url)
+            # --- NEW: AGGREGATION LOGIC ---
+            # Instead of logging immediately, increment a counter in Redis
+            # Key format: log_buffer_products_{shop_url}
+            redis_key = f"log_buffer_products_{shop_url}"
+            conn.incr(redis_key)
+            # ------------------------------
             
         except Exception as e:
+            # We still log errors immediately because they are important
             log_event('Product', 'Error', f"Webhook Failed for '{product_title}': {str(e)}", shop_url=shop_url)
 
 
@@ -2370,6 +2378,7 @@ def cleanup_old_logs():
 def run_schedule():
     """
     Robust Scheduler: Uses Redis keys to track job timing.
+    Includes Log Flusher to aggregate high-volume webhook logs.
     """
     print("🕒 Scheduler Started")
     
@@ -2381,12 +2390,27 @@ def run_schedule():
             for shop in active_shops:
                 shop_url = shop.shop_url
                 
+                # --- NEW: LOG FLUSHER (Runs every loop / 60s) ---
+                # This grabs the counter we incremented in background_product_sync
+                try:
+                    count_key = f"log_buffer_products_{shop_url}"
+                    pending_count = conn.get(count_key)
+                    
+                    if pending_count and int(pending_count) > 0:
+                        # Log the summary line
+                        log_event('Product', 'Success', f"Webhook Batch: Updated {int(pending_count)} products in the last minute.", shop_url=shop_url)
+                        # Reset counter to 0 (delete the key)
+                        conn.delete(count_key)
+                except Exception as e:
+                    print(f"Log Flush Error: {e}")
+                # ------------------------------------------------
+
                 # --- A. HIGH FREQUENCY TASKS ---
                 
-                # 1. Inventory Sync (Every 30 mins = 1800s) <--- CHANGED FROM 600
+                # 1. Inventory Sync (Every 30 mins = 1800s)
                 if not conn.get(f"last_inv_{shop_url}"):
                     q.enqueue(scheduled_inventory_sync, shop_url, job_timeout=3600)
-                    conn.setex(f"last_inv_{shop_url}", 1800, "done") # 1800 seconds = 30 mins
+                    conn.setex(f"last_inv_{shop_url}", 1800, "done") 
                     print(f"⏰ Triggered Inventory Sync for {shop_url}")
 
                 # 2. Fulfillment Sync (Every 60 mins = 3600s)
@@ -2421,7 +2445,7 @@ def run_schedule():
                 cleanup_old_logs()
                 conn.setex("last_log_cleanup", 86400, "done") 
 
-        # Sleep to prevent high CPU usage
+        # Sleep to prevent high CPU usage (runs loop approx every 60s)
         time.sleep(60)
 
 def sync_images_only_manual(shop_url):
