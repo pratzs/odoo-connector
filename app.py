@@ -1635,7 +1635,10 @@ def save_public_settings():
     return "Error: Shop not found."
     
 
-    @app.route('/webhooks/shopify', methods=['POST'])
+# -----------------------------------------------------------------
+# SHOPIFY WEBHOOK RECEIVER
+# -----------------------------------------------------------------
+@app.route('/webhooks/shopify', methods=['POST'])
 def shopify_webhook():
     """
     Receives automated notifications from Shopify.
@@ -1660,6 +1663,7 @@ def shopify_webhook():
 
     return "Topic ignored", 200
 
+# Ensure the next route also starts at the far left
 @app.route('/', methods=['GET'])
 @app.route('/settings', methods=['GET'])
 @app.route('/maintenance', methods=['GET'])
