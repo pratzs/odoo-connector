@@ -31,7 +31,7 @@
         .card { border: none; border-radius: var(--p-radius); box-shadow: var(--p-shadow); background: white; margin-bottom: 20px; }
         .section-header { font-weight: 600; font-size: 15px; border-bottom: 1px solid var(--p-border); padding-bottom: 12px; margin-bottom: 15px; color: var(--p-on-surface); }
 
-        /* TABS (Underlined Style) */
+        /* TABS */
         .custom-tabs { display: flex; background: transparent; border-bottom: 1px solid var(--p-border); padding: 0; margin-bottom: 20px; box-shadow: none; gap: 20px; }
         .tab-btn { padding: 10px 0; cursor: pointer; font-weight: 500; color: var(--p-subdued); border-bottom: 3px solid transparent; margin-bottom: -1px; transition: all 0.2s; }
         .tab-btn:hover { color: var(--p-primary); }
@@ -40,17 +40,41 @@
         .tab-content-area.active { display: block; animation: fadeIn 0.2s; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
 
-        /* BUTTONS (Clean & Flat) */
-        .btn { border-radius: 4px; font-weight: 500; font-size: 13px; padding: 8px 16px; border: 1px solid var(--p-border); box-shadow: 0 1px 0 rgba(0,0,0,0.05); transition: 0.2s; }
-        .btn-primary { background-color: #202223; color: white; border-color: #202223; } /* Primary actions are Black */
-        .btn-primary:hover { background-color: #444; border-color: #444; }
-        .btn-secondary { background-color: white; color: var(--p-on-surface); }
-        .btn-secondary:hover { background-color: #f6f6f7; border-color: #c9cccf; }
-        .btn-success { background-color: var(--p-primary); border-color: var(--p-primary); color: white; } /* "Save" is Green */
-        .btn-danger-subtle { background: #fff4f4; color: var(--p-critical); border-color: #fca5a5; }
-        .btn-danger-subtle:hover { background: #ffeaea; }
+        /* --- BUTTONS (Fixed Hover States) --- */
+        .btn { border-radius: 4px; font-weight: 500; font-size: 13px; padding: 10px 16px; border: 1px solid var(--p-border); box-shadow: 0 1px 0 rgba(0,0,0,0.05); transition: 0.15s ease-in-out; }
         
-        /* Badges */
+        /* Primary (Save/Import) - Dark */
+        .btn-primary { background-color: #202223; color: white; border-color: #202223; }
+        .btn-primary:hover { background-color: #444; border-color: #444; }
+
+        /* Secondary (Maintenance/Syncs) - White with Dark Text */
+        .btn-secondary { background-color: white; color: #202223; border-color: #d2d5d8; }
+        .btn-secondary:hover, .btn-secondary:focus, .btn-secondary:active { 
+            background-color: #f6f6f7 !important; /* Light Gray BG */
+            color: #202223 !important; /* FORCE Black Text */
+            border-color: #b8b8b8 !important;
+        }
+
+        /* Destructive (Red Text) */
+        .btn-danger-subtle { background: #fff4f4; color: #d82c0d; border-color: #fca5a5; }
+        .btn-danger-subtle:hover { 
+            background: #ffeaea !important; 
+            color: #d82c0d !important; /* Force Red Text */
+        }
+
+        /* Danger Outline (Clear Map) */
+        .btn-outline-danger { color: #d82c0d; border-color: #e1e3e5; background: white; }
+        .btn-outline-danger:hover {
+            background-color: #fff4f4 !important;
+            color: #d82c0d !important;
+            border-color: #d82c0d !important;
+        }
+
+        /* Warning (Yellow - Unmapped) */
+        .btn-warning-subtle { background: #fffbf4; color: #202223; border: 1px solid #e1b878; }
+        .btn-warning-subtle:hover { background: #fff5ea !important; color: #202223 !important; }
+
+        /* Badges & Misc */
         .badge-status { padding: 4px 8px; border-radius: 4px; font-weight: 500; font-size: 12px; }
         .badge-success { background: #e3f1df; color: #008060; border: 1px solid #cce5cc; }
         .badge-danger { background: #ffeaea; color: #d82c0d; border: 1px solid #fca5a5; }
@@ -363,15 +387,15 @@
                         <small class="text-muted">Force app to re-link products from scratch.</small>
                     </button>
 
-                    <button onclick="openUnmappedModal()" class="btn btn-warning text-dark text-start p-3 bg-opacity-10 border-warning">
-                        <div class="d-flex align-items-center">
-                            <i class="bi bi-exclamation-triangle-fill text-warning me-3 fs-5"></i>
-                            <div>
-                                <strong>View Unmapped Products</strong><br>
-                                <small>See active products missing from Odoo.</small>
-                            </div>
+                    <button onclick="openUnmappedModal()" class="btn btn-warning-subtle text-start p-3 w-100 mb-3">
+                    <div class="d-flex align-items-center">
+                        <i class="bi bi-exclamation-triangle-fill text-warning me-3 fs-5"></i>
+                        <div>
+                            <strong>View Unmapped Products</strong><br>
+                            <small class="text-muted">See active products missing from Odoo.</small>
                         </div>
-                    </button>
+                    </div>
+                </button>
                     
                     <div class="row g-2">
                          <div class="col-6">
