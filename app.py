@@ -1661,6 +1661,7 @@ def save_public_settings():
 def shopify_webhook():
     """
     Receives automated notifications from Shopify.
+    UPDATED: Ignores 'products/update' to prevent Infinite Loops.
     """
     topic = request.headers.get('X-Shopify-Topic')
     shop_url = request.headers.get('X-Shopify-Shop-Domain')
@@ -1669,14 +1670,14 @@ def shopify_webhook():
     if not shop_url or not data:
         return "Missing data", 400
 
-    # 1. Handle Orders
+    # 1. Handle Orders (Keep this!)
     if topic in ['orders/create', 'orders/updated', 'orders/paid']:
-        # Enqueue the background sync to prevent webhook timeout
         q.enqueue(background_order_sync, shop_url, data)
         return "Order Received", 200
 
-    # 2. Handle Products
-    elif topic in ['products/update', 'products/create']:
+    # 2. Handle Products (ONLY New Creations)
+    # REMOVED 'products/update' to stop the infinite loop.
+    elif topic in ['products/create']: 
         q.enqueue(background_product_sync, shop_url, data)
         return "Product Received", 200
 
