@@ -6,14 +6,15 @@
     
     <title>Odoo Connector Dashboard</title>
     
-    <script src="https://cdn.shopify.com/static/frontend/app-bridge-next/latest/app-bridge.js"></script>
-    
-    <script type="text/json" data-app-bridge-config>
+    <script type="shopify/config">
       {
         "apiKey": "{{ api_key }}",
-        "shopOrigin": "{{ shop_origin }}"
+        "shopOrigin": "{{ shop_origin }}",
+        "forceRedirect": true
       }
     </script>
+
+    <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
 
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     
@@ -93,8 +94,8 @@
 <body>
     <ui-nav-menu>
         <a href="/" rel="home">Overview</a>
-        <a href="/#settings">Settings</a>
-        <a href="/#maintenance">Maintenance</a>
+        <a href="/settings">Settings</a>
+        <a href="/maintenance">Maintenance</a>
     </ui-nav-menu>
     <div id="tab-overview" class="tab-content-area active">
     <div class="row">
@@ -507,34 +508,32 @@
 }
 
 function handleNavigation() {
-        // Get hash, removing the leading slash if present (e.g., "/#settings" -> "#settings")
-        let hash = window.location.hash;
-        if (hash.startsWith('/')) hash = hash.substring(1);
+        // 1. Get the path from the window location
+        const path = window.location.pathname; // e.g. "/settings" or "/"
         
-        // Default to #overview if empty
-        if (!hash) hash = '#overview';
-        
-        // Hide all content
+        // 2. Hide all content areas
         document.querySelectorAll('.tab-content-area').forEach(el => {
             el.classList.remove('active');
             el.style.display = 'none';
         });
 
-        // Show target
+        // 3. Simple Router Logic
         let targetId = 'tab-overview';
-        if (hash === '#settings') targetId = 'tab-settings';
-        if (hash === '#maintenance') targetId = 'tab-maintenance';
+        if (path.includes('settings')) targetId = 'tab-settings';
+        if (path.includes('maintenance')) targetId = 'tab-maintenance';
 
+        // 4. Show target
         const targetEl = document.getElementById(targetId);
         if (targetEl) {
             targetEl.classList.add('active');
             targetEl.style.display = 'block';
         }
     }
-        
-// Listen for Sidebar clicks and initial load
-window.addEventListener('hashchange', handleNavigation);
-window.addEventListener('load', handleNavigation);
+
+    // Listen for history changes (Back button, etc)
+    window.addEventListener('popstate', handleNavigation);
+    // Listen for initial load
+    window.addEventListener('load', handleNavigation);
 
         // --- Global Config ---
 // --- Global Config with JSON Parsing ---
