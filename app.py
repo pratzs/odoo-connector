@@ -1831,6 +1831,20 @@ def maintenance_wipe_logs():
             db.session.rollback()
             return jsonify({"error": str(e)})
 
+@app.route('/maintenance/clear_queue', methods=['POST'])
+def clear_background_queue():
+    """
+    Emergency tool to wipe all pending tasks from the Redis queue.
+    """
+    shop_url = request.args.get('shop')
+    try:
+        # This empties the 'default' queue used by your worker
+        q.empty()
+        log_event('System', 'Warning', "Background Task Queue was manually cleared.", shop_url=shop_url)
+        return jsonify({"message": "Background queue cleared successfully."}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to clear queue: {str(e)}"}), 500
+
 @app.route('/sync/inventory', methods=['GET'])
 @require_shopify_session        
 def sync_inventory_endpoint():
