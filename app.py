@@ -1352,7 +1352,12 @@ def perform_inventory_sync(shop_url):
                 for sku in missing_skus:
                     if sku not in found_skus:
                         if not ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first():
-                            db.session.add(ProductMap(shop_url=shop_url, sku=sku, odoo_product_id=-1))
+                            db.session.add(ProductMap(
+                                shop_url=shop_url, 
+                                sku=sku, 
+                                odoo_product_id=-1,
+                                shopify_variant_id='0'
+                            ))
                 
                 db.session.commit()
 
