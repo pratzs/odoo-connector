@@ -150,25 +150,44 @@ def get_config(key, default=None, shop_url=None):
         except: return setting.value
     except: return default
 
-def set_config(key, value):
-    shop_url = request.args.get('shop')
-    if not shop_url: return False
+def set_config(key, value, shop_url=None):
+    """
+    Updates a setting in the database.
+    UPDATED: Accepts 'shop_url' argument for background workers.
+    """
+    # 1. If shop_url isn't passed (frontend call), try getting it from the request
+    if not shop_url:
+        try:
+            shop_url = request.args.get('shop')
+        except:
+            pass # We are in a background worker with no request context
+
+    if not shop_url: 
+        print(f"Error: set_config failed for '{key}' - No Shop URL provided.")
+        return False
 
     try:
+        # 2. Find existing setting or create new one
         setting = AppSetting.query.filter_by(shop_url=shop_url, key=key).first()
         if not setting:
             setting = AppSetting(shop_url=shop_url, key=key)
             db.session.add(setting)
         
+        # 3. Handle Data Types (Keep your existing logic)
         # Only dump to JSON if it's a list (like inventory_locations)
         # Otherwise, save simple strings/booleans as strings
         if isinstance(value, (list, dict)):
             setting.value = json.dumps(value)
         else:
-            setting.value = str(value).lower() if isinstance(value, bool) else str(value)
+            # Handle booleans explicitly to avoid "True"/"False" string issues if needed
+            if isinstance(value, bool):
+                setting.value = str(value).lower() 
+            else:
+                setting.value = str(value)
             
         db.session.commit()
         return True
+
     except Exception as e:
         print(f"Config Save Error ({key}): {e}")
         db.session.rollback()
