@@ -1633,6 +1633,8 @@ def save_public_settings():
 
 
 @app.route('/', methods=['GET'])
+@app.route('/settings', methods=['GET'])
+@app.route('/maintenance', methods=['GET'])
 def home():
     """
     Hybrid Dashboard: Handles Auth, Connect Form, and Main Tabbed Dashboard.
