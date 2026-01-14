@@ -1431,6 +1431,9 @@ def perform_inventory_sync(shop_url):
         if discrepancy_list and alert_email:
             send_inventory_alert(shop_url, alert_email, discrepancy_list)
 
+        current_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        set_config('last_inventory_sync_success', current_time, shop_url=shop_url)
+
         # Final Summary Log
         log_event('Inventory', 'Success', f"Sync Complete. Checked {total_shopify} active items. Updated {updates} products.", shop_url=shop_url)
 
@@ -2125,6 +2128,10 @@ def background_order_sync(shop_url, order_data):
             if success:
                  if "Synced" in msg:
                      log_event('Order', 'Success', f"Auto Sync: {msg}", shop_url=shop_url)
+                     
+                     current_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                     set_config('last_order_sync_success', current_time, shop_url=shop_url)
+                     
                  elif "Skipped" in msg:
                      pass 
             else:
