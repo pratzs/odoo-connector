@@ -939,15 +939,14 @@ def sync_products_master(shop_url):
 def sync_customers_master(shop_url):
     """
     Odoo -> Shopify Customer Sync (Master).
-    UPDATED: Now INCREMENTAL. Remembers the last run time to speed up future syncs.
+    UPDATED: Handles Franchise (Parent/Child) vs Independent Sites for POS.
     """
     with app.app_context():
-        # --- NEW CONNECTION LOGIC ---
+        # --- CONNECTION LOGIC ---
         odoo = get_odoo_connection(shop_url) 
         if not odoo or not setup_shopify_session(shop_url): 
             log_event('System', 'Error', "Customer Sync Failed: Connection Error", shop_url=shop_url)
             return
-        # ----------------------------
 
         # 1. Configuration
         direction = get_config('cust_direction', 'bidirectional', shop_url=shop_url)
@@ -968,13 +967,11 @@ def sync_customers_master(shop_url):
         sync_salesrep = get_config('cust_sync_salesrep', True, shop_url=shop_url)
 
         # 2. SMART TIMESTAMP LOGIC
-        # Try to get the last successful run time from DB
         last_run = get_config('last_customer_sync_time', '2000-01-01 00:00:00', shop_url=shop_url)
-        
-        # Capture current time BEFORE the sync starts (to ensure we don't miss changes happening right now)
         current_run_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
 
         try:
+            # Ensure your Odoo helper fetches 'parent_id' and 'is_company'
             odoo_customers = odoo.get_changed_customers(last_run, company_id)
         except Exception as e:
             log_event('Customer Sync', 'Error', f"Odoo Fetch Failed: {e}", shop_url=shop_url)
@@ -986,8 +983,13 @@ def sync_customers_master(shop_url):
         synced_count = 0
         
         for p in odoo_customers:
-            email = p.get('email')
-            if not email or "@" not in email: continue 
+            # --- EMAIL HANDLING (POS REQUIREMENT) ---
+            # If email exists, use it. If not, generate dummy so POS still gets the record.
+            raw_email = p.get('email')
+            if raw_email and "@" in raw_email:
+                email = raw_email
+            else:
+                email = f"no-email-{p['id']}@pos.local"
 
             # Get Odoo Tags Names
             odoo_tags = odoo.get_tag_names(p.get('category_id', []))
@@ -997,8 +999,32 @@ def sync_customers_master(shop_url):
                 if blacklist and any(t in odoo_tags for t in blacklist): continue
                 if whitelist and not any(t in odoo_tags for t in whitelist): continue
 
+            # --- 4. SITE vs GROUP LOGIC (NEW) ---
+            parent_info = p.get('parent_id') # Returns Tuple (id, "Name") or False
+            
+            if parent_info:
+                # === CASE A: CALTEX (Group Site) ===
+                # Parent Name (CSB Group) becomes the "Company" on receipt
+                parent_name = parent_info[1]
+                
+                shopify_first_name = p.get('name') # "Caltex Greenlane"
+                shopify_last_name = "(Site)"       # Suffix to help search
+                shopify_company = parent_name      # "CSB Group"
+                
+                staff_note = f"Group: {parent_name} | Odoo ID: {p['id']}"
+                context_tags = ["Franchise", "Site"]
+            else:
+                # === CASE B: MOBIL (Independent) ===
+                # No Parent. They are the company.
+                shopify_first_name = p.get('name') # "Mobil Kingsland"
+                shopify_last_name = ""
+                shopify_company = p.get('name')    # "Mobil Kingsland"
+                
+                staff_note = f"Independent Store | Odoo ID: {p['id']}"
+                context_tags = ["Independent"]
+
             try:
-                # 4. Find or Init Shopify Customer
+                # 5. Find or Init Shopify Customer
                 shopify_cust = shopify.Customer.search(query=f"email:{email}")
                 if shopify_cust:
                     c = shopify_cust[0]
@@ -1006,23 +1032,21 @@ def sync_customers_master(shop_url):
                     c = shopify.Customer()
                     c.email = email
                 
-                # 5. Map Basic Fields
-                raw_name = p.get('name') or '' 
-                
-                name_parts = raw_name.split(' ')
-                c.first_name = name_parts[0] if name_parts else 'Customer'
-                c.last_name = ' '.join(name_parts[1:]) if len(name_parts) > 1 else 'Customer'
+                # 6. Map Fields (Using Logic Above)
+                c.first_name = shopify_first_name
+                c.last_name = shopify_last_name
+                c.note = staff_note
                 
                 c.phone = (p.get('phone') or p.get('mobile') or '').strip()
                 c.verified_email = True
                 
-                # 6. Map Address & Company
+                # 7. Map Address & Company
                 address_data = {
                     'address1': p.get('street') or '',
                     'city': p.get('city') or '',
                     'zip': p.get('zip') or '',
                     'country_code': p.get('country_id')[1] if p.get('country_id') else '', 
-                    'company': p.get('name') if p.get('is_company') else (p.get('parent_id')[1] if p.get('parent_id') else ''),
+                    'company': shopify_company, # <-- DYNAMIC COMPANY NAME
                     'phone': c.phone,
                     'first_name': c.first_name,
                     'last_name': c.last_name,
@@ -1030,20 +1054,22 @@ def sync_customers_master(shop_url):
                 }
                 c.addresses = [shopify.Address(address_data)]
                 
-                # 7. TAG SYNC
+                # 8. TAG SYNC (Merge Odoo Tags + Context Tags)
                 tags_str = getattr(c, 'tags', '')
                 current_shopify_tags = [t.strip() for t in tags_str.split(',')] if tags_str else []
                 
-                final_tag_list = list(set(current_shopify_tags + odoo_tags))
+                # Combine all unique tags
+                final_tag_list = list(set(current_shopify_tags + odoo_tags + context_tags))
                 c.tags = ",".join(final_tag_list)
 
-                # 8. PREPARE METAFIELDS
+                # 9. PREPARE METAFIELDS
                 metafields_to_save = []
 
                 # VAT Logic
                 vat = p.get('vat')
                 if vat and sync_vat: 
-                    c.note = f"VAT Number: {vat}"
+                    # Append VAT to note as well for easy POS visibility
+                    c.note = f"{c.note}\nVAT: {vat}"
                     metafields_to_save.append(shopify.Metafield({
                         'key': 'vat_number', 'value': vat, 'type': 'single_line_text_field', 'namespace': 'custom'
                     }))
@@ -1062,7 +1088,7 @@ def sync_customers_master(shop_url):
 
                 c.save()
                 
-                # 9. Link in DB
+                # 10. Link in DB
                 if not CustomerMap.query.filter_by(shopify_customer_id=str(c.id), shop_url=shop_url).first():
                     new_map = CustomerMap(
                         shop_url=shop_url, 
@@ -1076,16 +1102,14 @@ def sync_customers_master(shop_url):
                 synced_count += 1
 
                 if synced_count % 50 == 0:
-                     log_event('Customer Sync', 'Info', f"Progress: Synced {synced_count}/{total_count} customers...", shop_url=shop_url)
+                      log_event('Customer Sync', 'Info', f"Progress: Synced {synced_count}/{total_count} customers...", shop_url=shop_url)
 
             except Exception as e:
                 log_event('Customer Sync', 'Error', f"Failed {email}: {e}", shop_url=shop_url)
 
         # --- SAVE THE TIMESTAMP ---
-        # Only save if we successfully finished the loop
-        set_config('last_customer_sync_time', current_run_time)
-        # --------------------------
-
+        set_config('last_customer_sync_time', current_run_time, shop_url=shop_url)
+        
         log_event('Customer Sync', 'Success', f"Sync Complete. Processed {synced_count} customers.", shop_url=shop_url)
 
 def archive_shopify_duplicates(shop_url):
