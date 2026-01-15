@@ -365,60 +365,68 @@ def get_shopify_variant_inv_by_sku(sku, shop_url=None):
         print(f"GraphQL Inv Lookup Error for {sku}: {e}")
         return None
 
-
 def process_product_data(data, odoo_client, shop_url=None):
     """
     Handles Shopify Product Webhooks (Update Only).
-    FIXED: Now correctly passes shop_url to get_config so Company ID is found.
+    DISABLED: Odoo is Master. We ignore Shopify updates to prevent loops.
     """
-    odoo = odoo_client
-    product_type = data.get('product_type', '')
-    cat_id = None
-    if product_type:
-        try:
-            cat_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                'product.public.category', 'search', [[['name', '=', product_type]]])
-            if cat_ids:
-                cat_id = cat_ids[0]
-            else:
-                cat_id = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                    'product.public.category', 'create', [{'name': product_type}])
-        except Exception as e:
-            print(f"Category Logic Error: {e}")
+    # We purposefully do nothing here. 
+    # This prevents Shopify changes from overwriting Odoo data.
+    return 0
 
-    variants = data.get('variants', [])
-    processed_count = 0
+# def process_product_data(data, odoo_client, shop_url=None):
+#     """
+#     Handles Shopify Product Webhooks (Update Only).
+#     FIXED: Now correctly passes shop_url to get_config so Company ID is found.
+#     """
+#     odoo = odoo_client
+#     product_type = data.get('product_type', '')
+#     cat_id = None
+#     if product_type:
+#         try:
+#             cat_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+#                 'product.public.category', 'search', [[['name', '=', product_type]]])
+#             if cat_ids:
+#                 cat_id = cat_ids[0]
+#             else:
+#                 cat_id = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+#                     'product.public.category', 'create', [{'name': product_type}])
+#         except Exception as e:
+#             print(f"Category Logic Error: {e}")
+
+#     variants = data.get('variants', [])
+#     processed_count = 0
     
-    # FIX: Passed shop_url=shop_url. Without this, background jobs fail to find the Company ID.
-    company_id = get_config('odoo_company_id', shop_url=shop_url)
+#     # FIX: Passed shop_url=shop_url. Without this, background jobs fail to find the Company ID.
+#     company_id = get_config('odoo_company_id', shop_url=shop_url)
     
-    for v in variants:
-        sku = v.get('sku')
-        if not sku: continue
-        product_id = odoo.search_product_by_sku(sku, company_id)
+#     for v in variants:
+#         sku = v.get('sku')
+#         if not sku: continue
+#         product_id = odoo.search_product_by_sku(sku, company_id)
         
-        if product_id:
-            # --- UPDATE LOGIC (Category Only) ---
-            if cat_id:
-                try:
-                    current_prod = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                        'product.product', 'read', [[product_id]], {'fields': ['public_categ_ids']})
-                    current_cat_ids = current_prod[0].get('public_categ_ids', [])
-                    if cat_id not in current_cat_ids:
-                        odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                            'product.product', 'write', [[product_id], {'public_categ_ids': [(4, cat_id)]}])
-                        log_event('Product', 'Info', f"Webhook: Updated Category for {sku} to '{product_type}'", shop_url=shop_url)
-                        processed_count += 1
-                except Exception as e:
-                    err_msg = str(e)
-                    if "pos.category" in err_msg or "CacheMiss" in err_msg or "KeyError" in err_msg:
-                        pass
-                    else:
-                        print(f"Webhook Update Error: {e}")
-        else:
-            pass # Skip creation from webhook
+#         if product_id:
+#             # --- UPDATE LOGIC (Category Only) ---
+#             if cat_id:
+#                 try:
+#                     current_prod = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+#                         'product.product', 'read', [[product_id]], {'fields': ['public_categ_ids']})
+#                     current_cat_ids = current_prod[0].get('public_categ_ids', [])
+#                     if cat_id not in current_cat_ids:
+#                         odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+#                             'product.product', 'write', [[product_id], {'public_categ_ids': [(4, cat_id)]}])
+#                         log_event('Product', 'Info', f"Webhook: Updated Category for {sku} to '{product_type}'", shop_url=shop_url)
+#                         processed_count += 1
+#                 except Exception as e:
+#                     err_msg = str(e)
+#                     if "pos.category" in err_msg or "CacheMiss" in err_msg or "KeyError" in err_msg:
+#                         pass
+#                     else:
+#                         print(f"Webhook Update Error: {e}")
+#         else:
+#             pass # Skip creation from webhook
 
-    return processed_count
+#     return processed_count
 
 def process_order_data(data, odoo_client, shop_url): 
     """
@@ -1685,7 +1693,7 @@ def save_public_settings():
 def shopify_webhook():
     """
     Receives automated notifications from Shopify.
-    UPDATED: Ignores 'products/update' to prevent Infinite Loops.
+    UPDATED: EXPLICITLY IGNORES 'products/update' to prevent Infinite Loops.
     """
     topic = request.headers.get('X-Shopify-Topic')
     shop_url = request.headers.get('X-Shopify-Shop-Domain')
@@ -1694,14 +1702,17 @@ def shopify_webhook():
     if not shop_url or not data:
         return "Missing data", 400
 
+    # SAFETY CHECK: Explicitly block product updates
+    if topic == 'products/update':
+        return "Ignored (Odoo is Master)", 200
+
     # 1. Handle Orders (Keep this!)
     if topic in ['orders/create', 'orders/updated', 'orders/paid']:
         q.enqueue(background_order_sync, shop_url, data)
         return "Order Received", 200
 
     # 2. Handle Products (ONLY New Creations)
-    # REMOVED 'products/update' to stop the infinite loop.
-    elif topic in ['products/create']: 
+    elif topic == 'products/create': 
         q.enqueue(background_product_sync, shop_url, data)
         return "Product Received", 200
 
@@ -1959,7 +1970,7 @@ def register_webhooks_manual():
         'orders/updated',
         'orders/cancelled',
         'products/create',
-        'products/update',
+        # 'products/update',
         'inventory_levels/update' 
     ]
 
@@ -2024,32 +2035,41 @@ def run_initial_category_import():
 
 
 # --- 1. NEW HELPER: Background Job for Products ---
+# def background_product_sync(shop_url, product_data):
+#     """
+#     Runs inside the Worker Process. 
+#     UPDATED: Aggregates success logs to Redis instead of spamming the DB.
+#     """
+#     with app.app_context():
+#         # Connect
+#         odoo = get_odoo_connection(shop_url)
+#         if not odoo:
+#             log_event('Product', 'Error', "Auto Sync Failed: No Odoo Connection.", shop_url=shop_url)
+#             return
+
+#         product_title = product_data.get('title', 'Unknown')
+#         try:
+#             # Sync Logic
+#             process_product_data(product_data, odoo, shop_url=shop_url)
+            
+#             # --- AGGREGATION LOGIC ---
+#             # Key format: log_buffer_products_{shop_url}
+#             redis_key = f"log_buffer_products_{shop_url}"
+#             conn.incr(redis_key)
+#             # -------------------------
+            
+#         except Exception as e:
+#             # We still log errors immediately because they are important
+#             log_event('Product', 'Error', f"Webhook Failed for '{product_title}': {str(e)}", shop_url=shop_url)
+
 def background_product_sync(shop_url, product_data):
     """
     Runs inside the Worker Process. 
-    UPDATED: Aggregates success logs to Redis instead of spamming the DB.
+    DISABLED: Odoo is Master. We ignore incoming Shopify product data.
     """
-    with app.app_context():
-        # Connect
-        odoo = get_odoo_connection(shop_url)
-        if not odoo:
-            log_event('Product', 'Error', "Auto Sync Failed: No Odoo Connection.", shop_url=shop_url)
-            return
-
-        product_title = product_data.get('title', 'Unknown')
-        try:
-            # Sync Logic
-            process_product_data(product_data, odoo, shop_url=shop_url)
-            
-            # --- AGGREGATION LOGIC ---
-            # Key format: log_buffer_products_{shop_url}
-            redis_key = f"log_buffer_products_{shop_url}"
-            conn.incr(redis_key)
-            # -------------------------
-            
-        except Exception as e:
-            # We still log errors immediately because they are important
-            log_event('Product', 'Error', f"Webhook Failed for '{product_title}': {str(e)}", shop_url=shop_url)
+    # Simply return without doing anything. 
+    # This keeps the worker queue fast and clean.
+    return
 
 
 # --- 2. UPDATED ROUTE: Product Webhook (Now uses Queue) ---
