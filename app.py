@@ -1007,36 +1007,36 @@ def sync_customers_master(shop_url):
                 if blacklist and any(t in odoo_tags for t in blacklist): continue
                 if whitelist and not any(t in odoo_tags for t in whitelist): continue
 
-            # --- 4. SITE vs GROUP LOGIC (SMART FILTERING) ---
+            # --- 4. SITE vs GROUP LOGIC (CONSERVATIVE FILTER) ---
             parent_info = p.get('parent_id') 
             
-            # Define words that identify a real Parent Group (like CSB Group)
-            group_keywords = ['group', 'csb', 'holdings', 'ltd']
+            # We ONLY treat it as a Franchise Group if these specific words are found
+            # This ignores "LTD" and "Holdings" so they stay as individual companies
+            group_trigger_words = ['group', 'csb']
             
-            is_real_group = False
+            is_real_franchise_group = False
             if parent_info:
                 parent_name_lower = parent_info[1].lower()
-                # If the parent name contains one of our keywords, it's a Franchise/Group
-                if any(word in parent_name_lower for word in group_keywords):
-                    is_real_group = True
+                if any(word in parent_name_lower for word in group_trigger_words):
+                    is_real_franchise_group = True
 
-            if is_real_group:
-                # === CASE A: REAL FRANCHISE SITE (e.g., Caltex Greenlane) ===
-                # Use the record's name ("Caltex Greenlane") but link the Company to the Parent
+            if is_real_franchise_group:
+                # === CASE A: CALTEX (Real Franchise Group) ===
+                # Name: "Caltex Greenlane" | Company: "CSB Group"
                 shopify_first_name = p.get('name') 
                 shopify_last_name = "" 
-                shopify_company = parent_info[1] # "CSB Group"
+                shopify_company = parent_info[1]
                 
-                staff_note = f"Group: {parent_info[1]} | Odoo ID: {p['id']}"
+                staff_note = f"Franchise Group: {parent_info[1]} | Odoo ID: {p['id']}"
                 context_tags = ["Franchise", "Site"]
             else:
-                # === CASE B: INDIVIDUAL OR STANDALONE (e.g., Mobil Onehunga / Sai Group) ===
-                # Use the record's own name for everything
+                # === CASE B: INDIVIDUAL / STANDALONE (Mobil Onehunga, Sai Group, etc.) ===
+                # Even if there is a parent link, we treat it as an independent entity
                 shopify_first_name = p.get('name')
                 shopify_last_name = ""
                 shopify_company = p.get('name')
                 
-                staff_note = f"Independent Customer | Odoo ID: {p['id']}"
+                staff_note = f"Independent Entity | Odoo ID: {p['id']}"
                 context_tags = ["Independent"]
 
             try:
