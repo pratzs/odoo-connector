@@ -1042,6 +1042,9 @@ def sync_customers_master(shop_url):
                 else:
                     c = shopify.Customer()
                     c.email = email
+
+                # --- FORCE TAXABLE STATUS ---
+                c.tax_exempt = False # This forces Shopify to charge GST
                 
                 # 6. Map Fields (Using Logic Above)
                 c.first_name = shopify_first_name
@@ -1893,6 +1896,32 @@ def maintenance_wipe_logs():
         except Exception as e:
             db.session.rollback()
             return jsonify({"error": str(e)})
+
+@app.route('/maintenance/force_tax_all', methods=['GET'])
+def force_tax_all():
+    shop_url = request.args.get('shop')
+    if not setup_shopify_session(shop_url): 
+        return jsonify({"error": "Auth Failed"}), 401
+    
+    count = 0
+    # Fetch all customers (250 at a time)
+    page = shopify.Customer.find(limit=250)
+    
+    while page:
+        for cust in page:
+            # If they are currently exempt, make them taxable
+            if cust.tax_exempt is True:
+                cust.tax_exempt = False
+                cust.save()
+                count += 1
+        
+        if page.has_next_page():
+            page = page.next_page()
+        else:
+            break
+            
+    log_event('Maintenance', 'Success', f"Force-restored GST collection for {count} customers.", shop_url=shop_url)
+    return jsonify({"message": f"Successfully fixed {count} customers. GST is now being collected."})
 
 @app.route('/maintenance/clear_queue', methods=['POST'])
 def clear_background_queue():
