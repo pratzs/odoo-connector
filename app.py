@@ -2112,7 +2112,84 @@ def sync_inventory_endpoint():
     
     return jsonify({"message": f"Full Inventory Sync Queued (Job ID: {job.get_id()})"})
 
+
+def task_force_name_repair(shop_url):
+    """
+    ONE-TIME REPAIR: Forces all Shopify Customers to use Store Name as First Name.
+    Ignores 'last_synced' timestamp to ensure everyone gets updated.
+    """
+    with app.app_context():
+        odoo = get_odoo_connection(shop_url)
+        if not odoo or not setup_shopify_session(shop_url): return
+
+        company_id = get_config('odoo_company_id', shop_url=shop_url)
+        log_event('Repair', 'Info', "Starting Global Name Repair...", shop_url=shop_url)
+
+        # 1. Fetch ALL Customers (Active & Invoiced)
+        domain = [['active', '=', True], ['type', '!=', 'private']]
+        if company_id: domain.append(['company_id', '=', int(company_id)])
+
+        try:
+            customers = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'res.partner', 'search_read', [domain], 
+                {'fields': ['id', 'name', 'email', 'parent_id', 'is_company']}
+            )
+        except Exception as e:
+            log_event('Repair', 'Error', f"Odoo Fetch Failed: {e}", shop_url=shop_url)
+            return
+
+        count = 0
+        total = len(customers)
+        
+        for p in customers:
+            email = p.get('email')
+            if not email or "@" not in email: continue 
+
+            # --- LOGIC: DETERMINE THE CORRECT DISPLAY NAME ---
+            parent_info = p.get('parent_id')
+            
+            # Default: Use Person Name
+            new_first_name = p.get('name') 
+            new_last_name = ""
+
+            # APPLY FIX: If it has a parent (Store), use Parent Name as First Name
+            if parent_info:
+                # Parent Name (Store) becomes First Name (Visible in POS)
+                new_first_name = parent_info[1] 
+                # Person Name becomes Last Name
+                new_last_name = p.get('name') 
+            
+            # --- UPDATE SHOPIFY ---
+            try:
+                results = shopify.Customer.search(query=f"email:{email}")
+                if results:
+                    cust = results[0]
+                    # Only update if the name is actually different
+                    if cust.first_name != new_first_name or cust.last_name != new_last_name:
+                        cust.first_name = new_first_name
+                        cust.last_name = new_last_name
+                        cust.save()
+                        count += 1
+                        
+                        if count % 50 == 0:
+                            log_event('Repair', 'Info', f"Repaired {count}/{total} names...", shop_url=shop_url)
+            except Exception as e:
+                print(f"Failed to repair {email}: {e}")
+
+        log_event('Repair', 'Success', f"Repair Complete. Fixed names for {count} customers.", shop_url=shop_url)
+
 # --- ROUTES FOR MANUAL TOOLS ---
+
+@app.route('/maintenance/force_name_repair', methods=['GET'])
+@require_shopify_session
+def trigger_name_repair():
+    shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+    
+    # Send to background queue (Timeout 30 mins)
+    q.enqueue(task_force_name_repair, shop_url, job_timeout=1800)
+    
+    return jsonify({"message": "Global Name Repair Queued. Check Live Logs."})
 
 @app.route('/maintenance/purge_junk', methods=['GET'])
 @require_shopify_session
