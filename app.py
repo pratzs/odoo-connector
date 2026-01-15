@@ -1008,26 +1008,27 @@ def sync_customers_master(shop_url):
                 if whitelist and not any(t in odoo_tags for t in whitelist): continue
 
             # --- 4. SITE vs GROUP LOGIC (NEW) ---
-            parent_info = p.get('parent_id') # Returns Tuple (id, "Name") or False
-            
             if parent_info:
-                # === CASE A: CALTEX (Group Site) ===
-                # Parent Name (CSB Group) becomes the "Company" on receipt
-                parent_name = parent_info[1]
+                # === CASE A: FRANCHISE SITE (e.g., Mobil Onehunga / Caltex Greenlane) ===
+                # parent_info[1] is usually the "Site Name" in your Odoo hierarchy
+                site_display_name = parent_info[1] 
+                contact_person = p.get('name') # e.g., "Harpinder Singh"
                 
-                shopify_first_name = p.get('name') # "Caltex Greenlane"
-                shopify_last_name = "(Site)"       # Suffix to help search
-                shopify_company = parent_name      # "CSB Group"
+                # POS Primary Name becomes "Mobil Onehunga" or "Caltex Greenlane"
+                shopify_first_name = site_display_name 
+                shopify_last_name = "" 
                 
-                staff_note = f"Group: {parent_name} | Odoo ID: {p['id']}"
+                # Company Field remains the Legal/Group Name for the invoice
+                shopify_company = site_display_name 
+                
+                # Put the actual contact person in the note so the rep knows who they are talking to
+                staff_note = f"Contact: {contact_person} | Odoo ID: {p['id']}"
                 context_tags = ["Franchise", "Site"]
             else:
-                # === CASE B: MOBIL (Independent) ===
-                # No Parent. They are the company.
-                shopify_first_name = p.get('name') # "Mobil Kingsland"
+                # === CASE B: INDEPENDENT (Mobil Store with no parent) ===
+                shopify_first_name = p.get('name')
                 shopify_last_name = ""
-                shopify_company = p.get('name')    # "Mobil Kingsland"
-                
+                shopify_company = p.get('name')
                 staff_note = f"Independent Store | Odoo ID: {p['id']}"
                 context_tags = ["Independent"]
 
