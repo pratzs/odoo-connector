@@ -1007,29 +1007,36 @@ def sync_customers_master(shop_url):
                 if blacklist and any(t in odoo_tags for t in blacklist): continue
                 if whitelist and not any(t in odoo_tags for t in whitelist): continue
 
-            # --- 4. SITE vs GROUP LOGIC (NEW) ---
+            # --- 4. SITE vs GROUP LOGIC (SMART FILTERING) ---
+            parent_info = p.get('parent_id') 
+            
+            # Define words that identify a real Parent Group (like CSB Group)
+            group_keywords = ['group', 'csb', 'holdings', 'ltd']
+            
+            is_real_group = False
             if parent_info:
-                # === CASE A: FRANCHISE SITE (e.g., Mobil Onehunga / Caltex Greenlane) ===
-                # parent_info[1] is usually the "Site Name" in your Odoo hierarchy
-                site_display_name = parent_info[1] 
-                contact_person = p.get('name') # e.g., "Harpinder Singh"
-                
-                # POS Primary Name becomes "Mobil Onehunga" or "Caltex Greenlane"
-                shopify_first_name = site_display_name 
+                parent_name_lower = parent_info[1].lower()
+                # If the parent name contains one of our keywords, it's a Franchise/Group
+                if any(word in parent_name_lower for word in group_keywords):
+                    is_real_group = True
+
+            if is_real_group:
+                # === CASE A: REAL FRANCHISE SITE (e.g., Caltex Greenlane) ===
+                # Use the record's name ("Caltex Greenlane") but link the Company to the Parent
+                shopify_first_name = p.get('name') 
                 shopify_last_name = "" 
+                shopify_company = parent_info[1] # "CSB Group"
                 
-                # Company Field remains the Legal/Group Name for the invoice
-                shopify_company = site_display_name 
-                
-                # Put the actual contact person in the note so the rep knows who they are talking to
-                staff_note = f"Contact: {contact_person} | Odoo ID: {p['id']}"
+                staff_note = f"Group: {parent_info[1]} | Odoo ID: {p['id']}"
                 context_tags = ["Franchise", "Site"]
             else:
-                # === CASE B: INDEPENDENT (Mobil Store with no parent) ===
+                # === CASE B: INDIVIDUAL OR STANDALONE (e.g., Mobil Onehunga / Sai Group) ===
+                # Use the record's own name for everything
                 shopify_first_name = p.get('name')
                 shopify_last_name = ""
                 shopify_company = p.get('name')
-                staff_note = f"Independent Store | Odoo ID: {p['id']}"
+                
+                staff_note = f"Independent Customer | Odoo ID: {p['id']}"
                 context_tags = ["Independent"]
 
             try:
