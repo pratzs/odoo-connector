@@ -944,10 +944,145 @@ def sync_products_master(shop_url):
 
         log_event('Product Sync', 'Success', f"Sync Complete. Synced {synced} products.", shop_url=shop_url)
 
+# ==========================================
+# B2B GRAPHQL HELPERS (Add to app.py)
+# ==========================================
+
+def execute_graphql(query, variables=None, shop_url=None):
+    """Executes a GraphQL query against the active shop session."""
+    if not setup_shopify_session(shop_url): return None
+    try:
+        client = shopify.GraphQL()
+        result = client.execute(query, variables)
+        return json.loads(result)
+    except Exception as e:
+        print(f"GraphQL Error: {e}")
+        return None
+
+def ensure_shopify_company(name, shop_url):
+    """Finds a Company by name or Creates it."""
+    # 1. Search
+    query_find = """
+    query($query: String!) {
+      companies(first: 1, query: $query) {
+        edges { node { id name } }
+      }
+    }
+    """
+    res = execute_graphql(query_find, {'query': f"name:'{name}'"}, shop_url)
+    edges = res.get('data', {}).get('companies', {}).get('edges', [])
+    
+    if edges:
+        return edges[0]['node']['id']
+
+    # 2. Create if not found
+    mutation_create = """
+    mutation($input: CompanyInput!) {
+      companyCreate(input: $input) {
+        company { id }
+        userErrors { field message }
+      }
+    }
+    """
+    res = execute_graphql(mutation_create, {'input': {'name': name}}, shop_url)
+    company = res.get('data', {}).get('companyCreate', {}).get('company', {})
+    if company: return company['id']
+    return None
+
+def ensure_company_location(company_id, location_name, address_data, shop_url):
+    """Ensures a specific Location (Store Site) exists under the Company."""
+    # 1. Search Locations under this Company
+    query_loc = """
+    query($companyId: ID!) {
+      company(id: $companyId) {
+        locations(first: 50) {
+          edges { node { id name } }
+        }
+      }
+    }
+    """
+    res = execute_graphql(query_loc, {'companyId': company_id}, shop_url)
+    locations = res.get('data', {}).get('company', {}).get('locations', {}).get('edges', [])
+    
+    # Check for exact name match
+    for loc in locations:
+        if loc['node']['name'] == location_name:
+            return loc['node']['id']
+
+    # 2. Create Location if missing
+    mutation_create = """
+    mutation($companyId: ID!, $input: CompanyLocationInput!) {
+      companyLocationCreate(companyId: $companyId, input: $input) {
+        companyLocation { id }
+        userErrors { field message }
+      }
+    }
+    """
+    # Map dictionary keys safely
+    input_data = {
+        'name': location_name,
+        'shippingAddress': {
+            'address1': address_data.get('address1', ''),
+            'city': address_data.get('city', ''),
+            'zip': address_data.get('zip', ''),
+            'countryCode': address_data.get('country_code', 'NZ')
+        }
+        # Billing address inherits from Company or can be set here if different
+    }
+    
+    res = execute_graphql(mutation_create, {'companyId': company_id, 'input': input_data}, shop_url)
+    loc = res.get('data', {}).get('companyLocationCreate', {}).get('companyLocation', {})
+    if loc: return loc['id']
+    return None
+
+def assign_customer_to_company(company_id, location_id, customer_id, shop_url):
+    """Links the Person (Harpinder) to the Store (Location) so they show in POS."""
+    if not customer_id.startswith('gid://'):
+        customer_id = f"gid://shopify/Customer/{customer_id}"
+
+    # 1. Assign as Contact
+    mutation_assign = """
+    mutation($companyId: ID!, $customerId: ID!) {
+      companyContactCreate(
+        companyId: $companyId, 
+        input: { customer: {id: $customerId} }
+      ) {
+        companyContact { id }
+        userErrors { field message }
+      }
+    }
+    """
+    res = execute_graphql(mutation_assign, {'companyId': company_id, 'customerId': customer_id}, shop_url)
+    contact = res.get('data', {}).get('companyContactCreate', {}).get('companyContact', {})
+    
+    # If they are already a contact, we need to find their ID (Handling idempotency)
+    contact_id = None
+    if contact:
+        contact_id = contact['id']
+    else:
+        # Fallback: They might already exist. We'd ideally query companyContacts here.
+        # For this script, we proceed assuming success or existing link.
+        pass
+
+    # 2. Assign Role (Location Admin is required for purchasing in POS)
+    if contact_id:
+        mutation_role = """
+        mutation($companyContactId: ID!, $locationId: ID!) {
+          companyContactRoleAssign(
+            companyContactId: $companyContactId,
+            rolesToAssign: [{name: "location_admin", companyLocationId: $locationId}]
+          ) {
+            userErrors { field message }
+          }
+        }
+        """
+        execute_graphql(mutation_role, {'companyContactId': contact_id, 'locationId': location_id}, shop_url)
+
 def sync_customers_master(shop_url):
     """
     Odoo -> Shopify Customer Sync (Master).
     UPDATED: Handles Franchise (Parent/Child) vs Independent Sites for POS.
+    NOW INCLUDES: B2B Company & Location Linking.
     """
     with app.app_context():
         # --- CONNECTION LOGIC ---
@@ -992,7 +1127,6 @@ def sync_customers_master(shop_url):
         
         for p in odoo_customers:
             # --- EMAIL HANDLING (POS REQUIREMENT) ---
-            # If email exists, use it. If not, generate dummy so POS still gets the record.
             raw_email = p.get('email')
             if raw_email and "@" in raw_email:
                 email = raw_email
@@ -1007,35 +1141,48 @@ def sync_customers_master(shop_url):
                 if blacklist and any(t in odoo_tags for t in blacklist): continue
                 if whitelist and not any(t in odoo_tags for t in whitelist): continue
 
-           # --- 4. SITE vs GROUP LOGIC (STRICT CSB FILTER) ---
+            # --- 4. SITE vs GROUP LOGIC (STRICT CSB FILTER) ---
             parent_info = p.get('parent_id') 
             
-            # 100% Safety: Only trigger group logic for CSB
             is_csb_group = False
             if parent_info:
                 parent_name_lower = parent_info[1].lower()
                 if 'csb' in parent_name_lower:
                     is_csb_group = True
 
+            # -- VARS FOR B2B & DISPLAY --
+            b2b_company_name = ""
+            b2b_location_name = ""
+
             if is_csb_group:
                 # === CASE A: CSB FRANCHISE SITE ===
-                shopify_first_name = p.get('name') # "Caltex Greenlane"
+                # POS VISIBILITY: Search "Caltex Greenlane" -> Found as Location under CSB
+                shopify_first_name = p.get('name') 
                 shopify_last_name = "" 
-                shopify_company = parent_info[1] # "CSB Group"
+                shopify_company = parent_info[1] # "CSB Group" (Address string)
+                
+                # B2B Vars
+                b2b_company_name = parent_info[1] # "CSB Group"
+                b2b_location_name = p.get('name') # "Caltex Greenlane"
                 
                 staff_note = f"CSB Franchise Site | Odoo ID: {p['id']}"
                 context_tags = ["Franchise", "Site", "CSB"]
             else:
-                # === CASE B: INDEPENDENT / INDIVIDUAL (Sai Group, Mobil, etc.) ===
-                shopify_first_name = p.get('name') # "Mobil Onehunga"
+                # === CASE B: INDEPENDENT / INDIVIDUAL ===
+                # POS VISIBILITY: Search "Mobil Onehunga" -> Found as Company
+                shopify_first_name = p.get('name') 
                 shopify_last_name = ""
-                shopify_company = p.get('name') # "Mobil Onehunga"
+                shopify_company = p.get('name') 
+                
+                # B2B Vars
+                b2b_company_name = p.get('name')
+                b2b_location_name = p.get('name') # Store name matches Company name
                 
                 staff_note = f"Independent Customer | Odoo ID: {p['id']}"
                 context_tags = ["Independent"]
 
             try:
-                # 5. Find or Init Shopify Customer
+                # 5. Find or Init Shopify Customer (THE PERSON/CONTACT)
                 shopify_cust = shopify.Customer.search(query=f"email:{email}")
                 if shopify_cust:
                     c = shopify_cust[0]
@@ -1044,9 +1191,9 @@ def sync_customers_master(shop_url):
                     c.email = email
 
                 # --- FORCE TAXABLE STATUS ---
-                c.tax_exempt = False # This forces Shopify to charge GST
+                c.tax_exempt = False 
                 
-                # 6. Map Fields (Using Logic Above)
+                # 6. Map Fields
                 c.first_name = shopify_first_name
                 c.last_name = shopify_last_name
                 c.note = staff_note
@@ -1054,13 +1201,13 @@ def sync_customers_master(shop_url):
                 c.phone = (p.get('phone') or p.get('mobile') or '').strip()
                 c.verified_email = True
                 
-                # 7. Map Address & Company
+                # 7. Map Address (Legacy Field - still useful)
                 address_data = {
                     'address1': p.get('street') or '',
                     'city': p.get('city') or '',
                     'zip': p.get('zip') or '',
-                    'country_code': p.get('country_id')[1] if p.get('country_id') else '', 
-                    'company': shopify_company, # <-- DYNAMIC COMPANY NAME
+                    'country_code': p.get('country_id')[1] if p.get('country_id') else 'NZ', 
+                    'company': shopify_company, 
                     'phone': c.phone,
                     'first_name': c.first_name,
                     'last_name': c.last_name,
@@ -1068,28 +1215,21 @@ def sync_customers_master(shop_url):
                 }
                 c.addresses = [shopify.Address(address_data)]
                 
-                # 8. TAG SYNC (Merge Odoo Tags + Context Tags)
+                # 8. TAG SYNC
                 tags_str = getattr(c, 'tags', '')
                 current_shopify_tags = [t.strip() for t in tags_str.split(',')] if tags_str else []
-                
-                # Combine all unique tags
                 final_tag_list = list(set(current_shopify_tags + odoo_tags + context_tags))
                 c.tags = ",".join(final_tag_list)
 
-                # 9. PREPARE METAFIELDS
+                # 9. METAFIELDS
                 metafields_to_save = []
-
-                # VAT Logic
                 vat = p.get('vat')
                 if vat and sync_vat: 
-                    # Append VAT to note as well for easy POS visibility
                     c.note = f"{c.note}\nVAT: {vat}"
                     metafields_to_save.append(shopify.Metafield({
                         'key': 'vat_number', 'value': vat, 'type': 'single_line_text_field', 'namespace': 'custom'
                     }))
-                    # c.tax_exempt = True  <--- COMMENTED OUT so Shopify keeps collecting tax
                 
-                # Salesperson Logic
                 salesperson_field = p.get('user_id')
                 if salesperson_field and sync_salesrep: 
                     rep_name = salesperson_field[1]
@@ -1113,8 +1253,25 @@ def sync_customers_master(shop_url):
                     db.session.add(new_map)
                     db.session.commit()
                 
-                synced_count += 1
+                # =========================================================
+                # NEW: B2B COMPANY LINKING (Fixes POS Visibility)
+                # =========================================================
+                try:
+                    # A. Ensure Company Exists (CSB Group or Mobil Onehunga)
+                    b2b_cid = ensure_shopify_company(b2b_company_name, shop_url)
+                    
+                    if b2b_cid:
+                        # B. Ensure Location Exists (Caltex Site A or Mobil Onehunga)
+                        b2b_lid = ensure_company_location(b2b_cid, b2b_location_name, address_data, shop_url)
+                        
+                        # C. Assign Person (Harpinder/Contact) to Location
+                        if b2b_lid:
+                            assign_customer_to_company(b2b_cid, b2b_lid, str(c.id), shop_url)
+                except Exception as b2b_error:
+                    log_event('Customer Sync', 'Warning', f"B2B Link Failed for {email}: {b2b_error}", shop_url=shop_url)
+                # =========================================================
 
+                synced_count += 1
                 if synced_count % 50 == 0:
                       log_event('Customer Sync', 'Info', f"Progress: Synced {synced_count}/{total_count} customers...", shop_url=shop_url)
 
