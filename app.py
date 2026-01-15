@@ -1081,8 +1081,8 @@ def sync_customers_master(shop_url):
                     metafields_to_save.append(shopify.Metafield({
                         'key': 'vat_number', 'value': vat, 'type': 'single_line_text_field', 'namespace': 'custom'
                     }))
-                    c.tax_exempt = True 
-
+                    # c.tax_exempt = True  <--- COMMENTED OUT so Shopify keeps collecting tax
+                
                 # Salesperson Logic
                 salesperson_field = p.get('user_id')
                 if salesperson_field and sync_salesrep: 
