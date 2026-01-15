@@ -1081,8 +1081,9 @@ def assign_customer_to_company(company_id, location_id, customer_id, shop_url):
 def sync_customers_master(shop_url):
     """
     Odoo -> Shopify Customer Sync (Master).
-    UPDATED: Handles Franchise (Parent/Child) vs Independent Sites for POS.
-    NOW INCLUDES: B2B Company & Location Linking.
+    UPDATED: 
+    1. Skips creating Individual Contacts unless whitelisted.
+    2. Uses empty string for Last Name (No dots).
     """
     with app.app_context():
         # --- CONNECTION LOGIC ---
@@ -1093,104 +1094,89 @@ def sync_customers_master(shop_url):
 
         # 1. Configuration
         direction = get_config('cust_direction', 'bidirectional', shop_url=shop_url)
-        if direction == 'shopify_to_odoo':
-            log_event('Customer Sync', 'Skipped', "Sync direction is set to Shopify -> Odoo only.", shop_url=shop_url)
-            return
+        if direction == 'shopify_to_odoo': return
 
         company_id = get_config('odoo_company_id', shop_url=shop_url)
         
-        # Parse Tag lists
+        # Tag Configs
         w_tag = get_config('cust_whitelist_tags', '', shop_url=shop_url)
         b_tag = get_config('cust_blacklist_tags', '', shop_url=shop_url)
         whitelist = [t.strip() for t in w_tag.split(',') if t.strip()]
         blacklist = [t.strip() for t in b_tag.split(',') if t.strip()]
-        
         use_tags_filter = get_config('cust_sync_tags', False, shop_url=shop_url)
+        
         sync_vat = get_config('cust_sync_vat', True, shop_url=shop_url)
         sync_salesrep = get_config('cust_sync_salesrep', True, shop_url=shop_url)
+        
+        # Group Whitelist
+        raw_groups = get_config('group_companies_list', '', shop_url=shop_url)
+        group_whitelist = [g.strip().lower() for g in raw_groups.split(',') if g.strip()]
 
-        # 2. SMART TIMESTAMP LOGIC
+        # 2. TIMESTAMP
         last_run = get_config('last_customer_sync_time', '2000-01-01 00:00:00', shop_url=shop_url)
         current_run_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
 
         try:
-            # Ensure your Odoo helper fetches 'parent_id' and 'is_company'
             odoo_customers = odoo.get_changed_customers(last_run, company_id)
         except Exception as e:
             log_event('Customer Sync', 'Error', f"Odoo Fetch Failed: {e}", shop_url=shop_url)
             return
         
         total_count = len(odoo_customers)
-        log_event('Customer Sync', 'Info', f"Found {total_count} changed customers since {last_run}. Processing...", shop_url=shop_url)
+        log_event('Customer Sync', 'Info', f"Found {total_count} changed. Processing...", shop_url=shop_url)
         
         synced_count = 0
         
         for p in odoo_customers:
-            # --- EMAIL HANDLING (POS REQUIREMENT) ---
+            # --- 0. STRICT FILTER ---
+            parent_info = p.get('parent_id') 
+            
+            if parent_info:
+                # It's a Contact. Should we skip it?
+                parent_name = parent_info[1]
+                is_whitelisted = any(g in parent_name.lower() for g in group_whitelist)
+                
+                if not is_whitelisted:
+                    continue # SKIP: Do not create Gurjeet.
+
+            # --- 1. NAMES ---
+            shopify_first_name = p.get('name')
+            shopify_last_name = ""  # FIX: No Dot
+            shopify_company = p.get('name')
+            
+            b2b_company_name = p.get('name')
+            b2b_location_name = p.get('name')
+            
+            staff_note = f"Independent | Odoo ID: {p['id']}"
+            context_tags = ["Independent"]
+
+            if parent_info:
+                # Must be whitelisted (CSB Group)
+                parent_name = parent_info[1]
+                shopify_first_name = p.get('name') # "Caltex Site A"
+                shopify_company = parent_name      # "CSB Group"
+                
+                b2b_company_name = parent_name
+                b2b_location_name = p.get('name')
+                
+                staff_note = f"Franchise Site | Odoo ID: {p['id']}"
+                context_tags = ["Franchise", "Site"]
+
+            # --- EMAIL ---
             raw_email = p.get('email')
             if raw_email and "@" in raw_email:
                 email = raw_email
             else:
                 email = f"no-email-{p['id']}@pos.local"
 
-            # Get Odoo Tags Names
+            # Tag Filter
             odoo_tags = odoo.get_tag_names(p.get('category_id', []))
-
-            # 3. Filter Logic
             if use_tags_filter:
                 if blacklist and any(t in odoo_tags for t in blacklist): continue
                 if whitelist and not any(t in odoo_tags for t in whitelist): continue
 
-            # --- 4. SMART PARENT/CHILD NAME LOGIC ---
-            parent_info = p.get('parent_id') 
-            
-            # 1. READ CONFIG
-            raw_groups = get_config('group_companies_list', '', shop_url=shop_url)
-            group_whitelist = [g.strip().lower() for g in raw_groups.split(',') if g.strip()]
-
-            # 2. DETERMINE NAMES
-            shopify_first_name = p.get('name')
-            shopify_last_name = "."
-            shopify_company = p.get('name')
-            
-            b2b_company_name = p.get('name')
-            b2b_location_name = p.get('name')
-
-            if parent_info:
-                parent_name = parent_info[1]
-                
-                # Check if this parent is in the "Exception List"
-                is_exception_group = any(g in parent_name.lower() for g in group_whitelist)
-                
-                if is_exception_group:
-                    # CASE A: Franchise/Group (e.g. CSB Group)
-                    # POS Visibility: Show "Caltex Site A" (Child Name)
-                    shopify_first_name = p.get('name') 
-                    shopify_company = parent_name      # Billing goes to "CSB Group"
-                    
-                    b2b_company_name = parent_name
-                    b2b_location_name = p.get('name')
-                    
-                    staff_note = f"Franchise Site | Odoo ID: {p['id']}"
-                    context_tags = ["Franchise", "Site"]
-                else:
-                    # CASE B: Independent Store (e.g. Mobil Onehunga)
-                    # POS Visibility: Show "Mobil Onehunga" (Parent Name)
-                    shopify_first_name = parent_name   
-                    shopify_company = parent_name      
-                    
-                    b2b_company_name = parent_name
-                    b2b_location_name = parent_name # Location name matches Company
-                    
-                    staff_note = f"Independent Customer | Odoo ID: {p['id']}"
-                    context_tags = ["Independent"]
-            else:
-                # No Parent (Individual)
-                staff_note = f"Individual | Odoo ID: {p['id']}"
-                context_tags = ["Individual"]
-
             try:
-                # 5. Find or Init Shopify Customer (THE PERSON/CONTACT)
+                # 5. Find or Init
                 shopify_cust = shopify.Customer.search(query=f"email:{email}")
                 if shopify_cust:
                     c = shopify_cust[0]
@@ -1198,18 +1184,16 @@ def sync_customers_master(shop_url):
                     c = shopify.Customer()
                     c.email = email
 
-                # --- FORCE TAXABLE STATUS ---
                 c.tax_exempt = False 
                 
                 # 6. Map Fields
                 c.first_name = shopify_first_name
-                c.last_name = shopify_last_name
+                c.last_name = shopify_last_name # Empty
                 c.note = staff_note
-                
                 c.phone = (p.get('phone') or p.get('mobile') or '').strip()
                 c.verified_email = True
                 
-                # 7. Map Address (Legacy Field - still useful)
+                # 7. Address
                 address_data = {
                     'address1': p.get('street') or '',
                     'city': p.get('city') or '',
@@ -1223,13 +1207,13 @@ def sync_customers_master(shop_url):
                 }
                 c.addresses = [shopify.Address(address_data)]
                 
-                # 8. TAG SYNC
+                # 8. Tags
                 tags_str = getattr(c, 'tags', '')
                 current_shopify_tags = [t.strip() for t in tags_str.split(',')] if tags_str else []
                 final_tag_list = list(set(current_shopify_tags + odoo_tags + context_tags))
                 c.tags = ",".join(final_tag_list)
 
-                # 9. METAFIELDS
+                # 9. Metafields
                 metafields_to_save = []
                 vat = p.get('vat')
                 if vat and sync_vat: 
@@ -1261,34 +1245,23 @@ def sync_customers_master(shop_url):
                     db.session.add(new_map)
                     db.session.commit()
                 
-                # =========================================================
-                # NEW: B2B COMPANY LINKING (Fixes POS Visibility)
-                # =========================================================
+                # B2B Links
                 try:
-                    # A. Ensure Company Exists (CSB Group or Mobil Onehunga)
                     b2b_cid = ensure_shopify_company(b2b_company_name, shop_url)
-                    
                     if b2b_cid:
-                        # B. Ensure Location Exists (Caltex Site A or Mobil Onehunga)
                         b2b_lid = ensure_company_location(b2b_cid, b2b_location_name, address_data, shop_url)
-                        
-                        # C. Assign Person (Harpinder/Contact) to Location
                         if b2b_lid:
                             assign_customer_to_company(b2b_cid, b2b_lid, str(c.id), shop_url)
-                except Exception as b2b_error:
-                    log_event('Customer Sync', 'Warning', f"B2B Link Failed for {email}: {b2b_error}", shop_url=shop_url)
-                # =========================================================
+                except Exception: pass
 
                 synced_count += 1
                 if synced_count % 50 == 0:
-                      log_event('Customer Sync', 'Info', f"Progress: Synced {synced_count}/{total_count} customers...", shop_url=shop_url)
+                      log_event('Customer Sync', 'Info', f"Progress: {synced_count}...", shop_url=shop_url)
 
             except Exception as e:
                 log_event('Customer Sync', 'Error', f"Failed {email}: {e}", shop_url=shop_url)
 
-        # --- SAVE THE TIMESTAMP ---
         set_config('last_customer_sync_time', current_run_time, shop_url=shop_url)
-        
         log_event('Customer Sync', 'Success', f"Sync Complete. Processed {synced_count} customers.", shop_url=shop_url)
 
 def archive_shopify_duplicates(shop_url):
@@ -2116,7 +2089,10 @@ def sync_inventory_endpoint():
 
 def task_force_name_repair(shop_url):
     """
-    ONE-TIME REPAIR: Fixes Shopify Names based on Group/Store Logic.
+    ONE-TIME REPAIR: 
+    1. Removes "." from Last Names.
+    2. Applies Group/Site logic.
+    3. AUTOMATICALLY DELETES individual contacts unless whitelisted.
     """
     with app.app_context():
         odoo = get_odoo_connection(shop_url)
@@ -2124,14 +2100,13 @@ def task_force_name_repair(shop_url):
 
         company_id = get_config('odoo_company_id', shop_url=shop_url)
         
-        # 1. READ THE NEW CONFIG (The Blank Box)
-        # We split by comma to get a list: ['CSB Group', 'Z Energy']
+        # Config
         raw_groups = get_config('group_companies_list', '', shop_url=shop_url)
         group_whitelist = [g.strip().lower() for g in raw_groups.split(',') if g.strip()]
 
-        log_event('Repair', 'Info', f"Starting Smart Name Repair. Exception Groups: {group_whitelist}", shop_url=shop_url)
+        log_event('Repair', 'Info', f"Starting Smart Repair & Cleanup. Whitelist: {group_whitelist}", shop_url=shop_url)
 
-        # 2. Fetch Customers
+        # Fetch ALL customers
         domain = [['active', '=', True], ['type', '!=', 'private']]
         if company_id: domain.append(['company_id', '=', int(company_id)])
 
@@ -2145,54 +2120,72 @@ def task_force_name_repair(shop_url):
             return
 
         count = 0
+        deleted = 0
         total = len(customers)
         
         for p in customers:
             email = p.get('email')
             if not email or "@" not in email: continue
 
-            # --- SMART NAME LOGIC ---
-            parent_info = p.get('parent_id') # [ID, "Name"]
+            parent_info = p.get('parent_id')
             
-            # Default to person/record name if no parent
-            final_display_name = p.get('name') 
-
+            # --- LOGIC: SHOULD THIS EXIST IN SHOPIFY? ---
+            should_exist = True
+            
             if parent_info:
                 parent_name = parent_info[1]
+                is_whitelisted = any(g in parent_name.lower() for g in group_whitelist)
                 
-                # CHECK: Is this parent in your "Exception List"? (e.g. CSB Group)
-                is_exception_group = any(g in parent_name.lower() for g in group_whitelist)
-                
-                if is_exception_group:
-                    # RULE 1: It's a Group (CSB). Use the SITE Name (Child).
-                    # Odoo: Parent="CSB Group", Name="Caltex Site A" -> Result: "Caltex Site A"
-                    final_display_name = p.get('name') 
-                else:
-                    # RULE 2: It's an Independent Store. Use the PARENT Name.
-                    # Odoo: Parent="Mobil Onehunga", Name="Harpinder Singh" -> Result: "Mobil Onehunga"
-                    final_display_name = parent_name
+                # If it has a parent (it's a Contact) AND it's NOT in the whitelist
+                # Then it is an "Unwanted Individual" -> DELETE IT
+                if not is_whitelisted:
+                    should_exist = False
 
-            # --- UPDATE SHOPIFY ---
-            
-            new_first_name = final_display_name
-            new_last_name = "" 
-
+            # --- EXECUTE ---
             try:
+                # Find in Shopify
                 results = shopify.Customer.search(query=f"email:{email}")
+                
+                if not should_exist:
+                    # DELETE LOGIC
+                    if results:
+                        for cust in results:
+                            cust.destroy()
+                            deleted += 1
+                            log_event('Repair', 'Warning', f"🗑️ Auto-Deleted Unwanted Contact: {email}", shop_url=shop_url)
+                    continue # Done with this record
+
+                # UPDATE LOGIC (If we keep it)
                 if results:
                     cust = results[0]
                     
+                    # Determine Correct Name
+                    final_display_name = p.get('name') 
+                    if parent_info:
+                        # Must be whitelisted if we are here
+                        final_display_name = p.get('name') # Use Child Name (Caltex Site A)
+                    else:
+                        # Independent Company
+                        final_display_name = p.get('name') 
+
+                    new_first_name = final_display_name
+                    new_last_name = "" # FIX: Empty string (Removes the dot)
+
                     # Only save if different
                     if cust.first_name != new_first_name or cust.last_name != new_last_name:
                         cust.first_name = new_first_name
                         cust.last_name = new_last_name
                         cust.save()
                         count += 1
-                        if count % 50 == 0:
-                            log_event('Repair', 'Info', f"Fixed {count}/{total} names...", shop_url=shop_url)
-            except: pass
+                        
+            except Exception as e:
+                print(f"Repair Error {email}: {e}")
 
-        log_event('Repair', 'Success', f"Repair Done. Fixed {count} customers.", shop_url=shop_url)
+            if (count + deleted) % 50 == 0:
+                log_event('Repair', 'Info', f"Progress: Fixed {count}, Deleted {deleted}...", shop_url=shop_url)
+
+        log_event('Repair', 'Success', f"Cleanup Done. Fixed names: {count}. Deleted duplicates: {deleted}.", shop_url=shop_url)
+
 
 # --- ROUTES FOR MANUAL TOOLS ---
 
