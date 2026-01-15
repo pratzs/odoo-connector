@@ -1141,52 +1141,53 @@ def sync_customers_master(shop_url):
                 if blacklist and any(t in odoo_tags for t in blacklist): continue
                 if whitelist and not any(t in odoo_tags for t in whitelist): continue
 
-            # --- 4. SITE vs GROUP LOGIC (STRICT CSB FILTER) ---
+            # --- 4. SMART PARENT/CHILD NAME LOGIC ---
             parent_info = p.get('parent_id') 
             
-            is_csb_group = False
+            # 1. READ CONFIG
+            raw_groups = get_config('group_companies_list', '', shop_url=shop_url)
+            group_whitelist = [g.strip().lower() for g in raw_groups.split(',') if g.strip()]
+
+            # 2. DETERMINE NAMES
+            shopify_first_name = p.get('name')
+            shopify_last_name = "."
+            shopify_company = p.get('name')
+            
+            b2b_company_name = p.get('name')
+            b2b_location_name = p.get('name')
+
             if parent_info:
-                parent_name_lower = parent_info[1].lower()
-                if 'csb' in parent_name_lower:
-                    is_csb_group = True
-
-            # -- VARS FOR B2B & DISPLAY --
-            b2b_company_name = ""
-            b2b_location_name = ""
-
-            if is_csb_group:
-                # === CASE A: CSB FRANCHISE SITE (Keep this as is) ===
-                shopify_first_name = p.get('name') 
-                shopify_last_name = "" 
-                shopify_company = parent_info[1] # "CSB Group"
+                parent_name = parent_info[1]
                 
-                b2b_company_name = parent_info[1]
-                b2b_location_name = p.get('name')
+                # Check if this parent is in the "Exception List"
+                is_exception_group = any(g in parent_name.lower() for g in group_whitelist)
                 
-                staff_note = f"CSB Franchise Site | Odoo ID: {p['id']}"
-                context_tags = ["Franchise", "Site", "CSB"]
-            else:
-                # === CASE B: INDEPENDENT / INDIVIDUAL (Mobil Onehunga) ===
-                # FIX: Check if this record has a parent (The Store)
-                if parent_info:
-
-                    # ACTION: Put Store Name FIRST so POS shows it clearly
-                    shopify_first_name = parent_info[1]
-                    shopify_last_name = p.get('name')
-                    shopify_company = parent_info[1]
+                if is_exception_group:
+                    # CASE A: Franchise/Group (e.g. CSB Group)
+                    # POS Visibility: Show "Caltex Site A" (Child Name)
+                    shopify_first_name = p.get('name') 
+                    shopify_company = parent_name      # Billing goes to "CSB Group"
                     
-                    b2b_company_name = parent_info[1]
-                    b2b_location_name = parent_info[1] # Store name matches Company name
-                else:
-                    shopify_first_name = p.get('name')
-                    shopify_last_name = ""
-                    shopify_company = p.get('name')
-                    
-                    b2b_company_name = p.get('name')
+                    b2b_company_name = parent_name
                     b2b_location_name = p.get('name')
-
-                staff_note = f"Independent Customer | Odoo ID: {p['id']}"
-                context_tags = ["Independent"]
+                    
+                    staff_note = f"Franchise Site | Odoo ID: {p['id']}"
+                    context_tags = ["Franchise", "Site"]
+                else:
+                    # CASE B: Independent Store (e.g. Mobil Onehunga)
+                    # POS Visibility: Show "Mobil Onehunga" (Parent Name)
+                    shopify_first_name = parent_name   
+                    shopify_company = parent_name      
+                    
+                    b2b_company_name = parent_name
+                    b2b_location_name = parent_name # Location name matches Company
+                    
+                    staff_note = f"Independent Customer | Odoo ID: {p['id']}"
+                    context_tags = ["Independent"]
+            else:
+                # No Parent (Individual)
+                staff_note = f"Individual | Odoo ID: {p['id']}"
+                context_tags = ["Individual"]
 
             try:
                 # 5. Find or Init Shopify Customer (THE PERSON/CONTACT)
@@ -2115,27 +2116,32 @@ def sync_inventory_endpoint():
 
 def task_force_name_repair(shop_url):
     """
-    ONE-TIME REPAIR: Forces all Shopify Customers to use Store Name as First Name.
-    Ignores 'last_synced' timestamp to ensure everyone gets updated.
+    ONE-TIME REPAIR: Fixes Shopify Names based on Group/Store Logic.
     """
     with app.app_context():
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): return
 
         company_id = get_config('odoo_company_id', shop_url=shop_url)
-        log_event('Repair', 'Info', "Starting Global Name Repair...", shop_url=shop_url)
+        
+        # 1. READ THE NEW CONFIG (The Blank Box)
+        # We split by comma to get a list: ['CSB Group', 'Z Energy']
+        raw_groups = get_config('group_companies_list', '', shop_url=shop_url)
+        group_whitelist = [g.strip().lower() for g in raw_groups.split(',') if g.strip()]
 
-        # 1. Fetch ALL Customers (Active & Invoiced)
+        log_event('Repair', 'Info', f"Starting Smart Name Repair. Exception Groups: {group_whitelist}", shop_url=shop_url)
+
+        # 2. Fetch Customers
         domain = [['active', '=', True], ['type', '!=', 'private']]
         if company_id: domain.append(['company_id', '=', int(company_id)])
 
         try:
             customers = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                 'res.partner', 'search_read', [domain], 
-                {'fields': ['id', 'name', 'email', 'parent_id', 'is_company']}
+                {'fields': ['id', 'name', 'email', 'parent_id']}
             )
         except Exception as e:
-            log_event('Repair', 'Error', f"Odoo Fetch Failed: {e}", shop_url=shop_url)
+            log_event('Repair', 'Error', f"Fetch Failed: {e}", shop_url=shop_url)
             return
 
         count = 0
@@ -2143,40 +2149,50 @@ def task_force_name_repair(shop_url):
         
         for p in customers:
             email = p.get('email')
-            if not email or "@" not in email: continue 
+            if not email or "@" not in email: continue
 
-            # --- LOGIC: DETERMINE THE CORRECT DISPLAY NAME ---
-            parent_info = p.get('parent_id')
+            # --- SMART NAME LOGIC ---
+            parent_info = p.get('parent_id') # [ID, "Name"]
             
-            # Default: Use Person Name
-            new_first_name = p.get('name') 
-            new_last_name = ""
+            # Default to person/record name if no parent
+            final_display_name = p.get('name') 
 
-            # APPLY FIX: If it has a parent (Store), use Parent Name as First Name
             if parent_info:
-                # Parent Name (Store) becomes First Name (Visible in POS)
-                new_first_name = parent_info[1] 
-                # Person Name becomes Last Name
-                new_last_name = p.get('name') 
-            
+                parent_name = parent_info[1]
+                
+                # CHECK: Is this parent in your "Exception List"? (e.g. CSB Group)
+                is_exception_group = any(g in parent_name.lower() for g in group_whitelist)
+                
+                if is_exception_group:
+                    # RULE 1: It's a Group (CSB). Use the SITE Name (Child).
+                    # Odoo: Parent="CSB Group", Name="Caltex Site A" -> Result: "Caltex Site A"
+                    final_display_name = p.get('name') 
+                else:
+                    # RULE 2: It's an Independent Store. Use the PARENT Name.
+                    # Odoo: Parent="Mobil Onehunga", Name="Harpinder Singh" -> Result: "Mobil Onehunga"
+                    final_display_name = parent_name
+
             # --- UPDATE SHOPIFY ---
+            
+            new_first_name = final_display_name
+            new_last_name = "." 
+
             try:
                 results = shopify.Customer.search(query=f"email:{email}")
                 if results:
                     cust = results[0]
-                    # Only update if the name is actually different
+                    
+                    # Only save if different
                     if cust.first_name != new_first_name or cust.last_name != new_last_name:
                         cust.first_name = new_first_name
                         cust.last_name = new_last_name
                         cust.save()
                         count += 1
-                        
                         if count % 50 == 0:
-                            log_event('Repair', 'Info', f"Repaired {count}/{total} names...", shop_url=shop_url)
-            except Exception as e:
-                print(f"Failed to repair {email}: {e}")
+                            log_event('Repair', 'Info', f"Fixed {count}/{total} names...", shop_url=shop_url)
+            except: pass
 
-        log_event('Repair', 'Success', f"Repair Complete. Fixed names for {count} customers.", shop_url=shop_url)
+        log_event('Repair', 'Success', f"Repair Done. Fixed {count} customers.", shop_url=shop_url)
 
 # --- ROUTES FOR MANUAL TOOLS ---
 
@@ -2627,6 +2643,7 @@ def api_save_settings():
             'cust_direction', 'cust_auto_sync', 'cust_sync_tags', 'cust_whitelist_tags', 'cust_blacklist_tags', 'cust_sync_vat', 'cust_sync_salesrep',
             'prod_auto_create', 'prod_auto_publish', 'prod_sync_images', 'prod_sync_tags', 'prod_sync_meta_vendor_code',
             'prod_sync_price', 'prod_sync_cost', 'prod_sync_barcode', 'prod_sync_title', 'prod_sync_desc', 'prod_sync_type', 'prod_sync_vendor',
+            'group_companies_list',
             'order_sync_tax', 'alert_email', 'alert_threshold'
         ]
         
