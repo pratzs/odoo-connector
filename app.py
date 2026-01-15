@@ -1155,29 +1155,36 @@ def sync_customers_master(shop_url):
             b2b_location_name = ""
 
             if is_csb_group:
-                # === CASE A: CSB FRANCHISE SITE ===
-                # POS VISIBILITY: Search "Caltex Greenlane" -> Found as Location under CSB
+                # === CASE A: CSB FRANCHISE SITE (Keep this as is) ===
                 shopify_first_name = p.get('name') 
                 shopify_last_name = "" 
-                shopify_company = parent_info[1] # "CSB Group" (Address string)
+                shopify_company = parent_info[1] # "CSB Group"
                 
-                # B2B Vars
-                b2b_company_name = parent_info[1] # "CSB Group"
-                b2b_location_name = p.get('name') # "Caltex Greenlane"
+                b2b_company_name = parent_info[1]
+                b2b_location_name = p.get('name')
                 
                 staff_note = f"CSB Franchise Site | Odoo ID: {p['id']}"
                 context_tags = ["Franchise", "Site", "CSB"]
             else:
-                # === CASE B: INDEPENDENT / INDIVIDUAL ===
-                # POS VISIBILITY: Search "Mobil Onehunga" -> Found as Company
-                shopify_first_name = p.get('name') 
-                shopify_last_name = ""
-                shopify_company = p.get('name') 
-                
-                # B2B Vars
-                b2b_company_name = p.get('name')
-                b2b_location_name = p.get('name') # Store name matches Company name
-                
+                # === CASE B: INDEPENDENT / INDIVIDUAL (Mobil Onehunga) ===
+                # FIX: Check if this record has a parent (The Store)
+                if parent_info:
+
+                    # ACTION: Put Store Name FIRST so POS shows it clearly
+                    shopify_first_name = parent_info[1]
+                    shopify_last_name = p.get('name')
+                    shopify_company = parent_info[1]
+                    
+                    b2b_company_name = parent_info[1]
+                    b2b_location_name = parent_info[1] # Store name matches Company name
+                else:
+                    shopify_first_name = p.get('name')
+                    shopify_last_name = ""
+                    shopify_company = p.get('name')
+                    
+                    b2b_company_name = p.get('name')
+                    b2b_location_name = p.get('name')
+
                 staff_note = f"Independent Customer | Odoo ID: {p['id']}"
                 context_tags = ["Independent"]
 
