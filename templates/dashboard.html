@@ -341,6 +341,15 @@
                             <input class="form-check-input" type="checkbox" id="custSyncSalesRep" {% if config.cust_sync_salesrep %}checked{% endif %}>
                             <label class="form-check-label" for="custSyncSalesRep">Sync Salesperson (Metafield)</label>
                         </div>
+                        <div class="mb-3 border p-2 rounded bg-light">
+                        <label class="form-label-sm fw-bold">🏢 Group Companies Exception List</label>
+                        <div class="form-text text-muted mb-1" style="font-size: 12px;">
+                            For these parent companies, the sync will use the <b>Site Name</b> (Child) instead of the Parent Name.
+                        </div>
+                        <input type="text" class="form-control form-control-sm" id="groupCompaniesList" 
+                               placeholder="e.g. CSB Group, Z Energy" value="{{ config.group_companies_list }}">
+                        <div class="form-text" style="font-size: 11px;">Comma-separated list of parent company names.</div>
+                    </div>
                     </div>
                 </div>
             </div>
@@ -695,6 +704,7 @@ document.addEventListener("DOMContentLoaded", function() {
             // Customers
             setVal('custSyncDirection', SAVED_SETTINGS.cust_direction || 'bidirectional');
             setCheck('custAutoSync', SAVED_SETTINGS.cust_auto_sync);
+            setVal('groupCompaniesList', SAVED_SETTINGS.group_companies_list || '');
             setCheck('custSyncTagsSwitch', SAVED_SETTINGS.cust_sync_tags);
             setVal('custWhitelistTags', SAVED_SETTINGS.cust_whitelist_tags || '');
             setVal('custBlacklistTags', SAVED_SETTINGS.cust_blacklist_tags || '');
@@ -800,6 +810,7 @@ function saveSettings() {
         cust_sync_salesrep: document.getElementById('custSyncSalesRep').checked,
         cust_whitelist_tags: document.getElementById('custWhitelistTags').value,
         cust_blacklist_tags: document.getElementById('custBlacklistTags').value,
+        group_companies_list: document.getElementById('groupCompaniesList').value,
         alert_email: document.getElementById('alertEmail').value,
         alert_threshold: parseInt(document.getElementById('alertThreshold').value) || 50,
     };
