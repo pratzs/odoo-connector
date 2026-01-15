@@ -2175,7 +2175,7 @@ def task_force_name_repair(shop_url):
             # --- UPDATE SHOPIFY ---
             
             new_first_name = final_display_name
-            new_last_name = "." 
+            new_last_name = "" 
 
             try:
                 results = shopify.Customer.search(query=f"email:{email}")
