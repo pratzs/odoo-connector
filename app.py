@@ -730,6 +730,7 @@ def sync_products_master(shop_url):
         sync_cost = get_config('prod_sync_cost', True, shop_url=shop_url)
         sync_desc = get_config('prod_sync_desc', True, shop_url=shop_url)
         sync_tags = get_config('prod_sync_tags', False, shop_url=shop_url)
+        sync_original_price_meta = get_config('prod_sync_meta_original_price', False, shop_url=shop_url)
         sync_images = get_config('prod_sync_images', False, shop_url=shop_url)
         sync_vendor = get_config('prod_sync_vendor', True, shop_url=shop_url) 
         sync_barcode = get_config('prod_sync_barcode', True, shop_url=shop_url)
@@ -886,6 +887,32 @@ def sync_products_master(shop_url):
 
                 sp.variants = final_vars
                 sp.save()
+
+                # === NEW: SYNC ORIGINAL PRICE METAFIELD ===
+if sync_original_price_meta and sp.variants:
+    try:
+        # We iterate over the saved variants to ensure they have IDs
+        for v in sp.variants:
+            # Find the Odoo data for this specific variant SKU
+            d_data = next((d for d in desired_variants if d['sku'] == v.sku), None)
+            
+            if d_data:
+                # Odoo List Price is stored in d_data['price']
+                odoo_price = d_data['price']
+                
+                # Create/Update Variant Metafield
+                meta = shopify.Metafield({
+                    'key': 'original_retail_price',
+                    'value': str(odoo_price),
+                    'type': 'number_decimal', # Ensures it formats as currency
+                    'namespace': 'custom',
+                    'owner_resource': 'variant',
+                    'owner_id': v.id
+                })
+                v.add_metafield(meta)
+    except Exception as e:
+        print(f"Metafield Price Error for {sku}: {e}")
+# ==========================================
                 
                 if sp.variants:
                     for v in sp.variants:
@@ -2628,6 +2655,7 @@ def api_save_settings():
             'inventory_locations', 'inventory_field', 'sync_zero_stock', 'combine_committed',
             'cust_direction', 'cust_auto_sync', 'cust_sync_tags', 'cust_whitelist_tags', 'cust_blacklist_tags', 'cust_sync_vat', 'cust_sync_salesrep',
             'prod_auto_create', 'prod_auto_publish', 'prod_sync_images', 'prod_sync_tags', 'prod_sync_meta_vendor_code',
+            'prod_sync_meta_original_price',
             'prod_sync_price', 'prod_sync_cost', 'prod_sync_barcode', 'prod_sync_title', 'prod_sync_desc', 'prod_sync_type', 'prod_sync_vendor',
             'group_companies_list',
             'order_sync_tax', 'alert_email', 'alert_threshold'
