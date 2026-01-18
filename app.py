@@ -888,16 +888,13 @@ def sync_products_master(shop_url):
                 sp.variants = final_vars
                 sp.save()
                 
-                # === NEW: SYNC ORIGINAL PRICE METAFIELD ===
-                # This block handles the B2B/Plus "Original Price" requirement
+               # === NEW: SYNC ORIGINAL PRICE METAFIELD ===
                 if sync_original_price_meta and sp.variants:
                     try:
                         for v in sp.variants:
-                            # Find Odoo data for this variant (supports both Unit and Pack)
                             d_data = next((d for d in desired_variants if d['sku'] == v.sku), None)
                             
                             if d_data:
-                                # Create Metafield
                                 meta = shopify.Metafield({
                                     'key': 'original_retail_price',
                                     'value': str(d_data['price']),
@@ -906,7 +903,7 @@ def sync_products_master(shop_url):
                                     'owner_resource': 'variant',
                                     'owner_id': v.id
                                 })
-                                v.add_metafield(meta)
+                                meta.save() # <--- ADD THIS LINE HERE TOO
                     except Exception as e:
                         print(f"Metafield Price Error for {sku}: {e}")
                 # ==========================================
@@ -3362,12 +3359,12 @@ def api_get_unmapped_products():
 # t.start()
 
 # ==========================================
-# TEMPORARY ONE-OFF SCRIPT
+# CORRECTED ONE-OFF SCRIPT (With .save())
 # ==========================================
 def task_one_off_price_backfill(shop_url):
     """
     Scans ALL Shopify products and updates 'custom.original_retail_price'
-    from Odoo. Ignores everything else.
+    from Odoo.
     """
     with app.app_context():
         # 1. Setup
@@ -3379,8 +3376,7 @@ def task_one_off_price_backfill(shop_url):
         company_id = get_config('odoo_company_id', shop_url=shop_url)
         log_event('Backfill', 'Info', "Starting One-Off Price Metafield Sync...", shop_url=shop_url)
 
-        # 2. Fetch ALL Odoo Prices (Fast Map)
-        # We fetch simple fields to keep it light
+        # 2. Fetch ALL Odoo Prices
         try:
             domain = [['sale_ok', '=', True], ['active', '=', True]]
             if company_id: domain.append(['company_id', '=', int(company_id)])
@@ -3389,7 +3385,6 @@ def task_one_off_price_backfill(shop_url):
                 'product.product', 'search_read', [domain], 
                 {'fields': ['default_code', 'list_price']})
                 
-            # Create a dictionary: {'SKU123': 20.00, 'SKU456': 50.00}
             price_map = {p['default_code']: p['list_price'] for p in odoo_data if p.get('default_code')}
             log_event('Backfill', 'Info', f"Loaded {len(price_map)} prices from Odoo.", shop_url=shop_url)
         except Exception as e:
@@ -3399,45 +3394,37 @@ def task_one_off_price_backfill(shop_url):
         # 3. Iterate Shopify Products
         page = shopify.Product.find(limit=250, status='active')
         updated_count = 0
-        processed_count = 0
         
         while page:
             for sp in page:
-                processed_count += 1
-                dirty = False
-                
                 for v in sp.variants:
-                    # Check if we have a price for this SKU
-                    # We remove '-UNIT' suffix to match the base Odoo SKU if needed
+                    # Clean SKU (remove -UNIT if present)
                     clean_sku = v.sku.replace('-UNIT', '') if v.sku else ""
                     
                     if clean_sku in price_map:
                         odoo_price = price_map[clean_sku]
                         
-                        # Prepare Metafield
-                        meta = shopify.Metafield({
-                            'key': 'original_retail_price',
-                            'value': str(odoo_price),
-                            'type': 'number_decimal',
-                            'namespace': 'custom',
-                            'owner_resource': 'variant',
-                            'owner_id': v.id
-                        })
-                        
                         try:
-                            # We add it to the variant
-                            v.add_metafield(meta)
-                            # We mark dirty to save the product (optional, but safer to log)
+                            # Direct API Save for Metafield
+                            meta = shopify.Metafield({
+                                'key': 'original_retail_price',
+                                'value': str(odoo_price),
+                                'type': 'number_decimal',
+                                'namespace': 'custom',
+                                'owner_resource': 'variant',
+                                'owner_id': v.id
+                            })
+                            meta.save() # <--- THIS WAS MISSING
                             updated_count += 1
                         except Exception as e:
-                            print(f"Failed to set meta for {v.sku}: {e}")
+                            print(f"Failed to save meta for {v.sku}: {e}")
 
             if page.has_next_page():
                 page = page.next_page()
             else:
                 break
                 
-        log_event('Backfill', 'Success', f"Backfill Complete. Updated {updated_count} variants.", shop_url=shop_url)
+        log_event('Backfill', 'Success', f"Backfill Complete. REAL save performed on {updated_count} variants.", shop_url=shop_url)
 
 @app.route('/maintenance/run_price_backfill', methods=['GET'])
 @require_shopify_session
