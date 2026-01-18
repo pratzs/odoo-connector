@@ -3361,6 +3361,91 @@ def api_get_unmapped_products():
 # t = threading.Thread(target=run_schedule, daemon=True)
 # t.start()
 
+# ==========================================
+# TEMPORARY ONE-OFF SCRIPT
+# ==========================================
+def task_one_off_price_backfill(shop_url):
+    """
+    Scans ALL Shopify products and updates 'custom.original_retail_price'
+    from Odoo. Ignores everything else.
+    """
+    with app.app_context():
+        # 1. Setup
+        odoo = get_odoo_connection(shop_url)
+        if not odoo or not setup_shopify_session(shop_url): 
+            log_event('Backfill', 'Error', "Connection failed", shop_url=shop_url)
+            return
+            
+        company_id = get_config('odoo_company_id', shop_url=shop_url)
+        log_event('Backfill', 'Info', "Starting One-Off Price Metafield Sync...", shop_url=shop_url)
+
+        # 2. Fetch ALL Odoo Prices (Fast Map)
+        # We fetch simple fields to keep it light
+        try:
+            domain = [['sale_ok', '=', True], ['active', '=', True]]
+            if company_id: domain.append(['company_id', '=', int(company_id)])
+            
+            odoo_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'product.product', 'search_read', [domain], 
+                {'fields': ['default_code', 'list_price']})
+                
+            # Create a dictionary: {'SKU123': 20.00, 'SKU456': 50.00}
+            price_map = {p['default_code']: p['list_price'] for p in odoo_data if p.get('default_code')}
+            log_event('Backfill', 'Info', f"Loaded {len(price_map)} prices from Odoo.", shop_url=shop_url)
+        except Exception as e:
+            log_event('Backfill', 'Error', f"Odoo Fetch Failed: {e}", shop_url=shop_url)
+            return
+
+        # 3. Iterate Shopify Products
+        page = shopify.Product.find(limit=250, status='active')
+        updated_count = 0
+        processed_count = 0
+        
+        while page:
+            for sp in page:
+                processed_count += 1
+                dirty = False
+                
+                for v in sp.variants:
+                    # Check if we have a price for this SKU
+                    # We remove '-UNIT' suffix to match the base Odoo SKU if needed
+                    clean_sku = v.sku.replace('-UNIT', '') if v.sku else ""
+                    
+                    if clean_sku in price_map:
+                        odoo_price = price_map[clean_sku]
+                        
+                        # Prepare Metafield
+                        meta = shopify.Metafield({
+                            'key': 'original_retail_price',
+                            'value': str(odoo_price),
+                            'type': 'number_decimal',
+                            'namespace': 'custom',
+                            'owner_resource': 'variant',
+                            'owner_id': v.id
+                        })
+                        
+                        try:
+                            # We add it to the variant
+                            v.add_metafield(meta)
+                            # We mark dirty to save the product (optional, but safer to log)
+                            updated_count += 1
+                        except Exception as e:
+                            print(f"Failed to set meta for {v.sku}: {e}")
+
+            if page.has_next_page():
+                page = page.next_page()
+            else:
+                break
+                
+        log_event('Backfill', 'Success', f"Backfill Complete. Updated {updated_count} variants.", shop_url=shop_url)
+
+@app.route('/maintenance/run_price_backfill', methods=['GET'])
+@require_shopify_session
+def trigger_price_backfill():
+    shop_url = request.args.get('shop')
+    # Queue the job with a 1-hour timeout to ensure it finishes
+    q.enqueue(task_one_off_price_backfill, shop_url, job_timeout=3600)
+    return "✅ One-Off Price Backfill Queued. Check 'Live Logs' for progress."
     
 if __name__ == '__main__':
     app.run(debug=True)
