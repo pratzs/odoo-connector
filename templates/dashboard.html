@@ -213,57 +213,57 @@
                 </div>
             </div>
 
+            <div class="card p-4">
+                <div class="section-header">📦 Product Settings</div>
+                
+                <div class="d-flex gap-4 mb-3">
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="prodAutoCreate" {% if config.prod_auto_create %}checked{% endif %}>
+                        <label class="form-check-label" for="prodAutoCreate">Create new products</label>
+                    </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="prodAutoPublish" {% if config.prod_auto_publish %}checked{% endif %}>
+                        <label class="form-check-label" for="prodAutoPublish">Auto-publish</label>
+                    </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="prodSyncImages" {% if config.prod_sync_images %}checked{% endif %}>
+                        <label class="form-check-label" for="prodSyncImages">Sync Images</label>
+                    </div>
+                </div>
+
+                <hr>
+                <label class="form-label-sm mb-2">Field Mapping</label>
+                <div class="d-flex flex-wrap gap-3">
+                    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldTitle" {% if config.prod_sync_title %}checked{% endif %}> <label>Title</label></div>
+                    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldPrice" {% if config.prod_sync_price %}checked{% endif %}> <label>Price</label></div>
+                    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldDesc" {% if config.prod_sync_desc %}checked{% endif %}> <label>Desc</label></div>
+                    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldProductType" {% if config.prod_sync_type %}checked{% endif %}> <label>Type</label></div>
+                    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldVendor" {% if config.prod_sync_vendor %}checked{% endif %}> <label>Vendor</label></div>
+                    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldTags" {% if config.prod_sync_tags %}checked{% endif %}> <label>Tags</label></div>
+                    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldCost" {% if config.prod_sync_cost %}checked{% endif %}> <label>Cost Price</label></div>
+                    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldBarcode" {% if config.prod_sync_barcode %}checked{% endif %}> <label>Barcode</label></div>
+                    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldMetaVendorCode" {% if config.prod_sync_meta_vendor_code %}checked{% endif %}> <label>Metafield: Vendor Code</label></div>
+
+                    <div class="w-100 mt-2">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="fieldMetaOriginalPrice" {% if config.prod_sync_meta_original_price %}checked{% endif %}> 
+                            <label class="form-check-label fw-bold" for="fieldMetaOriginalPrice">Metafield: Original Retail Price (Shopify Plus)</label>
+                        </div>
+                        <div class="alert alert-secondary mt-1 mb-0 p-2 border-0" style="font-size: 12px; background-color: #f1f2f3;">
+                            <i class="bi bi-info-circle-fill me-1"></i> <strong>Setup Required:</strong><br>
+                            To use this, create a Metafield definition in <em>Shopify Admin > Settings > Custom Data > Variants</em>:<br>
+                            <ul class="mb-0 ps-3 mt-1">
+                                <li>Namespace and key: <code style="color: #d82c0d;">custom.original_retail_price</code></li>
+                                <li>Type: <strong>Decimal</strong> (Number)</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div class="row">
                 <div class="col-md-6">
                     <div class="card p-4 h-100">
-                        <div class="section-header">📦 Product Settings</div>
-                        
-                        <div class="form-check form-switch mb-2">
-                            <input class="form-check-input" type="checkbox" id="prodAutoCreate" {% if config.prod_auto_create %}checked{% endif %}>
-                            <label class="form-check-label" for="prodAutoCreate">Create new products</label>
-                        </div>
-                        <div class="form-check form-switch mb-2">
-                            <input class="form-check-input" type="checkbox" id="prodAutoPublish" {% if config.prod_auto_publish %}checked{% endif %}>
-                            <label class="form-check-label" for="prodAutoPublish">Auto-publish new products</label>
-                        </div>
-                        <div class="form-check form-switch mb-3">
-                            <input class="form-check-input" type="checkbox" id="prodSyncImages" {% if config.prod_sync_images %}checked{% endif %}>
-                            <label class="form-check-label" for="prodSyncImages">Sync Images</label>
-                        </div>
-
-                        <hr>
-<label class="form-label-sm mb-2">Field Mapping</label>
-<div class="d-flex flex-wrap gap-3">
-    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldTitle" {% if config.prod_sync_title %}checked{% endif %}> <label>Title</label></div>
-    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldPrice" {% if config.prod_sync_price %}checked{% endif %}> <label>Price</label></div>
-    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldDesc" {% if config.prod_sync_desc %}checked{% endif %}> <label>Desc</label></div>
-    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldProductType" {% if config.prod_sync_type %}checked{% endif %}> <label>Type</label></div>
-    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldVendor" {% if config.prod_sync_vendor %}checked{% endif %}> <label>Vendor</label></div>
-    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldTags" {% if config.prod_sync_tags %}checked{% endif %}> <label>Tags</label></div>
-    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldCost" {% if config.prod_sync_cost %}checked{% endif %}> <label>Cost Price</label></div>
-    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldBarcode" {% if config.prod_sync_barcode %}checked{% endif %}> <label>Barcode</label></div>
-
-    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldMetaVendorCode" {% if config.prod_sync_meta_vendor_code %}checked{% endif %}> <label>Metafield: Vendor Code</label></div>
-
-    <div class="w-100 mt-2">
-        <div class="form-check">
-            <input class="form-check-input" type="checkbox" id="fieldMetaOriginalPrice" {% if config.prod_sync_meta_original_price %}checked{% endif %}> 
-            <label class="form-check-label fw-bold" for="fieldMetaOriginalPrice">Metafield: Original Retail Price (Shopify Plus)</label>
-        </div>
-        
-        <div class="alert alert-secondary mt-1 mb-0 p-2 border-0" style="font-size: 12px; background-color: #f1f2f3;">
-            <i class="bi bi-info-circle-fill me-1"></i> <strong>Setup Required:</strong><br>
-            To use this, create a Metafield definition in <em>Shopify Admin > Settings > Custom Data > Variants</em>:<br>
-            <ul class="mb-0 ps-3 mt-1">
-                <li>Namespace and key: <code style="color: #d82c0d;">custom.original_retail_price</code></li>
-                <li>Type: <strong>Decimal</strong> (Number)</li>
-            </ul>
-        </div>
-    </div>
-</div>
-
-                <div class="col-md-6">
-                    <div class="card p-4 mb-3">
                         <div class="section-header">📊 Inventory Settings</div>
                         
                         <div class="mb-3">
@@ -288,8 +288,10 @@
                             <div id="locationList" class="small">Loading...</div>
                         </div>
                     </div>
+                </div>
 
-                    <div class="card p-4">
+                <div class="col-md-6">
+                    <div class="card p-4 h-100">
                         <div class="section-header">📧 Inventory Alerts</div>
                         <div class="mb-3">
                             <label class="form-label-sm">Alert Email Address</label>
@@ -347,24 +349,19 @@
                             <input type="text" class="form-control form-control-sm" id="custBlacklistTags" placeholder="Blacklist: tagA, tagB" value="{{ config.cust_blacklist_tags }}">
                         </div>
                         <hr>
-                        <label class="form-label-sm mb-2">Field Mapping</label>
                         <div class="form-check form-switch">
                             <input class="form-check-input" type="checkbox" id="custSyncVat" {% if config.cust_sync_vat %}checked{% endif %}>
-                            <label class="form-check-label" for="custSyncVat">Sync VAT & Tax Exempt Status</label>
+                            <label class="form-check-label" for="custSyncVat">Sync VAT & Tax Exempt</label>
                         </div>
                         <div class="form-check form-switch">
                             <input class="form-check-input" type="checkbox" id="custSyncSalesRep" {% if config.cust_sync_salesrep %}checked{% endif %}>
-                            <label class="form-check-label" for="custSyncSalesRep">Sync Salesperson (Metafield)</label>
+                            <label class="form-check-label" for="custSyncSalesRep">Sync Salesperson</label>
                         </div>
-                        <div class="mb-3 border p-2 rounded bg-light">
-                        <label class="form-label-sm fw-bold">🏢 Group Companies Exception List</label>
-                        <div class="form-text text-muted mb-1" style="font-size: 12px;">
-                            For these parent companies, the sync will use the <b>Site Name</b> (Child) instead of the Parent Name.
+                        <div class="mb-3 border p-2 rounded bg-light mt-2">
+                            <label class="form-label-sm fw-bold">🏢 Group Companies List</label>
+                            <input type="text" class="form-control form-control-sm" id="groupCompaniesList" 
+                                   placeholder="e.g. CSB Group, Z Energy" value="{{ config.group_companies_list }}">
                         </div>
-                        <input type="text" class="form-control form-control-sm" id="groupCompaniesList" 
-                               placeholder="e.g. CSB Group, Z Energy" value="{{ config.group_companies_list }}">
-                        <div class="form-text" style="font-size: 11px;">Comma-separated list of parent company names.</div>
-                    </div>
                     </div>
                 </div>
             </div>
