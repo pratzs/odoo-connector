@@ -232,21 +232,35 @@
                         </div>
 
                         <hr>
-                        <label class="form-label-sm mb-2">Field Mapping</label>
-                        <div class="d-flex flex-wrap gap-3">
-                            <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldTitle" {% if config.prod_sync_title %}checked{% endif %}> <label>Title</label></div>
-                            <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldPrice" {% if config.prod_sync_price %}checked{% endif %}> <label>Price</label></div>
-                            <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldDesc" {% if config.prod_sync_desc %}checked{% endif %}> <label>Desc</label></div>
-                            <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldProductType" {% if config.prod_sync_type %}checked{% endif %}> <label>Type</label></div>
-                            <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldVendor" {% if config.prod_sync_vendor %}checked{% endif %}> <label>Vendor</label></div>
-                            <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldTags" {% if config.prod_sync_tags %}checked{% endif %}> <label>Tags</label></div>
-                            <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldMetaVendorCode" {% if config.prod_sync_meta_vendor_code %}checked{% endif %}> <label>Vendor Code</label></div>
-                            <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldMetaOriginalPrice" {% if config.prod_sync_meta_original_price %}checked{% endif %}> <label>Metafield: Original Price(Shopify Plus Stores)</label></div>
-                            <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldCost" {% if config.prod_sync_cost %}checked{% endif %}> <label>Cost Price</label></div>
-                            <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldBarcode" {% if config.prod_sync_barcode %}checked{% endif %}> <label>Barcode</label></div>
-                        </div>
-                    </div>
-                </div>
+<label class="form-label-sm mb-2">Field Mapping</label>
+<div class="d-flex flex-wrap gap-3">
+    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldTitle" {% if config.prod_sync_title %}checked{% endif %}> <label>Title</label></div>
+    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldPrice" {% if config.prod_sync_price %}checked{% endif %}> <label>Price</label></div>
+    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldDesc" {% if config.prod_sync_desc %}checked{% endif %}> <label>Desc</label></div>
+    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldProductType" {% if config.prod_sync_type %}checked{% endif %}> <label>Type</label></div>
+    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldVendor" {% if config.prod_sync_vendor %}checked{% endif %}> <label>Vendor</label></div>
+    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldTags" {% if config.prod_sync_tags %}checked{% endif %}> <label>Tags</label></div>
+    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldCost" {% if config.prod_sync_cost %}checked{% endif %}> <label>Cost Price</label></div>
+    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldBarcode" {% if config.prod_sync_barcode %}checked{% endif %}> <label>Barcode</label></div>
+
+    <div class="form-check"><input class="form-check-input" type="checkbox" id="fieldMetaVendorCode" {% if config.prod_sync_meta_vendor_code %}checked{% endif %}> <label>Metafield: Vendor Code</label></div>
+
+    <div class="w-100 mt-2">
+        <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="fieldMetaOriginalPrice" {% if config.prod_sync_meta_original_price %}checked{% endif %}> 
+            <label class="form-check-label fw-bold" for="fieldMetaOriginalPrice">Metafield: Original Retail Price (Shopify Plus)</label>
+        </div>
+        
+        <div class="alert alert-secondary mt-1 mb-0 p-2 border-0" style="font-size: 12px; background-color: #f1f2f3;">
+            <i class="bi bi-info-circle-fill me-1"></i> <strong>Setup Required:</strong><br>
+            To use this, create a Metafield definition in <em>Shopify Admin > Settings > Custom Data > Variants</em>:<br>
+            <ul class="mb-0 ps-3 mt-1">
+                <li>Namespace and key: <code style="color: #d82c0d;">custom.original_retail_price</code></li>
+                <li>Type: <strong>Decimal</strong> (Number)</li>
+            </ul>
+        </div>
+    </div>
+</div>
 
                 <div class="col-md-6">
                     <div class="card p-4 mb-3">
