@@ -888,25 +888,26 @@ def sync_products_master(shop_url):
                 sp.variants = final_vars
                 sp.save()
                 
-               # === NEW: SYNC ORIGINAL PRICE METAFIELD ===
-                if sync_original_price_meta and sp.variants:
+              # === NEW: ORIGINAL RETAIL PRICE METAFIELD (Product Level) ===
+                if sync_original_price_meta:
                     try:
-                        for v in sp.variants:
-                            d_data = next((d for d in desired_variants if d['sku'] == v.sku), None)
-                            
-                            if d_data:
-                                meta = shopify.Metafield({
-                                    'key': 'original_retail_price',
-                                    'value': str(d_data['price']),
-                                    'type': 'number_decimal',
-                                    'namespace': 'custom',
-                                    'owner_resource': 'variant',
-                                    'owner_id': v.id
-                                })
-                                meta.save() # <--- ADD THIS LINE HERE TOO
+                        # 1. Get the raw price directly from Odoo data
+                        price_val = str(p.get('list_price', 0.0))
+                        
+                        # 2. Create Metafield targeting the PRODUCT
+                        meta = shopify.Metafield({
+                            'key': 'original_retail_price',
+                            'value': price_val,
+                            'type': 'number_decimal',
+                            'namespace': 'custom',
+                            'owner_resource': 'product', # <--- TARGETS PRODUCT
+                            'owner_id': sp.id
+                        })
+                        # 3. Save immediately
+                        sp.add_metafield(meta)
+                        
                     except Exception as e:
                         print(f"Metafield Price Error for {sku}: {e}")
-                # ==========================================
                 
                 if sp.variants:
                     for v in sp.variants:
