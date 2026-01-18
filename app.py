@@ -887,32 +887,29 @@ def sync_products_master(shop_url):
 
                 sp.variants = final_vars
                 sp.save()
-
-                # === NEW: SYNC ORIGINAL PRICE METAFIELD ===
-if sync_original_price_meta and sp.variants:
-    try:
-        # We iterate over the saved variants to ensure they have IDs
-        for v in sp.variants:
-            # Find the Odoo data for this specific variant SKU
-            d_data = next((d for d in desired_variants if d['sku'] == v.sku), None)
-            
-            if d_data:
-                # Odoo List Price is stored in d_data['price']
-                odoo_price = d_data['price']
                 
-                # Create/Update Variant Metafield
-                meta = shopify.Metafield({
-                    'key': 'original_retail_price',
-                    'value': str(odoo_price),
-                    'type': 'number_decimal', # Ensures it formats as currency
-                    'namespace': 'custom',
-                    'owner_resource': 'variant',
-                    'owner_id': v.id
-                })
-                v.add_metafield(meta)
-    except Exception as e:
-        print(f"Metafield Price Error for {sku}: {e}")
-# ==========================================
+                # === NEW: SYNC ORIGINAL PRICE METAFIELD ===
+                # This block handles the B2B/Plus "Original Price" requirement
+                if sync_original_price_meta and sp.variants:
+                    try:
+                        for v in sp.variants:
+                            # Find Odoo data for this variant (supports both Unit and Pack)
+                            d_data = next((d for d in desired_variants if d['sku'] == v.sku), None)
+                            
+                            if d_data:
+                                # Create Metafield
+                                meta = shopify.Metafield({
+                                    'key': 'original_retail_price',
+                                    'value': str(d_data['price']),
+                                    'type': 'number_decimal',
+                                    'namespace': 'custom',
+                                    'owner_resource': 'variant',
+                                    'owner_id': v.id
+                                })
+                                v.add_metafield(meta)
+                    except Exception as e:
+                        print(f"Metafield Price Error for {sku}: {e}")
+                # ==========================================
                 
                 if sp.variants:
                     for v in sp.variants:
