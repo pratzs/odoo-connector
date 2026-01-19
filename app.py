@@ -880,6 +880,7 @@ def sync_products_master(shop_url):
                     match.sku = des['sku']
                     if sync_price: 
                         match.price = des['price']
+                        match.compare_at_price = des['price']
                     if sync_barcode and des['barcode']: 
                         match.barcode = des['barcode']
                     match.inventory_management = 'shopify'
@@ -3367,13 +3368,13 @@ def api_get_unmapped_products():
 
 
 # ==========================================
-# FINAL SMART BACKFILL: Max Price Logic
+# SUPER BACKFILL: Metafield + Compare-At Price
 # ==========================================
 def task_backfill_price_graphql(shop_url):
     """
-    1. Fixes '0.00' by picking the HIGHEST price if duplicate SKUs exist.
-    2. Checks 'lst_price' fallback if 'list_price' is empty.
-    3. Sends Money Object to satisfy Shopify GraphQL.
+    1. Fetches Odoo Price (Smart Context + Max Price logic).
+    2. Updates Product Metafield 'original_retail_price' (Money Type).
+    3. Updates Variant 'compareAtPrice' (Standard Field).
     """
     with app.app_context():
         # 1. Setup
@@ -3384,22 +3385,13 @@ def task_backfill_price_graphql(shop_url):
             
         company_id = get_config('odoo_company_id', shop_url=shop_url)
         
-        # 2. Get Shop Currency & Verify Company
+        # 2. Get Shop Currency
         try:
             shop_info = shopify.Shop.current()
             currency_code = shop_info.currency 
-            
-            # Diagnostic: Check which company Odoo thinks we are
-            if company_id:
-                comp_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
-                    'res.company', 'read', [int(company_id)], {'fields': ['name']})
-                comp_name = comp_data[0]['name'] if comp_data else "Unknown"
-                log_event('Backfill', 'Info', f"Syncing as Odoo Company: {comp_name} (ID {company_id}) | Currency: {currency_code}", shop_url=shop_url)
-            else:
-                log_event('Backfill', 'Warning', "No Odoo Company ID set! Prices might be 0.00 if multi-company.", shop_url=shop_url)
-                
+            log_event('Backfill', 'Info', f"Starting Super Sync. Company: {company_id} | Currency: {currency_code}", shop_url=shop_url)
         except Exception as e:
-            log_event('Backfill', 'Error', f"Setup Error: {e}", shop_url=shop_url)
+            log_event('Backfill', 'Error', f"Currency Fetch Error: {e}", shop_url=shop_url)
             return
 
         # 3. Fetch Odoo Prices (Smart Fetch)
@@ -3409,37 +3401,25 @@ def task_backfill_price_graphql(shop_url):
             
             ctx = {'company_id': int(company_id)} if company_id else {}
             
-            # Fetch BOTH price fields to be safe
             odoo_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                 'product.product', 'search_read', [domain], 
                 {'fields': ['default_code', 'list_price', 'lst_price'], 'context': ctx}) 
             
-            # --- SMART PRICE MAP (Highest Price Wins) ---
-            price_map = {}
+            price_map = {p['default_code']: p['list_price'] for p in odoo_data if p.get('default_code')}
+            
+            # Use max price logic for duplicates
             for p in odoo_data:
                 sku = p.get('default_code')
                 if not sku: continue
-                
-                # Try list_price, fallback to lst_price
                 price = p.get('list_price', 0.0)
                 if price == 0.0: price = p.get('lst_price', 0.0)
                 
-                # If we have seen this SKU before, keep the HIGHER price
-                # (Fixes issue where a 0.00 duplicate overrides the real product)
                 if sku in price_map:
-                    if price > price_map[sku]:
-                        price_map[sku] = price
+                    if price > price_map[sku]: price_map[sku] = price
                 else:
                     price_map[sku] = price
 
             log_event('Backfill', 'Info', f"Loaded {len(price_map)} unique SKUs from Odoo.", shop_url=shop_url)
-            
-            # Debug A0003 specifically
-            if 'A0003' in price_map:
-                print(f"DEBUG: Price for A0003 is {price_map['A0003']}")
-            else:
-                print("DEBUG: A0003 not found in Odoo export!")
-
         except Exception as e:
             log_event('Backfill', 'Error', f"Odoo Fetch Failed: {e}", shop_url=shop_url)
             return
@@ -3449,6 +3429,8 @@ def task_backfill_price_graphql(shop_url):
         count = 0
         errors = 0
         
+        client = shopify.GraphQL()
+
         while page:
             for sp in page:
                 ref_sku = sp.variants[0].sku if sp.variants else None
@@ -3458,48 +3440,75 @@ def task_backfill_price_graphql(shop_url):
                     odoo_price = price_map[ref_sku]
                     
                     if float(odoo_price) == 0.0:
-                        # Skip sending 0.00 to avoid overwriting valid data
-                        continue
+                        continue # Skip zero prices
 
+                    # IDs for GraphQL
                     product_gid = f"gid://shopify/Product/{sp.id}"
+                    variant_gid = f"gid://shopify/ProductVariant/{sp.variants[0].id}"
                     
+                    # -------------------------------------------------------
+                    # ACTION 1: UPDATE PRODUCT METAFIELD (Money Type)
+                    # -------------------------------------------------------
                     money_value = json.dumps({
                         "amount": str(odoo_price),
                         "currency_code": currency_code
                     })
 
-                    mutation = """
+                    mutation_meta = """
                     mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
                       metafieldsSet(metafields: $metafields) {
-                        metafields { key }
                         userErrors { field message }
                       }
                     }
                     """
-                    
-                    variables = {
-                        "metafields": [
-                            {
-                                "ownerId": product_gid,
-                                "namespace": "custom",
-                                "key": "original_retail_price",
-                                "type": "money", 
-                                "value": money_value
-                            }
-                        ]
+                    vars_meta = {
+                        "metafields": [{
+                            "ownerId": product_gid,
+                            "namespace": "custom",
+                            "key": "original_retail_price",
+                            "type": "money", 
+                            "value": money_value
+                        }]
                     }
                     
+                    # -------------------------------------------------------
+                    # ACTION 2: UPDATE VARIANT COMPARE-AT PRICE
+                    # -------------------------------------------------------
+                    mutation_variant = """
+                    mutation productVariantUpdate($input: ProductVariantInput!) {
+                      productVariantUpdate(input: $input) {
+                        userErrors { field message }
+                      }
+                    }
+                    """
+                    vars_variant = {
+                        "input": {
+                            "id": variant_gid,
+                            "compareAtPrice": str(odoo_price) # Just string "41.00"
+                        }
+                    }
+
+                    # Execute Both
                     try:
-                        client = shopify.GraphQL()
-                        result = client.execute(mutation, variables)
-                        res_json = json.loads(result)
+                        # 1. Run Metafield Update
+                        res_meta = client.execute(mutation_meta, vars_meta)
+                        json_meta = json.loads(res_meta)
+                        err_meta = json_meta.get('data', {}).get('metafieldsSet', {}).get('userErrors', [])
                         
-                        user_errors = res_json.get('data', {}).get('metafieldsSet', {}).get('userErrors', [])
-                        if user_errors:
-                            print(f"❌ Failed {ref_sku}: {user_errors[0]['message']}")
+                        # 2. Run Compare-At Update
+                        res_var = client.execute(mutation_variant, vars_variant)
+                        json_var = json.loads(res_var)
+                        err_var = json_var.get('data', {}).get('productVariantUpdate', {}).get('userErrors', [])
+
+                        if err_meta or err_var:
+                            msg = ""
+                            if err_meta: msg += f"Meta Error: {err_meta[0]['message']} "
+                            if err_var: msg += f"Variant Error: {err_var[0]['message']}"
+                            print(f"❌ Failed {ref_sku}: {msg}")
                             errors += 1
                         else:
                             count += 1
+                            
                     except Exception as e:
                         print(f"GraphQL Crash {ref_sku}: {e}")
 
@@ -3508,13 +3517,13 @@ def task_backfill_price_graphql(shop_url):
             else:
                 break
                 
-        log_event('Backfill', 'Success', f"Done. Updated {count}. Errors {errors}.", shop_url=shop_url)
+        log_event('Backfill', 'Success', f"Super Sync Done. Updated {count} products (Metafield + CompareAt). Errors: {errors}.", shop_url=shop_url)
 
 @app.route('/maintenance/run_price_backfill', methods=['GET'])
 def trigger_price_backfill():
     shop_url = request.args.get('shop')
     q.enqueue(task_backfill_price_graphql, shop_url, job_timeout=3600)
-    return "✅ GraphQL Smart Backfill Queued."
+    return "✅ Super Backfill Queued (Metafields + CompareAt)."
     
 if __name__ == '__main__':
     app.run(debug=True)
