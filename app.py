@@ -663,7 +663,10 @@ def process_order_data(data, odoo_client, shop_url):
 def sync_products_master(shop_url):
     """
     DYNAMIC Odoo -> Shopify Product Sync (v6.0 - Public App).
-    UPDATED: Includes Smart Context, Money Metafields, and Compare-At Price.
+    UPDATED: 
+    1. Fixes Metafield Type ('money') and Format (JSON).
+    2. Fixes Compare-At Price (Matches Price).
+    3. Fixes 0.00 Prices (Adds Company Context).
     """
     with app.app_context():
         # 1. Load Shop Data from DB
@@ -757,7 +760,7 @@ def sync_products_master(shop_url):
             ]
             
             try:
-                # FIX: PASS CONTEXT TO AVOID 0.00 PRICES
+                # FIX 1: PASS CONTEXT TO AVOID 0.00 PRICES
                 ctx = {'company_id': int(company_id)}
                 odoo_products = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                     'product.product', 'read', [batch_ids], {'fields': fields, 'context': ctx})
@@ -779,21 +782,17 @@ def sync_products_master(shop_url):
                 main_uom_name = 'Outer'
 
                 if p.get('sh_is_secondary_unit') is True:
-                    # 1. Try Qty Per Pack
                     qty_pack = p.get('qty_per_pack', 0.0)
                     if qty_pack and float(qty_pack) > 1.0:
                         is_pack = True
                         ratio = float(qty_pack)
                         main_uom_name = f"{int(ratio)} per pack"
-                    
-                    # 2. Fallback to Secondary UOM
                     elif p.get('sh_secondary_uom'):
                         sec_uom_id = p['sh_secondary_uom'][0]
                         if sec_uom_id in uom_map:
                             ratio = uom_map[sec_uom_id]['ratio']
                             if ratio > 1.0: is_pack = True
                     
-                    # 3. Base UOM Name
                     if p.get('uom_id'):
                         if len(p['uom_id']) > 1 and p['uom_id'][1]:
                             if not main_uom_name or "per pack" not in main_uom_name:
@@ -875,7 +874,6 @@ def sync_products_master(shop_url):
                 final_vars = []
                 
                 for des in desired_variants:
-                    # Safely look for matches in existing variants
                     match = next((v for v in existing_vars if getattr(v, 'sku', None) == des['sku']), None)
                     if not match and des['option1'] == 'Default Title':
                           match = next((v for v in existing_vars), None)
@@ -886,7 +884,7 @@ def sync_products_master(shop_url):
                     
                     if sync_price: 
                         match.price = des['price']
-                        # FIX: Update Compare At Price to match Odoo Price
+                        # FIX 2: UPDATE COMPARE-AT PRICE TO MATCH PRICE
                         match.compare_at_price = des['price'] 
                         
                     if sync_barcode and des['barcode']: 
@@ -902,13 +900,13 @@ def sync_products_master(shop_url):
                     try:
                         price_val = str(p.get('list_price', 0.0))
                         
-                        # FIX: Format as MONEY JSON
+                        # FIX 3: FORMAT AS MONEY JSON FOR SHOPIFY
                         val_json = json.dumps({"amount": price_val, "currency_code": currency_code})
                         
                         meta = shopify.Metafield({
                             'key': 'original_retail_price',
                             'value': val_json,
-                            'type': 'money', # FIX: Changed from number_decimal
+                            'type': 'money', # FIX 4: Use 'money' type
                             'namespace': 'custom',
                             'owner_resource': 'product',
                             'owner_id': sp.id
