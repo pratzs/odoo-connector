@@ -3363,12 +3363,12 @@ def api_get_unmapped_products():
 
 
 # ==========================================
-# CORRECTED BACKFILL: PRODUCT LEVEL
+# NUCLEAR OPTION: GRAPHQL WRITE (Bypasses Library Bugs)
 # ==========================================
-def task_one_off_price_backfill(shop_url):
+def task_backfill_price_graphql(shop_url):
     """
-    Scans ALL Shopify products and updates 'custom.original_retail_price'
-    on the PRODUCT level (not Variant).
+    Writes Metafields using raw GraphQL. 
+    This bypasses any issues with the Python library's 'save()' method.
     """
     with app.app_context():
         # 1. Setup
@@ -3378,9 +3378,9 @@ def task_one_off_price_backfill(shop_url):
             return
             
         company_id = get_config('odoo_company_id', shop_url=shop_url)
-        log_event('Backfill', 'Info', "Starting Product-Level Price Sync...", shop_url=shop_url)
+        log_event('Backfill', 'Info', "Starting GraphQL Price Sync...", shop_url=shop_url)
 
-        # 2. Fetch ALL Odoo Prices
+        # 2. Fetch Odoo Prices
         try:
             domain = [['sale_ok', '=', True], ['active', '=', True]]
             if company_id: domain.append(['company_id', '=', int(company_id)])
@@ -3397,46 +3397,84 @@ def task_one_off_price_backfill(shop_url):
 
         # 3. Iterate Shopify Products
         page = shopify.Product.find(limit=250, status='active')
-        updated_count = 0
+        count = 0
+        errors = 0
         
         while page:
             for sp in page:
-                # Get SKU from first variant to find the match
                 ref_sku = sp.variants[0].sku if sp.variants else None
                 if ref_sku and "-UNIT" in ref_sku: ref_sku = ref_sku.replace("-UNIT", "")
-                
+
                 if ref_sku and ref_sku in price_map:
                     odoo_price = price_map[ref_sku]
                     
+                    # FORMATTING: GraphQL requires GID string
+                    product_gid = f"gid://shopify/Product/{sp.id}"
+                    
+                    # Mutation: Direct Write
+                    mutation = """
+                    mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+                      metafieldsSet(metafields: $metafields) {
+                        metafields {
+                          key
+                          value
+                        }
+                        userErrors {
+                          field
+                          message
+                        }
+                      }
+                    }
+                    """
+                    
+                    variables = {
+                        "metafields": [
+                            {
+                                "ownerId": product_gid,
+                                "namespace": "custom",
+                                "key": "original_retail_price",
+                                "type": "number_decimal",
+                                "value": str(odoo_price) # Ensures "20.0" format
+                            }
+                        ]
+                    }
+                    
                     try:
-                        # --- TARGET PRODUCT RESOURCE ---
-                        meta = shopify.Metafield({
-                            'key': 'original_retail_price',
-                            'value': str(odoo_price),
-                            'type': 'number_decimal',
-                            'namespace': 'custom',
-                            'owner_resource': 'product', # <--- CHANGED TO PRODUCT
-                            'owner_id': sp.id            # <--- CHANGED TO PRODUCT ID
-                        })
-                        meta.save() # Force API save
-                        updated_count += 1
+                        client = shopify.GraphQL()
+                        result = client.execute(mutation, variables)
+                        res_json = json.loads(result)
+                        
+                        # CHECK FOR ERRORS
+                        user_errors = res_json.get('data', {}).get('metafieldsSet', {}).get('userErrors', [])
+                        if user_errors:
+                            err_msg = user_errors[0]['message']
+                            print(f"❌ Failed {ref_sku}: {err_msg}")
+                            errors += 1
+                        else:
+                            count += 1
+                            if count <= 5: print(f"✅ Success {ref_sku}: {odoo_price}")
+                            
                     except Exception as e:
-                        print(f"Failed to save meta for {ref_sku}: {e}")
+                        print(f"GraphQL Crash {ref_sku}: {e}")
 
             if page.has_next_page():
                 page = page.next_page()
             else:
                 break
                 
-        log_event('Backfill', 'Success', f"Backfill Complete. Updated {updated_count} PRODUCTS.", shop_url=shop_url)
+        if errors > 0:
+            log_event('Backfill', 'Warning', f"Completed with issues. Updated: {count}. FAILED: {errors}. Check Live Logs.", shop_url=shop_url)
+        else:
+            log_event('Backfill', 'Success', f"GraphQL Sync Complete. Updated {count} products successfully.", shop_url=shop_url)
 
+# --- SINGLE ROUTE DEFINITION (Use this one only!) ---
 @app.route('/maintenance/run_price_backfill', methods=['GET'])
 @require_shopify_session
 def trigger_price_backfill():
     shop_url = request.args.get('shop')
-    # Queue the job with a 1-hour timeout to ensure it finishes
-    q.enqueue(task_one_off_price_backfill, shop_url, job_timeout=3600)
-    return "✅ One-Off Price Backfill Queued. Check 'Live Logs' for progress."
+    # Queues the NEW GraphQL task
+    q.enqueue(task_backfill_price_graphql, shop_url, job_timeout=3600)
+    return "✅ GraphQL Backfill Queued. Check Live Logs for detailed error reports."
     
 if __name__ == '__main__':
     app.run(debug=True)
