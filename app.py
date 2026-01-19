@@ -663,7 +663,7 @@ def process_order_data(data, odoo_client, shop_url):
 def sync_products_master(shop_url):
     """
     DYNAMIC Odoo -> Shopify Product Sync (v6.0 - Public App).
-    FIX: Passes shop_url to all helpers to prevent "Silent Skip".
+    UPDATED: Includes Smart Context, Money Metafields, and Compare-At Price.
     """
     with app.app_context():
         # 1. Load Shop Data from DB
@@ -680,9 +680,13 @@ def sync_products_master(shop_url):
 
         # 3. Connect to Shopify (Dynamic)
         try:
-            # UPDATED: Use 2025-10
             session = shopify.Session(shop.shop_url, '2025-10', shop.access_token)
             shopify.ShopifyResource.activate_session(session)
+            
+            # FETCH CURRENCY ONCE (Required for Money Metafields)
+            shop_info = shopify.Shop.current()
+            currency_code = shop_info.currency
+            
         except Exception as e:
             log_event('System', 'Error', f"Shopify Auth Failed: {e}")
             return
@@ -724,7 +728,7 @@ def sync_products_master(shop_url):
                 uom_map[u['id']] = {'name': safe_name, 'ratio': float(u.get('factor_inv', 1.0))}
         except: pass
 
-        # --- CONFIGS (FIX: Pass shop_url to everything) ---
+        # --- CONFIGS ---
         sync_title = get_config('prod_sync_title', True, shop_url=shop_url)
         sync_price = get_config('prod_sync_price', True, shop_url=shop_url)
         sync_cost = get_config('prod_sync_cost', True, shop_url=shop_url)
@@ -753,8 +757,10 @@ def sync_products_master(shop_url):
             ]
             
             try:
+                # FIX: PASS CONTEXT TO AVOID 0.00 PRICES
+                ctx = {'company_id': int(company_id)}
                 odoo_products = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                    'product.product', 'read', [batch_ids], {'fields': fields})
+                    'product.product', 'read', [batch_ids], {'fields': fields, 'context': ctx})
             except Exception as e:
                 log_event('Product Sync', 'Error', f"Batch Read Error: {e}", shop_url=shop_url)
                 continue
@@ -831,7 +837,6 @@ def sync_products_master(shop_url):
                     })
 
                 # --- SHOPIFY ACTIONS ---
-                # FIX: Must pass shop_url to find the product!
                 shopify_id = find_shopify_product_by_sku(sku, shop_url=shop_url)
                 sp = None
                 
@@ -878,9 +883,12 @@ def sync_products_master(shop_url):
                     
                     match.option1 = des['option1']
                     match.sku = des['sku']
+                    
                     if sync_price: 
                         match.price = des['price']
-                        match.compare_at_price = des['price']
+                        # FIX: Update Compare At Price to match Odoo Price
+                        match.compare_at_price = des['price'] 
+                        
                     if sync_barcode and des['barcode']: 
                         match.barcode = des['barcode']
                     match.inventory_management = 'shopify'
@@ -889,30 +897,24 @@ def sync_products_master(shop_url):
                 sp.variants = final_vars
                 sp.save()
                 
-             # === NEW: ORIGINAL RETAIL PRICE METAFIELD (Product Level) ===
+                # === NEW: ORIGINAL RETAIL PRICE METAFIELD (Product Level) ===
                 if sync_original_price_meta:
                     try:
-                        # 1. Get Currency (You might want to cache this or fetch once at top of function)
-                        # For optimization, assume shop.currency is synced or fetch it once:
-                        # cur = shopify.Shop.current().currency 
-                        
                         price_val = str(p.get('list_price', 0.0))
                         
-                        # FORMAT FOR MONEY TYPE
-                        # Note: You need to fetch 'currency_code' once at the top of sync_products_master
-                        # e.g., currency_code = shopify.Shop.current().currency
-                        
+                        # FIX: Format as MONEY JSON
                         val_json = json.dumps({"amount": price_val, "currency_code": currency_code})
-
+                        
                         meta = shopify.Metafield({
                             'key': 'original_retail_price',
                             'value': val_json,
-                            'type': 'money', # <--- Update this from 'number_decimal'
+                            'type': 'money', # FIX: Changed from number_decimal
                             'namespace': 'custom',
-                            'owner_resource': 'product', 
+                            'owner_resource': 'product',
                             'owner_id': sp.id
                         })
                         meta.save()
+                        
                     except Exception as e:
                         print(f"Metafield Price Error for {sku}: {e}")
                 
@@ -944,7 +946,6 @@ def sync_products_master(shop_url):
                     except: pass
 
                 if sync_images and p.get('image_1920'):
-                      # --- SAFE ATTRIBUTE ACCESS FOR IMAGES ---
                       if not hasattr(sp, 'images') or not sp.images:
                           try:
                             img_data = p['image_1920']
@@ -958,7 +959,6 @@ def sync_products_master(shop_url):
                     pm = ProductMap.query.filter_by(sku=sku).first()
                     if not pm:
                         v_id = sp.variants[0].id if sp.variants else '0'
-                        # FIX: shop_url is required for database entry security
                         pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=str(v_id), shop_url=shop_url)
                         db.session.add(pm)
                     pm.last_synced_at = datetime.utcnow()
@@ -3368,39 +3368,37 @@ def api_get_unmapped_products():
 
 
 # ==========================================
-# FINAL FIX: Fetch Company ID from Shop Table
+# ULTRA BACKFILL: Formatted Prices + Verification
 # ==========================================
 def task_backfill_price_graphql(shop_url):
+    """
+    1. Fetches Odoo Price (Smart Context + Max Price).
+    2. Formats Price to '0.00' (Critical for Shopify).
+    3. Updates Metafield AND Compare-At Price.
+    4. Verifies the update immediately.
+    """
     with app.app_context():
-        # 1. Setup Connections
+        # 1. Setup
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): 
             log_event('Backfill', 'Error', "Connection failed", shop_url=shop_url)
             return
             
-        # --- FIX: GET COMPANY ID FROM SHOP TABLE ---
-        # (Previous version used get_config, which was wrong for your setup)
+        # Get Company ID from Shop Table (Correct Method)
         shop = Shop.query.filter_by(shop_url=shop_url).first()
         company_id = shop.odoo_company_id if shop else None
         
-        # 2. Get Shop Currency
+        # Get Currency
         try:
             shop_info = shopify.Shop.current()
             currency_code = shop_info.currency 
-            
-            # Log the status
-            log_event('Backfill', 'Info', f"Starting Super Sync. Company ID: {company_id} | Currency: {currency_code}", shop_url=shop_url)
-                
-        except Exception as e:
-            log_event('Backfill', 'Error', f"Setup Error: {e}", shop_url=shop_url)
-            return
+            log_event('Backfill', 'Info', f"Starting. Company: {company_id} | Currency: {currency_code}", shop_url=shop_url)
+        except: return
 
-        # 3. Fetch Odoo Prices (Smart Fetch)
+        # 2. Fetch Odoo Prices
         try:
             domain = [['sale_ok', '=', True], ['active', '=', True]]
             if company_id: domain.append(['company_id', '=', int(company_id)])
-            
-            # Context ensures we get the specific price for this company
             ctx = {'company_id': int(company_id)} if company_id else {}
             
             odoo_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
@@ -3411,26 +3409,24 @@ def task_backfill_price_graphql(shop_url):
             for p in odoo_data:
                 sku = p.get('default_code')
                 if not sku: continue
-                
                 price = p.get('list_price', 0.0)
                 if price == 0.0: price = p.get('lst_price', 0.0)
                 
-                # Max Price Logic for duplicates
+                # Max Price Logic
                 if sku in price_map:
                     if price > price_map[sku]: price_map[sku] = price
                 else:
                     price_map[sku] = price
 
-            log_event('Backfill', 'Info', f"Loaded {len(price_map)} unique SKUs from Odoo.", shop_url=shop_url)
+            log_event('Backfill', 'Info', f"Loaded {len(price_map)} SKUs.", shop_url=shop_url)
         except Exception as e:
-            log_event('Backfill', 'Error', f"Odoo Fetch Failed: {e}", shop_url=shop_url)
+            log_event('Backfill', 'Error', f"Odoo Error: {e}", shop_url=shop_url)
             return
 
-        # 4. Iterate Shopify Products
+        # 3. Update Loop
         page = shopify.Product.find(limit=250, status='active')
         count = 0
         errors = 0
-        
         client = shopify.GraphQL()
 
         while page:
@@ -3439,88 +3435,77 @@ def task_backfill_price_graphql(shop_url):
                 if ref_sku and "-UNIT" in ref_sku: ref_sku = ref_sku.replace("-UNIT", "")
 
                 if ref_sku and ref_sku in price_map:
-                    odoo_price = price_map[ref_sku]
-                    
-                    if float(odoo_price) == 0.0:
-                        continue 
+                    raw_price = float(price_map[ref_sku])
+                    if raw_price == 0.0: continue
+
+                    # FORMATTING: Force 2 decimals (e.g. "41.0" -> "41.00")
+                    price_str = "{:.2f}".format(raw_price)
 
                     product_gid = f"gid://shopify/Product/{sp.id}"
                     variant_gid = f"gid://shopify/ProductVariant/{sp.variants[0].id}"
                     
-                    # 1. Prepare Metafield (Money Type)
-                    money_value = json.dumps({
-                        "amount": str(odoo_price),
-                        "currency_code": currency_code
-                    })
-
-                    mutation_meta = """
-                    mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
-                      metafieldsSet(metafields: $metafields) {
+                    # Mutation: Update Both
+                    mutation = """
+                    mutation batchUpdate($meta: [MetafieldsSetInput!]!, $varInput: ProductVariantInput!) {
+                      metafieldsSet(metafields: $meta) {
+                        userErrors { field message }
+                      }
+                      productVariantUpdate(input: $varInput) {
+                        productVariant {
+                           compareAtPrice
+                        }
                         userErrors { field message }
                       }
                     }
                     """
-                    vars_meta = {
-                        "metafields": [{
+                    
+                    variables = {
+                        "meta": [{
                             "ownerId": product_gid,
                             "namespace": "custom",
                             "key": "original_retail_price",
                             "type": "money", 
-                            "value": money_value
-                        }]
-                    }
-                    
-                    # 2. Prepare Compare-At Price
-                    mutation_variant = """
-                    mutation productVariantUpdate($input: ProductVariantInput!) {
-                      productVariantUpdate(input: $input) {
-                        userErrors { field message }
-                      }
-                    }
-                    """
-                    vars_variant = {
-                        "input": {
+                            "value": json.dumps({"amount": price_str, "currency_code": currency_code})
+                        }],
+                        "varInput": {
                             "id": variant_gid,
-                            "compareAtPrice": str(odoo_price) 
+                            "compareAtPrice": price_str  # Sending "41.00"
                         }
                     }
 
                     try:
-                        # Execute Both
-                        res_meta = client.execute(mutation_meta, vars_meta)
-                        res_var = client.execute(mutation_variant, vars_variant)
+                        res = client.execute(mutation, variables)
+                        data = json.loads(res).get('data', {})
                         
-                        # Check for errors
-                        json_meta = json.loads(res_meta)
-                        err_meta = json_meta.get('data', {}).get('metafieldsSet', {}).get('userErrors', [])
+                        err_m = data.get('metafieldsSet', {}).get('userErrors', [])
+                        err_v = data.get('productVariantUpdate', {}).get('userErrors', [])
                         
-                        json_var = json.loads(res_var)
-                        err_var = json_var.get('data', {}).get('productVariantUpdate', {}).get('userErrors', [])
-
-                        if err_meta or err_var:
-                            msg = ""
-                            if err_meta: msg += f"Meta Error: {err_meta[0]['message']} "
-                            if err_var: msg += f"Variant Error: {err_var[0]['message']}"
+                        if err_m or err_v:
+                            msg = f"Meta: {err_m} | Var: {err_v}"
                             print(f"❌ Failed {ref_sku}: {msg}")
                             errors += 1
                         else:
                             count += 1
-                            
+                            # DEBUG: Verify specific SKUs
+                            if ref_sku in ['C123', 'A0003']:
+                                new_val = data.get('productVariantUpdate', {}).get('productVariant', {}).get('compareAtPrice')
+                                print(f"✅ VERIFIED {ref_sku}: Sent {price_str} -> Got {new_val}")
+
                     except Exception as e:
-                        print(f"GraphQL Crash {ref_sku}: {e}")
+                        print(f"Crash {ref_sku}: {e}")
 
             if page.has_next_page():
                 page = page.next_page()
             else:
                 break
                 
-        log_event('Backfill', 'Success', f"Super Sync Done. Updated {count} products. Errors: {errors}.", shop_url=shop_url)
+        log_event('Backfill', 'Success', f"Done. Updated {count}. Errors {errors}.", shop_url=shop_url)
 
 @app.route('/maintenance/run_price_backfill', methods=['GET'])
 def trigger_price_backfill():
     shop_url = request.args.get('shop')
     q.enqueue(task_backfill_price_graphql, shop_url, job_timeout=3600)
-    return "✅ Super Backfill Queued (Correct Company ID)."
+    return "✅ Ultra-Backfill Queued."
     
 if __name__ == '__main__':
     app.run(debug=True)
