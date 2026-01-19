@@ -3367,10 +3367,16 @@ def api_get_unmapped_products():
 
 
 # ==========================================
-# FINAL BACKFILL: GRAPHQL + ODOO CONTEXT FIX
+# FINAL SMART BACKFILL: Max Price Logic
 # ==========================================
 def task_backfill_price_graphql(shop_url):
+    """
+    1. Fixes '0.00' by picking the HIGHEST price if duplicate SKUs exist.
+    2. Checks 'lst_price' fallback if 'list_price' is empty.
+    3. Sends Money Object to satisfy Shopify GraphQL.
+    """
     with app.app_context():
+        # 1. Setup
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): 
             log_event('Backfill', 'Error', "Connection failed", shop_url=shop_url)
@@ -3378,34 +3384,67 @@ def task_backfill_price_graphql(shop_url):
             
         company_id = get_config('odoo_company_id', shop_url=shop_url)
         
-        # 1. Fetch Store Currency (Required for Money Type)
+        # 2. Get Shop Currency & Verify Company
         try:
             shop_info = shopify.Shop.current()
             currency_code = shop_info.currency 
-            log_event('Backfill', 'Info', f"Starting Sync. Company: {company_id} | Currency: {currency_code}", shop_url=shop_url)
+            
+            # Diagnostic: Check which company Odoo thinks we are
+            if company_id:
+                comp_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+                    'res.company', 'read', [int(company_id)], {'fields': ['name']})
+                comp_name = comp_data[0]['name'] if comp_data else "Unknown"
+                log_event('Backfill', 'Info', f"Syncing as Odoo Company: {comp_name} (ID {company_id}) | Currency: {currency_code}", shop_url=shop_url)
+            else:
+                log_event('Backfill', 'Warning', "No Odoo Company ID set! Prices might be 0.00 if multi-company.", shop_url=shop_url)
+                
         except Exception as e:
-            log_event('Backfill', 'Error', f"Currency Fetch Error: {e}", shop_url=shop_url)
+            log_event('Backfill', 'Error', f"Setup Error: {e}", shop_url=shop_url)
             return
 
-        # 2. Fetch Odoo Prices WITH CONTEXT (Fixes 0.00 issue)
+        # 3. Fetch Odoo Prices (Smart Fetch)
         try:
             domain = [['sale_ok', '=', True], ['active', '=', True]]
             if company_id: domain.append(['company_id', '=', int(company_id)])
             
-            # FIX: Pass 'context' so Odoo returns the price for THIS company, not the user's default
             ctx = {'company_id': int(company_id)} if company_id else {}
             
+            # Fetch BOTH price fields to be safe
             odoo_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                 'product.product', 'search_read', [domain], 
-                {'fields': ['default_code', 'list_price'], 'context': ctx}) # <--- ADDED CONTEXT
+                {'fields': ['default_code', 'list_price', 'lst_price'], 'context': ctx}) 
             
-            price_map = {p['default_code']: p['list_price'] for p in odoo_data if p.get('default_code')}
-            log_event('Backfill', 'Info', f"Loaded {len(price_map)} prices from Odoo.", shop_url=shop_url)
+            # --- SMART PRICE MAP (Highest Price Wins) ---
+            price_map = {}
+            for p in odoo_data:
+                sku = p.get('default_code')
+                if not sku: continue
+                
+                # Try list_price, fallback to lst_price
+                price = p.get('list_price', 0.0)
+                if price == 0.0: price = p.get('lst_price', 0.0)
+                
+                # If we have seen this SKU before, keep the HIGHER price
+                # (Fixes issue where a 0.00 duplicate overrides the real product)
+                if sku in price_map:
+                    if price > price_map[sku]:
+                        price_map[sku] = price
+                else:
+                    price_map[sku] = price
+
+            log_event('Backfill', 'Info', f"Loaded {len(price_map)} unique SKUs from Odoo.", shop_url=shop_url)
+            
+            # Debug A0003 specifically
+            if 'A0003' in price_map:
+                print(f"DEBUG: Price for A0003 is {price_map['A0003']}")
+            else:
+                print("DEBUG: A0003 not found in Odoo export!")
+
         except Exception as e:
             log_event('Backfill', 'Error', f"Odoo Fetch Failed: {e}", shop_url=shop_url)
             return
 
-        # 3. Iterate Shopify Products
+        # 4. Iterate Shopify Products
         page = shopify.Product.find(limit=250, status='active')
         count = 0
         errors = 0
@@ -3418,13 +3457,12 @@ def task_backfill_price_graphql(shop_url):
                 if ref_sku and ref_sku in price_map:
                     odoo_price = price_map[ref_sku]
                     
-                    # Log if we find a Zero price (Debugging)
                     if float(odoo_price) == 0.0:
-                        print(f"⚠️ Warning: Odoo returned 0.00 for {ref_sku}")
+                        # Skip sending 0.00 to avoid overwriting valid data
+                        continue
 
                     product_gid = f"gid://shopify/Product/{sp.id}"
                     
-                    # FORMAT VALUE FOR MONEY TYPE
                     money_value = json.dumps({
                         "amount": str(odoo_price),
                         "currency_code": currency_code
@@ -3445,7 +3483,7 @@ def task_backfill_price_graphql(shop_url):
                                 "ownerId": product_gid,
                                 "namespace": "custom",
                                 "key": "original_retail_price",
-                                "type": "money",  # MATCHES SHOPIFY DEF
+                                "type": "money", 
                                 "value": money_value
                             }
                         ]
@@ -3472,14 +3510,11 @@ def task_backfill_price_graphql(shop_url):
                 
         log_event('Backfill', 'Success', f"Done. Updated {count}. Errors {errors}.", shop_url=shop_url)
 
-# --- SINGLE ROUTE DEFINITION (Use this one only!) ---
 @app.route('/maintenance/run_price_backfill', methods=['GET'])
-@require_shopify_session
 def trigger_price_backfill():
     shop_url = request.args.get('shop')
-    # Queues the NEW GraphQL task
     q.enqueue(task_backfill_price_graphql, shop_url, job_timeout=3600)
-    return "✅ GraphQL Backfill Queued. Check Live Logs for detailed error reports."
+    return "✅ GraphQL Smart Backfill Queued."
     
 if __name__ == '__main__':
     app.run(debug=True)
