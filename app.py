@@ -3367,7 +3367,7 @@ def api_get_unmapped_products():
 
 
 # ==========================================
-# GRAPHQL WRITE (Fixed for 'Money' Type)
+# FINAL BACKFILL: GRAPHQL + ODOO CONTEXT FIX
 # ==========================================
 def task_backfill_price_graphql(shop_url):
     with app.app_context():
@@ -3381,23 +3381,26 @@ def task_backfill_price_graphql(shop_url):
         # 1. Fetch Store Currency (Required for Money Type)
         try:
             shop_info = shopify.Shop.current()
-            currency_code = shop_info.currency # e.g. "NZD" or "USD"
-            log_event('Backfill', 'Info', f"Starting Sync. Store Currency: {currency_code}", shop_url=shop_url)
+            currency_code = shop_info.currency 
+            log_event('Backfill', 'Info', f"Starting Sync. Company: {company_id} | Currency: {currency_code}", shop_url=shop_url)
         except Exception as e:
-            log_event('Backfill', 'Error', f"Could not fetch shop currency: {e}", shop_url=shop_url)
+            log_event('Backfill', 'Error', f"Currency Fetch Error: {e}", shop_url=shop_url)
             return
 
-        # 2. Fetch Odoo Prices
+        # 2. Fetch Odoo Prices WITH CONTEXT (Fixes 0.00 issue)
         try:
             domain = [['sale_ok', '=', True], ['active', '=', True]]
             if company_id: domain.append(['company_id', '=', int(company_id)])
             
+            # FIX: Pass 'context' so Odoo returns the price for THIS company, not the user's default
+            ctx = {'company_id': int(company_id)} if company_id else {}
+            
             odoo_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                 'product.product', 'search_read', [domain], 
-                {'fields': ['default_code', 'list_price']})
+                {'fields': ['default_code', 'list_price'], 'context': ctx}) # <--- ADDED CONTEXT
             
             price_map = {p['default_code']: p['list_price'] for p in odoo_data if p.get('default_code')}
-            log_event('Backfill', 'Info', f"Loaded {len(price_map)} prices.", shop_url=shop_url)
+            log_event('Backfill', 'Info', f"Loaded {len(price_map)} prices from Odoo.", shop_url=shop_url)
         except Exception as e:
             log_event('Backfill', 'Error', f"Odoo Fetch Failed: {e}", shop_url=shop_url)
             return
@@ -3414,9 +3417,14 @@ def task_backfill_price_graphql(shop_url):
 
                 if ref_sku and ref_sku in price_map:
                     odoo_price = price_map[ref_sku]
+                    
+                    # Log if we find a Zero price (Debugging)
+                    if float(odoo_price) == 0.0:
+                        print(f"⚠️ Warning: Odoo returned 0.00 for {ref_sku}")
+
                     product_gid = f"gid://shopify/Product/{sp.id}"
                     
-                    # FORMAT VALUE FOR MONEY TYPE: {"amount": "10.00", "currency_code": "NZD"}
+                    # FORMAT VALUE FOR MONEY TYPE
                     money_value = json.dumps({
                         "amount": str(odoo_price),
                         "currency_code": currency_code
@@ -3437,7 +3445,7 @@ def task_backfill_price_graphql(shop_url):
                                 "ownerId": product_gid,
                                 "namespace": "custom",
                                 "key": "original_retail_price",
-                                "type": "money",  # <--- CHANGED TO MATCH YOUR SHOPIFY DEF
+                                "type": "money",  # MATCHES SHOPIFY DEF
                                 "value": money_value
                             }
                         ]
@@ -3462,10 +3470,7 @@ def task_backfill_price_graphql(shop_url):
             else:
                 break
                 
-        if errors > 0:
-            log_event('Backfill', 'Warning', f"Done. Updated: {count}. Fails: {errors}. (Check definition types)", shop_url=shop_url)
-        else:
-            log_event('Backfill', 'Success', f"Success! Updated {count} products.", shop_url=shop_url)
+        log_event('Backfill', 'Success', f"Done. Updated {count}. Errors {errors}.", shop_url=shop_url)
 
 # --- SINGLE ROUTE DEFINITION (Use this one only!) ---
 @app.route('/maintenance/run_price_backfill', methods=['GET'])
