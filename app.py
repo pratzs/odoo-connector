@@ -3369,16 +3369,9 @@ def api_get_unmapped_products():
 # HYBRID BACKFILL: REST (Prices) + GRAPHQL (Metafields)
 # ==========================================
 def task_backfill_hybrid_prices(shop_url):
-    """
-    1. Fetches Odoo Prices (Smart Context).
-    2. Updates Compare-At Price using REST (Reliable).
-    3. Updates Metafield using GraphQL (Correct Type).
-    """
     with app.app_context():
-        # 1. Setup
         odoo = get_odoo_connection(shop_url)
-        if not odoo or not setup_shopify_session(shop_url): 
-            return
+        if not odoo or not setup_shopify_session(shop_url): return
             
         shop = Shop.query.filter_by(shop_url=shop_url).first()
         company_id = shop.odoo_company_id if shop else None
@@ -3406,7 +3399,6 @@ def task_backfill_hybrid_prices(shop_url):
                 price = p.get('list_price', 0.0)
                 if price == 0.0: price = p.get('lst_price', 0.0)
                 
-                # Max Price Logic
                 if sku in price_map:
                     if price > price_map[sku]: price_map[sku] = price
                 else:
@@ -3417,17 +3409,14 @@ def task_backfill_hybrid_prices(shop_url):
             log_event('Backfill', 'Error', f"Odoo Error: {e}", shop_url=shop_url)
             return
 
-        # 3. Update Loop (REST API)
-        # using REST is safer for 'compare_at_price' than GraphQL mutations
-        page = shopify.Product.find(limit=50) # REST Object
+        # 3. Update Loop
+        page = shopify.Product.find(limit=50) 
         count = 0
         gql_client = shopify.GraphQL()
 
         while page:
             for sp in page:
                 needs_save = False
-                
-                # Check all variants
                 for v in sp.variants:
                     sku = v.sku
                     if sku and "-UNIT" in sku: sku = sku.replace("-UNIT", "")
@@ -3438,44 +3427,25 @@ def task_backfill_hybrid_prices(shop_url):
                         
                         price_str = "{:.2f}".format(raw_price)
                         
-                        # A. UPDATE REST OBJECT (Compare At)
-                        # Only update if different to avoid API throttling
+                        # REST Update for Compare At
                         if str(v.compare_at_price) != price_str:
                             v.compare_at_price = price_str
                             needs_save = True
                         
-                        # B. UPDATE GRAPHQL METAFIELD (Immediate)
+                        # GraphQL Update for Metafield
                         try:
                             product_gid = f"gid://shopify/Product/{sp.id}"
                             money_val = json.dumps({"amount": price_str, "currency_code": currency_code})
-                            
-                            mutation = """
-                            mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
-                              metafieldsSet(metafields: $metafields) {
-                                userErrors { field message }
-                              }
-                            }
-                            """
-                            variables = {
-                                "metafields": [{
-                                    "ownerId": product_gid,
-                                    "namespace": "custom",
-                                    "key": "original_retail_price",
-                                    "type": "money",
-                                    "value": money_val
-                                }]
-                            }
+                            mutation = """mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { field message } } }"""
+                            variables = {"metafields": [{"ownerId": product_gid, "namespace": "custom", "key": "original_retail_price", "type": "money", "value": money_val}]}
                             gql_client.execute(mutation, variables)
                         except: pass
 
-                # SAVE REST OBJECT (Updates Compare-At)
                 if needs_save:
                     try:
                         sp.save()
                         count += 1
-                        # Debug Log
-                        ref_sku = sp.variants[0].sku
-                        print(f"✅ REST Saved {ref_sku}: CompareAt set to {price_str}")
+                        print(f"✅ REST Saved {sp.id}")
                     except Exception as e:
                         print(f"Save Failed {sp.id}: {e}")
 
@@ -3489,6 +3459,7 @@ def task_backfill_hybrid_prices(shop_url):
 @app.route('/maintenance/run_price_backfill', methods=['GET'])
 def trigger_price_backfill():
     shop_url = request.args.get('shop')
+    # Use the HYBRID function now
     q.enqueue(task_backfill_hybrid_prices, shop_url, job_timeout=3600)
     return "✅ Hybrid Backfill Queued."
     
