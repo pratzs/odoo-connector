@@ -891,23 +891,27 @@ def sync_products_master(shop_url):
              # === NEW: ORIGINAL RETAIL PRICE METAFIELD (Product Level) ===
                 if sync_original_price_meta:
                     try:
-                        # 1. Get the raw price directly from Odoo data
+                        # 1. Get Currency (You might want to cache this or fetch once at top of function)
+                        # For optimization, assume shop.currency is synced or fetch it once:
+                        # cur = shopify.Shop.current().currency 
+                        
                         price_val = str(p.get('list_price', 0.0))
                         
-                        # 2. Create Metafield targeting the PRODUCT
+                        # FORMAT FOR MONEY TYPE
+                        # Note: You need to fetch 'currency_code' once at the top of sync_products_master
+                        # e.g., currency_code = shopify.Shop.current().currency
+                        
+                        val_json = json.dumps({"amount": price_val, "currency_code": currency_code})
+
                         meta = shopify.Metafield({
                             'key': 'original_retail_price',
-                            'value': price_val,
-                            'type': 'number_decimal',
+                            'value': val_json,
+                            'type': 'money', # <--- Update this from 'number_decimal'
                             'namespace': 'custom',
-                            'owner_resource': 'product', # <--- TARGETS PRODUCT
+                            'owner_resource': 'product', 
                             'owner_id': sp.id
                         })
-                        
-                        # 3. FIX: SAVE DIRECTLY TO API
-                        # sp.add_metafield(meta) <--- DELETE THIS LINE (It doesn't save)
-                        meta.save()            # <--- ADD THIS LINE (Forces the save)
-                        
+                        meta.save()
                     except Exception as e:
                         print(f"Metafield Price Error for {sku}: {e}")
                 
@@ -3363,22 +3367,25 @@ def api_get_unmapped_products():
 
 
 # ==========================================
-# NUCLEAR OPTION: GRAPHQL WRITE (Bypasses Library Bugs)
+# GRAPHQL WRITE (Fixed for 'Money' Type)
 # ==========================================
 def task_backfill_price_graphql(shop_url):
-    """
-    Writes Metafields using raw GraphQL. 
-    This bypasses any issues with the Python library's 'save()' method.
-    """
     with app.app_context():
-        # 1. Setup
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): 
             log_event('Backfill', 'Error', "Connection failed", shop_url=shop_url)
             return
             
         company_id = get_config('odoo_company_id', shop_url=shop_url)
-        log_event('Backfill', 'Info', "Starting GraphQL Price Sync...", shop_url=shop_url)
+        
+        # 1. Fetch Store Currency (Required for Money Type)
+        try:
+            shop_info = shopify.Shop.current()
+            currency_code = shop_info.currency # e.g. "NZD" or "USD"
+            log_event('Backfill', 'Info', f"Starting Sync. Store Currency: {currency_code}", shop_url=shop_url)
+        except Exception as e:
+            log_event('Backfill', 'Error', f"Could not fetch shop currency: {e}", shop_url=shop_url)
+            return
 
         # 2. Fetch Odoo Prices
         try:
@@ -3390,7 +3397,7 @@ def task_backfill_price_graphql(shop_url):
                 {'fields': ['default_code', 'list_price']})
             
             price_map = {p['default_code']: p['list_price'] for p in odoo_data if p.get('default_code')}
-            log_event('Backfill', 'Info', f"Loaded {len(price_map)} prices from Odoo.", shop_url=shop_url)
+            log_event('Backfill', 'Info', f"Loaded {len(price_map)} prices.", shop_url=shop_url)
         except Exception as e:
             log_event('Backfill', 'Error', f"Odoo Fetch Failed: {e}", shop_url=shop_url)
             return
@@ -3407,22 +3414,19 @@ def task_backfill_price_graphql(shop_url):
 
                 if ref_sku and ref_sku in price_map:
                     odoo_price = price_map[ref_sku]
-                    
-                    # FORMATTING: GraphQL requires GID string
                     product_gid = f"gid://shopify/Product/{sp.id}"
                     
-                    # Mutation: Direct Write
+                    # FORMAT VALUE FOR MONEY TYPE: {"amount": "10.00", "currency_code": "NZD"}
+                    money_value = json.dumps({
+                        "amount": str(odoo_price),
+                        "currency_code": currency_code
+                    })
+
                     mutation = """
                     mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
                       metafieldsSet(metafields: $metafields) {
-                        metafields {
-                          key
-                          value
-                        }
-                        userErrors {
-                          field
-                          message
-                        }
+                        metafields { key }
+                        userErrors { field message }
                       }
                     }
                     """
@@ -3433,8 +3437,8 @@ def task_backfill_price_graphql(shop_url):
                                 "ownerId": product_gid,
                                 "namespace": "custom",
                                 "key": "original_retail_price",
-                                "type": "number_decimal",
-                                "value": str(odoo_price) # Ensures "20.0" format
+                                "type": "money",  # <--- CHANGED TO MATCH YOUR SHOPIFY DEF
+                                "value": money_value
                             }
                         ]
                     }
@@ -3444,16 +3448,12 @@ def task_backfill_price_graphql(shop_url):
                         result = client.execute(mutation, variables)
                         res_json = json.loads(result)
                         
-                        # CHECK FOR ERRORS
                         user_errors = res_json.get('data', {}).get('metafieldsSet', {}).get('userErrors', [])
                         if user_errors:
-                            err_msg = user_errors[0]['message']
-                            print(f"❌ Failed {ref_sku}: {err_msg}")
+                            print(f"❌ Failed {ref_sku}: {user_errors[0]['message']}")
                             errors += 1
                         else:
                             count += 1
-                            if count <= 5: print(f"✅ Success {ref_sku}: {odoo_price}")
-                            
                     except Exception as e:
                         print(f"GraphQL Crash {ref_sku}: {e}")
 
@@ -3463,9 +3463,9 @@ def task_backfill_price_graphql(shop_url):
                 break
                 
         if errors > 0:
-            log_event('Backfill', 'Warning', f"Completed with issues. Updated: {count}. FAILED: {errors}. Check Live Logs.", shop_url=shop_url)
+            log_event('Backfill', 'Warning', f"Done. Updated: {count}. Fails: {errors}. (Check definition types)", shop_url=shop_url)
         else:
-            log_event('Backfill', 'Success', f"GraphQL Sync Complete. Updated {count} products successfully.", shop_url=shop_url)
+            log_event('Backfill', 'Success', f"Success! Updated {count} products.", shop_url=shop_url)
 
 # --- SINGLE ROUTE DEFINITION (Use this one only!) ---
 @app.route('/maintenance/run_price_backfill', methods=['GET'])
