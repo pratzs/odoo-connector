@@ -1,0 +1,221 @@
+# services/orders.py
+from datetime import datetime
+from models import db, ProcessedOrder, Shop, CustomerMap, Shop
+from utils import get_config, log_event, acquire_distributed_lock
+
+def process_order_data(data, odoo_client, shop_url): 
+    """
+    Syncs order with Distributed Redis Locking, Smart UOM Switching, and Date Filtering.
+    """
+    odoo = odoo_client
+    shopify_id = str(data.get('id', ''))
+    shopify_name = data.get('name')
+    
+    # 1. DEFINE LOCK KEY
+    lock_key = f"lock:order:{shopify_id}"
+
+    # 2. ACQUIRE LOCK
+    with acquire_distributed_lock(lock_key, timeout=30) as acquired:
+        if not acquired:
+            return True, "Skipped: Currently being processed by another worker (Redis Lock)"
+
+        # --- GUARD 0: DATE CHECK ---
+        try:
+            start_date_str = '2000-01-01' 
+            shop_record = Shop.query.filter_by(shop_url=shop_url).first()
+            if shop_record and getattr(shop_record, 'sync_start_date', None):
+                start_date_str = shop_record.sync_start_date
+
+            order_created_at = data.get('created_at', '')
+            if order_created_at:
+                order_date_iso = order_created_at.split('T')[0]
+                order_date_dt = datetime.strptime(order_date_iso, "%Y-%m-%d")
+                start_date_dt = datetime.strptime(start_date_str, "%Y-%m-%d")
+
+                if order_date_dt < start_date_dt:
+                    return True, f"Skipped: Order date ({order_date_iso}) is older than start date ({start_date_str})"
+        except Exception as e:
+            print(f"Date Check Warning for {shopify_name}: {e}")
+
+        # --- GUARD 1: SQL DATABASE CHECK ---
+        try:
+            exists = ProcessedOrder.query.get(shopify_id)
+            if exists:
+                return True, "Skipped: Found in Local Lock (Already Processed)"
+        except: pass 
+
+        # --- GUARD 2: Cancelled Checks ---
+        if data.get('cancelled_at'): return False, "Skipped: Order is Cancelled."
+
+        # --- LOCK IT PERMANENTLY IN DB ---
+        try:
+            new_lock = ProcessedOrder(shopify_id=shopify_id)
+            db.session.add(new_lock)
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            return True, "Skipped: Race Condition caught by DB Lock"
+
+        # ==========================================================
+        # ACTUAL ODOO SYNC STARTS HERE
+        # ==========================================================
+        try:
+            email = data.get('email') or data.get('contact_email')
+            client_ref = f"ONLINE_{shopify_name}"
+            company_id = get_config('odoo_company_id', shop_url=shop_url) 
+            
+            # Double Check Odoo
+            try:
+                existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                    'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
+                if existing_ids: return True, "Skipped: Order exists in Odoo."
+            except: pass
+
+            # 1. Handle Customer
+            partner = odoo.search_partner_by_email(email)
+            cust_data = data.get('customer', {})
+            def_address = data.get('billing_address') or data.get('shipping_address') or {}
+            
+            if not partner:
+                company_name = def_address.get('company')
+                person_name = f"{cust_data.get('first_name', '')} {cust_data.get('last_name', '')}".strip()
+                final_name = company_name if company_name else (person_name or email)
+                
+                vals = {
+                    'name': final_name, 'email': email, 'phone': cust_data.get('phone'),
+                    'street': def_address.get('address1'), 'city': def_address.get('city'),
+                    'zip': def_address.get('zip'), 'country_code': def_address.get('country_code'),
+                    'is_company': True, 'company_type': 'company'
+                }
+                if company_id: vals['company_id'] = int(company_id)
+                partner_id = odoo.create_partner(vals)
+                partner = {'id': partner_id, 'name': final_name}
+                
+                if shopify_id and data.get('customer', {}).get('id'):
+                    try:
+                        sh_cust_id = str(data['customer']['id'])
+                        cust_map_exists = CustomerMap.query.filter_by(shopify_customer_id=sh_cust_id, shop_url=shop_url).first()
+                        if not cust_map_exists:
+                            db.session.add(CustomerMap(
+                                shop_url=shop_url,
+                                shopify_customer_id=sh_cust_id, 
+                                odoo_partner_id=partner_id, 
+                                email=email
+                            ))
+                            db.session.commit()
+                    except Exception as e: 
+                        db.session.rollback()
+                        print(f"Customer Map Error: {e}")
+
+            # 2. Handle Addresses
+            main_partner_id = partner['id']
+            invoice_id = main_partner_id
+            shipping_id = main_partner_id
+
+            if data.get('billing_address'):
+                b = data['billing_address']
+                inv_data = {'name': f"{b.get('company') or partner['name']} (Invoice)", 'street': b.get('address1'), 'city': b.get('city'), 'zip': b.get('zip'), 'country_code': b.get('country_code'), 'phone': b.get('phone'), 'email': email}
+                invoice_id = odoo.find_or_create_child_address(main_partner_id, inv_data, type='invoice')
+
+            if data.get('shipping_address'):
+                s = data['shipping_address']
+                ship_data = {'name': f"{s.get('company') or partner['name']} (Delivery)", 'street': s.get('address1'), 'city': s.get('city'), 'zip': s.get('zip'), 'country_code': s.get('country_code'), 'phone': s.get('phone'), 'email': email}
+                shipping_id = odoo.find_or_create_child_address(main_partner_id, ship_data, type='delivery')
+            
+            sales_rep_id = odoo.get_partner_salesperson(main_partner_id) or odoo.uid
+
+            # 3. SMART UOM LOOKUP
+            unit_uom_id = None
+            try:
+                uom_names = ['Units', 'Unit', 'Piece', 'Pieces', 'PCE', 'ea', 'Each']
+                uom_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+                    'uom.uom', 'search', [[['name', 'in', uom_names]]])
+                if not uom_ids:
+                    uom_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+                        'uom.uom', 'search', [[['name', 'ilike', 'Unit']]])
+                if uom_ids: unit_uom_id = uom_ids[0]
+            except Exception as e:
+                print(f"UOM Lookup Error: {e}")
+
+            lines = []
+            for item in data.get('line_items', []):
+                raw_sku = item.get('sku')
+                if not raw_sku: continue
+
+                sku = raw_sku
+                is_unit_variant = False
+                if sku.endswith('-UNIT'):
+                    sku = sku.replace('-UNIT', '')
+                    is_unit_variant = True
+
+                product_id = odoo.search_product_by_sku(sku, company_id)
+                if not product_id:
+                    if not odoo.check_product_exists_by_sku(sku, company_id):
+                        try:
+                            new_p = {'name': item['name'], 'default_code': sku, 'list_price': float(item.get('price', 0)), 'type': 'product'}
+                            if company_id: new_p['company_id'] = int(company_id)
+                            odoo.create_product(new_p)
+                            product_id = odoo.search_product_by_sku(sku, company_id) 
+                        except: pass
+                
+                if product_id:
+                    price = float(item.get('price', 0))
+                    qty = int(item.get('quantity', 1))
+                    disc = float(item.get('total_discount', 0))
+                    pct = (disc / (price * qty)) * 100 if price > 0 else 0.0
+                    
+                    line_vals = {'product_id': product_id, 'product_uom_qty': qty, 'price_unit': price, 'name': item['name'], 'discount': pct}
+                    
+                    variant_title = (item.get('variant_title') or '').lower()
+                    title_indicates_unit = any(x in variant_title for x in ['unit', 'single', 'each', 'bottle', 'can', 'pce'])
+                    
+                    if unit_uom_id and (is_unit_variant or title_indicates_unit):
+                        line_vals['product_uom'] = unit_uom_id
+                        log_event('Order', 'Info', f"[UOM] Switched {raw_sku} to Unit UOM (ID: {unit_uom_id})", shop_url=shop_url)
+                    
+                    lines.append((0, 0, line_vals))
+
+            # Shipping
+            for ship_line in data.get('shipping_lines', []):
+                cost = float(ship_line.get('price', 0.0))
+                if cost >= 0:
+                    s_title = ship_line.get('title', 'Shipping')
+                    sp_id = odoo.search_product_by_name(s_title, company_id) or odoo.search_product_by_sku("SHIP_FEE", company_id)
+                    if not sp_id:
+                        try:
+                            sv = {'name': s_title, 'type': 'service', 'list_price': 0.0, 'default_code': 'SHIP_FEE'}
+                            if company_id: sv['company_id'] = int(company_id)
+                            odoo.create_product(sv)
+                            sp_id = odoo.search_product_by_sku("SHIP_FEE", company_id)
+                        except: pass
+                    if sp_id: lines.append((0, 0, {'product_id': sp_id, 'product_uom_qty': 1, 'price_unit': cost, 'name': s_title, 'discount': 0.0}))
+
+            if not lines: return False, "No valid lines"
+
+            gateway = data.get('gateway') or (data.get('payment_gateway_names')[0] if data.get('payment_gateway_names') else 'Shopify')
+            customer_note = data.get('note') or ""
+            note_text = f"Payment Gateway: {gateway}"
+            if customer_note: note_text = f"Customer Note: {customer_note}\n\n{note_text}"
+
+            vals = {
+                'name': client_ref, 'client_order_ref': client_ref, 'partner_id': main_partner_id, 
+                'partner_invoice_id': invoice_id, 'partner_shipping_id': shipping_id, 
+                'order_line': lines, 'user_id': sales_rep_id, 'state': 'draft', 'note': note_text
+            }
+            if company_id: vals['company_id'] = int(company_id)
+            
+            sync_tax_included = get_config('order_sync_tax', False, shop_url=shop_url)
+            odoo.create_sale_order(vals, context={'manual_price': True, 'tax_included': sync_tax_included})
+            
+            log_event('Order', 'Success', f"Synced {client_ref}", shop_url=shop_url)
+            return True, "Synced"
+
+        except Exception as e:
+            log_event('Order', 'Error', f"Error {shopify_name}: {e}", shop_url=shop_url)
+            try:
+                l = ProcessedOrder.query.get(shopify_id)
+                if l: 
+                    db.session.delete(l)
+                    db.session.commit()
+            except: pass
+            return False, str(e)
