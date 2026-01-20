@@ -107,7 +107,7 @@
     <ui-nav-menu>
         <a href="/" rel="home">Overview</a>
         <a href="/settings">Settings</a>
-        <a href="/maintenance">Maintenance</a>
+        <a href="/maintenance">Tools</a>
     </ui-nav-menu>
     
     <div id="tab-overview" class="tab-content-area active">
@@ -132,6 +132,13 @@
                     {{ config.last_order_sync_success if config.last_order_sync_success else 'Never' }}
                 </small>
             </div>
+            <div class="bg-white border rounded px-3 py-2 shadow-sm d-flex align-items-center" style="border-color: var(--p-border) !important;">
+    <div class="rounded-circle bg-success me-2" style="width: 8px; height: 8px;"></div>
+    <small class="text-muted me-1">Last Return Sync:</small>
+    <small class="fw-bold" id="status-last-ret" style="color: var(--p-on-surface);">
+        {{ config.last_return_sync_success if config.last_return_sync_success else 'Never' }}
+    </small>
+</div>
         </div>
     </div>
 
@@ -175,7 +182,7 @@
         <div class="col-md-8">
             <div class="card p-3 h-100">
                 <div class="d-flex justify-content-between align-items-center mb-3">
-                    <div class="section-header mb-0" style="border:none;">Activity Log</div>
+                    <div class="section-header mb-0" style="border:none;">Sync Health Monitor</div>
                     <button onclick="document.querySelector('iframe').contentWindow.location.reload();" class="btn btn-sm btn-secondary">Refresh</button>
                 </div>
                 <div class="log-frame-container">
@@ -378,7 +385,7 @@
 
     <div id="tab-maintenance" class="tab-content-area">
     <div class="mb-4">
-        <h1 class="h3 fw-bold mb-1" style="color: var(--p-on-surface);">Maintenance</h1>
+        <h1 class="h3 fw-bold mb-1" style="color: var(--p-on-surface);">Tools</h1>
         <p class="text-muted mb-0" style="font-size: 15px;">Advanced tools for data health and troubleshooting.</p>
     </div>
 
@@ -387,21 +394,11 @@
             <div class="card p-4" style="border-top: 4px solid var(--p-critical);">
                 <div class="d-flex align-items-center mb-3">
                     <i class="bi bi-exclamation-octagon-fill text-danger fs-4 me-2"></i>
-                    <h5 class="mb-0 fw-bold">Maintenance Zone</h5>
+                    <h5 class="mb-0 fw-bold">Advanced Settings</h5>
                 </div>
                 <p class="text-muted mb-4 small">Use these tools with caution to fix data corruption.</p>
 
                 <div class="d-grid gap-3">
-                    <button onclick="triggerAction('/maintenance/register_webhooks')" class="btn btn-secondary text-start p-3">
-                        <div class="d-flex justify-content-between align-items-center">
-                            <div>
-                                <strong>🔗 Register Webhooks</strong><br>
-                                <small class="text-muted">Ensure Shopify sends order & product events.</small>
-                            </div>
-                            <i class="bi bi-chevron-right text-muted"></i>
-                        </div>
-                    </button>
-                    
                     <button onclick="triggerAction('/maintenance/fix_variants', 'POST')" class="btn btn-secondary text-start p-3">
                         <div class="d-flex justify-content-between align-items-center">
                             <div>
