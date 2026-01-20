@@ -22,8 +22,17 @@ import xmlrpc.client
 from sqlalchemy import text
 import ssl
 import gc
-from utils import conn, q, get_config, set_config, log_event, acquire_distributed_lock
-from utils import get_odoo_connection, setup_shopify_session
+from utils import (
+    conn, 
+    q, 
+    get_config, 
+    set_config, 
+    log_event, 
+    acquire_distributed_lock,
+    get_odoo_connection, 
+    setup_shopify_session, 
+    automate_webhook_registration
+)
 from services.orders import process_order_data
 from services.products import (
     sync_products_master, 
