@@ -66,12 +66,27 @@ socket.setdefaulttimeout(60)
 def require_shopify_session(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        # We look for 'shop' in the URL parameters
+        # 1. Try URL parameters (standard)
         shop_url = request.args.get('shop')
+        
+        # 2. Try Form Data (for the HTML Connect Form)
         if not shop_url:
+            shop_url = request.form.get('shop') or request.form.get('shop_url')
+            
+        # 3. Try JSON Body (for Dashboard AJAX calls)
+        if not shop_url and request.is_json:
+            try:
+                data = request.get_json(silent=True)
+                if data:
+                    shop_url = data.get('shop') or data.get('shop_url')
+            except: pass
+
+        # 🛑 BLOCK IF STILL MISSING
+        if not shop_url:
+            print("❌ Security Block: Request missing 'shop' parameter.")
             return jsonify({"error": "Missing shop parameter"}), 400
             
-        # setup_shopify_session is your helper that loads the token from DB
+        # 4. Activate Session
         if not setup_shopify_session(shop_url):
             return jsonify({"error": "Invalid or expired Shopify Session"}), 401
             
