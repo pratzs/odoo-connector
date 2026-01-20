@@ -1,30 +1,44 @@
 import os
+import sys
 from cryptography.fernet import Fernet
 from flask import request, jsonify, session
 from functools import wraps
 
 # 1. ENCRYPTION SETUP
-# Generate a key once using: Fernet.generate_key()
-# Store this in your .env file as ENCRYPTION_KEY=...
+# STRICT MODE: We crash if the key is missing to prevent data loss.
 ENCRYPTION_KEY = os.getenv('ENCRYPTION_KEY')
-if not ENCRYPTION_KEY:
-    # Fallback for dev only - DO NOT USE IN PROD
-    print("WARNING: Using temporary encryption key. Set ENCRYPTION_KEY in .env!")
-    ENCRYPTION_KEY = Fernet.generate_key()
 
-cipher = Fernet(ENCRYPTION_KEY)
+if not ENCRYPTION_KEY:
+    # CRITICAL SECURITY CHECK
+    # We stop the app startup immediately.
+    # This prevents the app from running with a random key that would verify nothing.
+    print("CRITICAL ERROR: 'ENCRYPTION_KEY' environment variable is missing!")
+    print("The app cannot start because it needs this key to decrypt credentials.")
+    sys.exit(1)
+
+try:
+    cipher = Fernet(ENCRYPTION_KEY)
+except Exception as e:
+    print(f"CRITICAL ERROR: Invalid ENCRYPTION_KEY format. It must be a valid Fernet key (32 url-safe base64-encoded bytes). Error: {e}")
+    sys.exit(1)
 
 def encrypt_val(value):
     """Encrypts a string value."""
     if not value: return None
-    return cipher.encrypt(value.encode()).decode()
+    try:
+        return cipher.encrypt(value.encode()).decode()
+    except Exception as e:
+        print(f"Encryption Error: {e}")
+        return None
 
 def decrypt_val(value):
     """Decrypts a string value."""
     if not value: return None
     try:
         return cipher.decrypt(value.encode()).decode()
-    except:
+    except Exception as e:
+        # This usually happens if the key changed or data is corrupt
+        print(f"Decryption Error: {e}")
         return None
 
 # 2. API SECURITY DECORATOR
@@ -48,10 +62,15 @@ def require_shopify_session(f):
         
         # In a real App Bridge app, you would validate the JWT token here.
         # For this MVP, we ensure the shop is at least installed in our DB.
+        # We perform a lazy import to avoid circular dependencies with models.py
         from models import Shop
-        shop = Shop.query.filter_by(shop_url=shop_url).first()
-        if not shop or not shop.is_active:
-             return jsonify({'error': 'Unauthorized: Shop not active'}), 401
+        
+        try:
+            shop = Shop.query.filter_by(shop_url=shop_url).first()
+            if not shop or not shop.is_active:
+                 return jsonify({'error': 'Unauthorized: Shop not active'}), 401
+        except Exception:
+             return jsonify({'error': 'Unauthorized: DB Error'}), 500
              
         return f(*args, **kwargs)
     return decorated_function
