@@ -1388,7 +1388,7 @@ def manual_order_fetch():
     
     # 2. Fetch Recent Shopify Orders
     try:
-        orders = shopify.Order.find(limit=10, status='any')
+        orders = shopify.Order.find(limit=20, status='any')
     except Exception as e:
         return jsonify({"orders": [], "error": f"API Error: {str(e)}"})
     
@@ -1430,6 +1430,7 @@ def manual_order_fetch():
     
 
 @app.route('/sync/orders/import_batch', methods=['POST'])
+@require_shopify_session
 def import_selected_orders():
     ids = request.json.get('order_ids', [])
     shop_url = request.json.get('shop_url') or request.args.get('shop')
