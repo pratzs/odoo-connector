@@ -1,11 +1,12 @@
-# utils.py
 import os
 import json
 import redis
+import shopify
 from datetime import datetime
 from flask import request
 from rq import Queue
-from models import db, AppSetting, SyncLog
+from models import db, AppSetting, SyncLog, Shop
+from odoo_client import OdooClient
 from contextlib import contextmanager
 
 # 1. SETUP REDIS
@@ -13,7 +14,7 @@ redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
 conn = redis.from_url(redis_url)
 q = Queue(connection=conn)
 
-# 2. CONFIG HELPER
+# 2. CONFIG HELPERS
 def get_config(key, default=None, shop_url=None):
     if not shop_url:
         try:
@@ -94,3 +95,53 @@ def acquire_distributed_lock(lock_name, timeout=20):
                 lock.release()
             except redis.exceptions.LockError:
                 pass
+
+# 5. ODOO CONNECTION HELPER (Moved from app.py)
+def get_odoo_connection(shop_url):
+    """
+    Factory Function: Creates a dynamic Odoo connection for a specific shop.
+    """
+    try:
+        shop = Shop.query.filter_by(shop_url=shop_url).first()
+        if not shop:
+            print(f"Error: No credentials found for {shop_url}")
+            return None
+        
+        # Create a fresh client using the DB credentials
+        client = OdooClient(
+            url=shop.odoo_url,
+            db=shop.odoo_db,
+            username=shop.odoo_username,
+            password=shop.odoo_password
+        )
+        return client
+    except Exception as e:
+        log_event('System', 'Error', f"Connection failed for {shop_url}: {e}", shop_url=shop_url)
+        return None
+
+# 6. SHOPIFY SESSION HELPER (Moved from app.py)
+def setup_shopify_session(shop_url=None):
+    """
+    Activates a Shopify session for a specific shop from the Database.
+    """
+    if not shop_url:
+        try:
+            shop_url = request.args.get('shop')
+        except:
+            return False
+
+    if not shop_url: return False
+
+    try:
+        shop = Shop.query.filter_by(shop_url=shop_url).first()
+        if not shop: return False
+        
+        # Get Version from Env or Default
+        api_version = os.getenv('SHOPIFY_API_VERSION', '2025-10')
+        
+        session = shopify.Session(shop.shop_url, api_version, shop.access_token)
+        shopify.ShopifyResource.activate_session(session)
+        return True
+    except Exception as e:
+        print(f"Shopify Session Error: {e}")
+        return False
