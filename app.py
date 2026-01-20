@@ -624,7 +624,14 @@ def auth_callback():
     
     db.session.commit()
 
-    # 5. Redirect to Dashboard
+    # 5. AUTO-CONFIG: Register Webhooks immediately
+    automate_webhook_registration(shop_url)
+    
+    # 6. AUTO-CONFIG: Queue an initial discovery sync
+    # This matches existing products by SKU so the merchant doesn't have to.
+    q.enqueue(sync_products_master, shop_url)
+
+    # 7. Redirect to Dashboard
     return redirect(f"https://{shop_url}/admin/apps/{SHOPIFY_API_KEY}")
 
 @app.route('/save_settings', methods=['POST'])
@@ -1508,8 +1515,12 @@ def api_save_settings():
                 else:
                     setting.value = val_str
 
-        # 3. Commit
+       # 3. Commit
         db.session.commit()
+        
+        # Self-healing: Ensure webhooks are active when settings are saved
+        automate_webhook_registration(shop_url)
+        
         return jsonify({"message": "Settings Saved Successfully"})
 
     except Exception as e:
