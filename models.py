@@ -12,6 +12,9 @@ class Shop(db.Model):
     odoo_url = db.Column(db.String(255))
     odoo_db = db.Column(db.String(255))
     odoo_username = db.Column(db.String(255))
+    last_inventory_sync_success = db.Column(db.DateTime)
+    last_order_sync_success = db.Column(db.DateTime)
+    last_return_sync_success = db.Column(db.DateTime)
     
     # STORE ENCRYPTED PASSWORD
     odoo_password_enc = db.Column(db.String(500)) 
