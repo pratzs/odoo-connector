@@ -570,11 +570,26 @@ def sync_odoo_fulfillments(shop_url):
 
         if synced_count > 0:
             log_event('Fulfillment', 'Success', f"Batch Complete. Fulfilled {synced_count} orders.")
+            try:
+        shop = Shop.query.filter_by(shop_url=shop_url).first()
+        if shop:
+            shop.last_order_sync_success = datetime.utcnow()
+            db.session.commit()
+    except Exception as e:
+        print(f"Error updating order timestamp: {e}")
+
 
 def scheduled_inventory_sync(shop_url):
     with app.app_context():
         # FIX: Just call the function. It handles its own logging now.
         perform_inventory_sync(shop_url) 
+        try:
+            shop = Shop.query.filter_by(shop_url=shop_url).first()
+            if shop:
+                shop.last_inventory_sync_success = datetime.utcnow()
+                db.session.commit()
+        except Exception as e:
+            print(f"Error updating inventory timestamp: {e}")
 
 # ==========================================
 # SHOPIFY OAUTH ROUTES
@@ -660,7 +675,7 @@ def save_public_settings():
 def shopify_webhook():
     """
     Receives automated notifications from Shopify.
-    UPDATED: EXPLICITLY IGNORES 'products/update' to prevent Infinite Loops.
+    Handles Orders, Products, Cancellations, and Refunds.
     """
     topic = request.headers.get('X-Shopify-Topic')
     shop_url = request.headers.get('X-Shopify-Shop-Domain')
@@ -669,16 +684,41 @@ def shopify_webhook():
     if not shop_url or not data:
         return "Missing data", 400
 
-    # SAFETY CHECK: Explicitly block product updates
+    # SAFETY CHECK: Explicitly block product updates to prevent loops
     if topic == 'products/update':
         return "Ignored (Odoo is Master)", 200
 
-    # 1. Handle Orders (Keep this!)
+    # 1. Handle Orders (Create, Pay, Update)
     if topic in ['orders/create', 'orders/updated', 'orders/paid']:
-        q.enqueue(background_order_sync, shop_url, data)
+        q.enqueue(
+            background_order_sync, 
+            shop_url, 
+            data,
+            retry=Retry(max=5, interval=[60, 120, 240, 600, 1200])
+        )
         return "Order Received", 200
 
-    # 2. Handle Products (ONLY New Creations)
+    # 2. Handle Cancellations (NEW)
+    elif topic == 'orders/cancelled':
+        q.enqueue(
+            process_cancellation, 
+            data, 
+            shop_url,
+            retry=Retry(max=5, interval=[60, 120, 240, 600, 1200])
+        )
+        return "Cancellation Received", 200
+
+    # 3. Handle Refunds (NEW)
+    elif topic == 'refunds/create':
+        q.enqueue(
+            background_refund_sync, 
+            shop_url, 
+            data,
+            retry=Retry(max=5, interval=[60, 120, 240, 600, 1200])
+        )
+        return "Refund Received", 200
+
+    # 4. Handle Products (ONLY New Creations)
     elif topic == 'products/create': 
         q.enqueue(background_product_sync, shop_url, data)
         return "Product Received", 200
@@ -765,7 +805,10 @@ def home():
         'odoo_db': shop.odoo_db,
         'odoo_username': shop.odoo_username,
         'odoo_company_id': shop.odoo_company_id,
-        'sync_start_date': shop.sync_start_date
+        'sync_start_date': shop.sync_start_date,
+        'last_inventory_sync_success': shop.last_inventory_sync_success,
+        'last_order_sync_success': shop.last_order_sync_success,
+        'last_return_sync_success': shop.last_return_sync_success
     }
 
     settings = AppSetting.query.filter_by(shop_url=shop_url).all()
