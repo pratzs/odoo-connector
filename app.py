@@ -29,6 +29,11 @@ from services.products import (
     cleanup_shopify_products
 )
 from services.customers import sync_customers_master
+from utils import (
+    conn, q, get_config, set_config, log_event, 
+    acquire_distributed_lock, 
+    get_odoo_connection, setup_shopify_session
+)
 import smtplib
 from email.message import EmailMessage
 
@@ -134,30 +139,6 @@ def verify_shopify(data, hmac_header):
     digest = hmac.new(secret.encode('utf-8'), data, hashlib.sha256).digest()
     return hmac.compare_digest(base64.b64encode(digest).decode(), hmac_header)
 
-def get_odoo_connection(shop_url):
-    """
-    Factory Function: Creates a dynamic Odoo connection for a specific shop.
-    REMOVED inner app_context to prevent DB Session conflicts.
-    """
-    # Note: We rely on the caller (the sync function) to provide the app_context
-    shop = Shop.query.filter_by(shop_url=shop_url).first()
-    if not shop:
-        print(f"Error: No credentials found for {shop_url}")
-        return None
-    
-    try:
-        # Create a fresh client using the DB credentials
-        client = OdooClient(
-            url=shop.odoo_url,
-            db=shop.odoo_db,
-            username=shop.odoo_username,
-            password=shop.odoo_password
-        )
-        return client
-    except Exception as e:
-        log_event('System', 'Error', f"Connection failed for {shop_url}: {e}", shop_url=shop_url)
-        return None
-
 
 def send_inventory_alert(shop_url, email_address, discrepancies):
     """Sends a summary email of all flagged inventory differences."""
@@ -179,27 +160,6 @@ def send_inventory_alert(shop_url, email_address, discrepancies):
     except Exception as e:
         print(f"Failed to send alert email: {e}")
         
-
-def setup_shopify_session(shop_url=None):
-    """
-    Activates a Shopify session for a specific shop from the Database.
-    """
-    if not shop_url:
-        try:
-            shop_url = request.args.get('shop')
-        except:
-            return False
-
-    if not shop_url: return False
-
-    with app.app_context():
-        shop = Shop.query.filter_by(shop_url=shop_url).first()
-        if not shop: return False
-        
-        # UPDATED: Use Unified Version
-        session = shopify.Session(shop.shop_url, SHOPIFY_API_VERSION, shop.access_token)
-        shopify.ShopifyResource.activate_session(session)
-        return True
 
 # --- GRAPHQL HELPERS ---
 def find_shopify_product_by_sku(sku, shop_url=None):
