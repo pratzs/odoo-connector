@@ -871,17 +871,23 @@ function fetchLocations(companyId) {
 }
 
 // --- SAVE SETTINGS ---
+// --- SAVE SETTINGS (Debug Version) ---
 function saveSettings() {
     const companyId = document.getElementById('companySelect').value;
-    if (!companyId) { alert("Please select a Company first."); return; }
+    if (!companyId) { showToast("Please select a Company first."); return; }
 
     const payload = {
+        // Essential identifiers
         shop_url: CURRENT_SHOP_URL,
         odoo_company_id: companyId,
+        
+        // Inventory
         inventory_field: document.querySelector('#invType').value,
         sync_zero_stock: document.getElementById('checkZeroStock').checked,
         combine_committed: document.getElementById('checkCommitted').checked,
         inventory_locations: Array.from(document.querySelectorAll('.loc-check:checked')).map(cb => parseInt(cb.value)),
+        
+        // Products
         prod_auto_create: document.getElementById('prodAutoCreate').checked,
         prod_auto_publish: document.getElementById('prodAutoPublish').checked,
         prod_sync_images: document.getElementById('prodSyncImages').checked,
@@ -895,6 +901,8 @@ function saveSettings() {
         prod_sync_desc: document.getElementById('fieldDesc').checked,
         prod_sync_type: document.getElementById('fieldProductType').checked,
         prod_sync_vendor: document.getElementById('fieldVendor').checked,
+        
+        // Orders & Customers
         order_sync_tax: document.getElementById('orderSyncTax').checked,
         cust_direction: document.getElementById('custSyncDirection').value,
         cust_auto_sync: document.getElementById('custAutoSync').checked,
@@ -905,14 +913,47 @@ function saveSettings() {
         cust_whitelist_tags: document.getElementById('custWhitelistTags').value,
         cust_blacklist_tags: document.getElementById('custBlacklistTags').value,
         group_companies_list: document.getElementById('groupCompaniesList').value,
+        
+        // Alerts
         alert_email: document.getElementById('alertEmail').value,
         alert_threshold: parseInt(document.getElementById('alertThreshold').value) || 50,
     };
 
     showToast("Saving...");
+
     fetch(`/api/settings/save?shop=${CURRENT_SHOP_URL}`, { 
-        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
-    }).then(r => r.json()).then(data => showToast("Saved!")).catch(err => showToast("Save Failed"));
+        method: 'POST', 
+        headers: {'Content-Type': 'application/json'}, 
+        body: JSON.stringify(payload)
+    })
+    .then(async response => {
+        // 1. Get text first to debug if HTML (500 error) is returned
+        const text = await response.text();
+        
+        try {
+            // 2. Parse JSON
+            const data = JSON.parse(text);
+            
+            // 3. Check for logical errors
+            if (!response.ok || data.success === false || data.error) {
+                throw new Error(data.message || data.error || "Unknown Server Error");
+            }
+            
+            showToast("✅ Configuration Saved!");
+            
+        } catch (e) {
+            // If JSON parse fails, it means Server Crashed (returned HTML)
+            console.error("Server Raw Response:", text);
+            if (text.includes("<!DOCTYPE html>")) {
+                throw new Error("Server Crash (500). Check Render Logs.");
+            }
+            throw new Error(e.message);
+        }
+    })
+    .catch(err => {
+        console.error(err);
+        showToast("❌ " + err.message);
+    });
 }
 
 // --- MANUAL ACTIONS & MODALS ---
