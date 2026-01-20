@@ -1,6 +1,7 @@
 import shopify
 from utils import get_odoo_connection, log_event, setup_shopify_session
 from datetime import datetime, timedelta
+from models import db, Shop # Added imports for DB tracking
 
 def sync_odoo_returns(shop_url):
     """
@@ -33,6 +34,7 @@ def sync_odoo_returns(shop_url):
         log_event('Return Sync', 'Error', f"Odoo Search Failed: {e}", shop_url=shop_url)
         return
 
+    # Loop through found returns
     for ret in returns:
         shopify_order_name = ret['origin'].replace('ONLINE_', '').strip()
         
@@ -43,10 +45,6 @@ def sync_odoo_returns(shop_url):
             order = orders[0]
 
             # 3. Logic: Mark as Return in Shopify
-            # Note: We don't automatically trigger a "Refund" (Money) here
-            # because money should usually be handled by a manager. 
-            # We just want to log that the items are back.
-            
             shopify.Comment.create({
                 'body': f"Inventory Return received in Odoo ({ret['name']}). Items are back in stock.",
                 'order_id': order.id
@@ -56,3 +54,14 @@ def sync_odoo_returns(shop_url):
 
         except Exception as e:
             log_event('Return Sync', 'Error', f"Failed to sync return for {shopify_order_name}: {e}", shop_url=shop_url)
+
+    # --- NEW: UPDATE DASHBOARD TIMESTAMP ---
+    try:
+        # After the loop finishes, update the shop record with the current time
+        shop = Shop.query.filter_by(shop_url=shop_url).first()
+        if shop:
+            shop.last_return_sync_success = datetime.utcnow()
+            db.session.commit()
+            print(f"📊 Dashboard Updated: Return Sync Success for {shop_url}")
+    except Exception as e:
+        print(f"❌ Error updating return timestamp: {e}")
