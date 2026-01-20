@@ -181,6 +181,11 @@
         {% endif %}
     </div>
 
+       <div class="d-flex justify-content-between align-items-center mt-2">
+    <span class="text-muted">Current Plan</span>
+    <span class="fw-bold">{{ config.plan_name if config.plan_name else 'Development' }}</span>
+</div>        
+
     <hr style="border-color: var(--p-border);">
     
     <div class="d-grid gap-2">
