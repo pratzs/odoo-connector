@@ -26,7 +26,7 @@ from services.products import (
     sync_products_master, 
     process_product_data, 
     archive_shopify_duplicates, 
-    cleanup_shopify_products
+    cleanup_shopify_products,
     find_shopify_product_by_sku
 )
 from services.customers import sync_customers_master
