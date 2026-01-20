@@ -1560,36 +1560,38 @@ def process_cancellation(data, shop_url):
     Handles Shopify -> Odoo Cancellation.
     Finds the Odoo sale order by reference and cancels it.
     """
-    shopify_name = data.get('name')
-    client_ref = f"ONLINE_{shopify_name}"
-    
-    odoo = get_odoo_connection(shop_url)
-    if not odoo:
-        log_event('Order Cancel', 'Error', f"Could not connect to Odoo for {shop_url}", shop_url=shop_url)
-        return
-
-    try:
-        # 1. Find the Order ID in Odoo
-        domain = [['client_order_ref', '=', client_ref]]
-        # Also check 'origin' just in case
-        ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
-            'sale.order', 'search', [domain])
+    # CRITICAL FIX: Add this line to allow DB access
+    with app.app_context():
+        shopify_name = data.get('name')
+        client_ref = f"ONLINE_{shopify_name}"
         
-        if not ids:
-            log_event('Order Cancel', 'Warning', f"Order {client_ref} not found in Odoo. Skipping.", shop_url=shop_url)
+        odoo = get_odoo_connection(shop_url)
+        if not odoo:
+            log_event('Order Cancel', 'Error', f"Could not connect to Odoo for {shop_url}", shop_url=shop_url)
             return
 
-        order_id = ids[0]
+        try:
+            # 1. Find the Order ID in Odoo
+            domain = [['client_order_ref', '=', client_ref]]
+            # Also check 'origin' just in case
+            ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+                'sale.order', 'search', [domain])
+            
+            if not ids:
+                log_event('Order Cancel', 'Warning', f"Order {client_ref} not found in Odoo. Skipping.", shop_url=shop_url)
+                return
 
-        # 2. Check current state (cannot cancel if 'done' or 'locked')
-        # We try anyway, let Odoo handle the state logic
-        if odoo.cancel_order(order_id):
-            log_event('Order Cancel', 'Success', f"Cancelled Odoo Order {client_ref}", shop_url=shop_url)
-        else:
-            log_event('Order Cancel', 'Warning', f"Could not cancel {client_ref} (Check Odoo state)", shop_url=shop_url)
+            order_id = ids[0]
 
-    except Exception as e:
-        log_event('Order Cancel', 'Error', f"Error processing cancellation for {shopify_name}: {e}", shop_url=shop_url)
+            # 2. Check current state (cannot cancel if 'done' or 'locked')
+            # We try anyway, let Odoo handle the state logic
+            if odoo.cancel_order(order_id):
+                log_event('Order Cancel', 'Success', f"Cancelled Odoo Order {client_ref}", shop_url=shop_url)
+            else:
+                log_event('Order Cancel', 'Warning', f"Could not cancel {client_ref} (Check Odoo state)", shop_url=shop_url)
+
+        except Exception as e:
+            log_event('Order Cancel', 'Error', f"Error processing cancellation for {shopify_name}: {e}", shop_url=shop_url)
         
 
 # 1. Define Cleanup Function FIRST
