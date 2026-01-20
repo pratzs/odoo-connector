@@ -814,13 +814,13 @@ def app_uninstalled():
         print(f"Error handling uninstall for {shop_url}: {e}")
         return "Error", 500
 
-# Ensure the next route also starts at the far left
 @app.route('/', methods=['GET'])
 @app.route('/settings', methods=['GET'])
 @app.route('/maintenance', methods=['GET'])
+@require_shopify_session
 def home():
     """
-    Hybrid Dashboard: Handles Auth, Connect Form, and Main Tabbed Dashboard.
+    Hybrid Dashboard: Handles Auth, Billing Bypass, Connect Form, and Tabs.
     """
     shop_url = request.args.get('shop')
     if not shop_url: 
@@ -833,14 +833,16 @@ def home():
     mode = request.args.get('mode')
 
     # --- 1. BILLING CHECK (NEW) ---
-    # Redirect to billing if they don't have a charge_id
-    # The create_billing function we wrote earlier will handle Dev Store bypass
-   if shop_url not in FREE_STORES:
+    # Perfectly aligned with 4 spaces
+    if shop_url not in FREE_STORES:
         if not shop.charge_id:
             try:
                 # Double check it's not a dev store
                 shopify_shop = shopify.Shop.current()
-                if not any(x in shopify_shop.plan_name.lower() for x in ['affiliate', 'staff']):
+                raw_plan = shopify_shop.plan_name.lower()
+                is_dev = any(x in raw_plan for x in ['affiliate', 'staff', 'partner_test'])
+                
+                if not is_dev:
                     return redirect(url_for('create_billing', shop=shop_url))
             except Exception as e:
                 print(f"Billing bypass error: {e}")
@@ -901,7 +903,7 @@ def home():
             has_creds=(shop.odoo_url is not None)
         )
 
-    # --- 2. SHOW MAIN DASHBOARD (Tabbed Interface) ---
+    # --- 3. SHOW MAIN DASHBOARD (Tabbed Interface) ---
     config = {
         'odoo_url': shop.odoo_url,
         'odoo_db': shop.odoo_db,
