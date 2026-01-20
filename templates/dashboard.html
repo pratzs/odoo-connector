@@ -614,6 +614,23 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+        function showToast(message) {
+        const toastEl = document.getElementById('liveToast');
+        const msgEl = document.getElementById('toastMessage');
+        if (toastEl && msgEl) {
+            msgEl.innerText = message;
+            const toast = new bootstrap.Toast(toastEl);
+            toast.show();
+        } else {
+            console.log("System Message:", message);
+        }
+    }
+
+    function formatLocalTime(dateStr) {
+        if(!dateStr) return '-';
+        return new Date(dateStr).toLocaleString();
+    }
+        
         function formatTimeAgo(dateString) {
             if (!dateString || dateString.trim() === 'Never' || dateString.includes('None')) return 'Never';
             try {
