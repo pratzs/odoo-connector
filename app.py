@@ -38,7 +38,7 @@ from utils import (
     acquire_distributed_lock,
     get_odoo_connection, 
     setup_shopify_session, 
-    automate_webhook_registration  # <--- Crucial! Keep this one.
+    automate_webhook_registration
 )
 
 # --- SERVICES ---
@@ -54,7 +54,6 @@ from services.customers import sync_customers_master
 from services.refunds import process_refund_data
 from services.returns import sync_odoo_returns
 
-# ⚠️ CHECK: Ensure these exist in your services folder, or the app will crash on webhooks
 try:
     from services.cancellations import process_cancellation
     from services.fulfillments import sync_odoo_fulfillments
@@ -62,28 +61,6 @@ except ImportError:
     print("⚠️ Warning: Cancellation or Fulfillment services missing. Skipping import.")
 
 socket.setdefaulttimeout(60)
-
-def setup_shopify_session(shop_url):
-    """
-    Helper to initialize a Shopify session using the stored access token.
-    """
-    try:
-        # 1. Look up the shop in your Supabase DB
-        shop = Shop.query.filter_by(shop_url=shop_url).first()
-        
-        if not shop or not shop.access_token:
-            print(f"❌ No token found for {shop_url}")
-            return False
-        
-        # 2. Activate the session with the Shopify Python library
-        # Use the latest API version or '2024-01'
-        session = shopify.Session(shop.shop_url, "2024-01", shop.access_token)
-        shopify.ShopifyResource.activate_session(session)
-        
-        return True
-    except Exception as e:
-        print(f"❌ Session Setup Error: {e}")
-        return False
         
 # --- DECORATOR: ENSURE SESSION IS VALID ---
 def require_shopify_session(f):
@@ -514,93 +491,6 @@ def perform_inventory_sync(shop_url):
         log_event('Inventory', 'Success', f"Sync Complete. Checked {total_shopify} active items. Updated {updates} products.", shop_url=shop_url)
 
 
-def sync_odoo_cancellations(shop_url):
-    """
-    Checks for orders cancelled in Odoo and cancels them in Shopify.
-    """
-    with app.app_context():
-        odoo = get_odoo_connection(shop_url)
-        if not odoo or not setup_shopify_session(shop_url): return
-
-        # FIX: Increased lookback from 60 minutes to 7 days
-        cutoff = datetime.utcnow() - timedelta(days=7) 
-        company_id = get_config('odoo_company_id', shop_url=shop_url)
-
-        try:
-            cancelled_orders = odoo.get_recently_cancelled_orders(str(cutoff), company_id)
-        except Exception as e:
-            log_event('Cancel Sync', 'Error', f"Odoo Search Failed: {e}", shop_url=shop_url)
-            return
-
-        sync_count = 0
-        for o_order in cancelled_orders:
-            ref = o_order.get('client_order_ref', '')
-            if not ref.startswith('ONLINE_'): continue
-            
-            shopify_name = ref.replace('ONLINE_', '').strip()
-            
-            try:
-                orders = shopify.Order.find(name=shopify_name, status='any')
-                if not orders: continue
-                sp_order = orders[0]
-
-                if sp_order.cancelled_at is None:
-                    sp_order.cancel(reason="other", email=False)
-                    sync_count += 1
-                    log_event('Cancel Sync', 'Success', f"Cancelled Shopify Order {shopify_name}", shop_url=shop_url)
-            
-            except Exception as e:
-                if "422" not in str(e):
-                    log_event('Cancel Sync', 'Error', f"Failed to cancel {shopify_name}: {e}", shop_url=shop_url)
-
-        if sync_count > 0:
-            log_event('Cancel Sync', 'Success', f"Synced {sync_count} cancellations from Odoo.", shop_url=shop_url)
-
-def sync_odoo_fulfillments(shop_url):
-    """
-    Multi-Tenant: Odoo -> Shopify Fulfillment Sync.
-    """
-    with app.app_context():
-        # DYNAMIC CONNECT
-        odoo = get_odoo_connection(shop_url)
-        if not odoo or not setup_shopify_session(shop_url): return
-
-        # 1. Look back 2 hours for 'Done' shipments
-        cutoff = datetime.utcnow() - timedelta(minutes=120)
-        
-        domain = [
-            ['state', '=', 'done'],
-            ['date_done', '>=', str(cutoff)],
-            ['origin', 'like', 'ONLINE_'] 
-        ]
-        
-        try:
-            pickings = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                'stock.picking', 'search_read', [domain], 
-                {'fields': ['origin', 'carrier_tracking_ref', 'carrier_id', 'name']})
-        except Exception as e:
-            log_event('Fulfillment', 'Error', f"Odoo Search Failed: {e}")
-            return
-
-        synced_count = 0
-        for pick in pickings:
-            # ... (Your existing logic for finding and fulfilling Shopify orders) ...
-            # Assume fulfillment logic happens here
-            synced_count += 1 
-
-        if synced_count > 0:
-            log_event('Fulfillment', 'Success', f"Batch Complete. Fulfilled {synced_count} orders.")
-
-        # --- THIS WAS THE FIXED BLOCK ---
-        try:
-            shop = Shop.query.filter_by(shop_url=shop_url).first()
-            if shop:
-                shop.last_order_sync_success = datetime.utcnow()
-                db.session.commit()
-        except Exception as e:
-            print(f"Error updating order timestamp: {e}")
-
-
 def scheduled_inventory_sync(shop_url):
     with app.app_context():
         # FIX: Just call the function. It handles its own logging now.
@@ -671,24 +561,6 @@ def auth_callback():
 
     # 7. Redirect to Dashboard
     return redirect(f"https://{shop_url}/admin/apps/{SHOPIFY_API_KEY}")
-
-@app.route('/save_settings', methods=['POST'])
-def save_public_settings():
-    shop_url = request.form.get('shop_url')
-    shop = Shop.query.filter_by(shop_url=shop_url).first()
-    
-    if shop:
-        shop.odoo_url = request.form.get('odoo_url')
-        shop.odoo_db = request.form.get('odoo_db')
-        shop.odoo_username = request.form.get('odoo_user')
-        
-        new_pass = request.form.get('odoo_pass')
-        if new_pass and new_pass.strip():
-            shop.odoo_password = new_pass
-            
-        db.session.commit()
-        return f"✅ Settings Saved! <script>window.location.href='/?shop={shop_url}';</script>"
-    return "Error: Shop not found."
 
 #Billing 
 @app.route('/billing/create')
@@ -1650,66 +1522,46 @@ def api_get_locations():
 @require_shopify_session
 def save_settings():
     shop_url = request.args.get('shop')
-    
-    # 1. ROBUST DATA RETRIEVAL (Fixes "No Data" error)
     # Try getting JSON first; if empty, grab Form Data
-    data = request.json
-    if not data:
-        data = request.form.to_dict()
-        
-    if not data:
-        return jsonify({"message": "Error: No data provided"}), 400
+    data = request.json or request.form.to_dict()
+    
+    if not data: return jsonify({"message": "Error: No data provided"}), 400
 
     try:
-        # 2. Update Shop Table (Core Settings)
         shop = Shop.query.filter_by(shop_url=shop_url).first()
-        if not shop:
-            return jsonify({"message": "Error: Shop record not found"}), 404
+        if not shop: return jsonify({"message": "Shop not found"}), 404
 
-        # Handle Odoo Company ID
-        if 'odoo_company_id' in data:
-            shop.odoo_company_id = int(data['odoo_company_id'])
-        elif 'company_id' in data: 
-            shop.odoo_company_id = int(data['company_id'])
+        # 1. Save Core Fields
+        if 'odoo_company_id' in data: shop.odoo_company_id = int(data['odoo_company_id'])
+        if 'company_id' in data: shop.odoo_company_id = int(data['company_id'])
+        if 'odoo_url' in data: shop.odoo_url = data['odoo_url']
+        if 'odoo_db' in data: shop.odoo_db = data['odoo_db']
+        if 'odoo_user' in data: shop.odoo_username = data['odoo_user']
+        if 'odoo_pass' in data and data['odoo_pass']: shop.odoo_password = data['odoo_pass']
+        if 'sync_start_date' in data: shop.sync_start_date = data['sync_start_date']
 
-        if 'sync_start_date' in data:
-            shop.sync_start_date = data['sync_start_date']
-
-        # 3. Update App Settings (Flexible Loop)
-        # We assume anything that isn't a 'core' field is a setting
-        core_fields = ['odoo_company_id', 'company_id', 'sync_start_date', 'shop', 'hmac', 'timestamp']
-        
+        # 2. Save App Settings
+        ignore_fields = ['odoo_company_id', 'company_id', 'sync_start_date', 'shop', 'hmac', 'timestamp', 'odoo_url', 'odoo_db', 'odoo_user', 'odoo_pass']
         for key, value in data.items():
-            if key in core_fields: continue
-
-            # Convert Lists/Dicts/Bools to JSON strings for storage
-            if isinstance(value, (list, dict, bool)): 
-                val_str = json.dumps(value)
-            else:
-                val_str = str(value)
-
+            if key in ignore_fields: continue
+            val_str = json.dumps(value) if isinstance(value, (list, dict, bool)) else str(value)
+            
             setting = AppSetting.query.filter_by(shop_url=shop_url, key=key).first()
-            if not setting:
-                setting = AppSetting(shop_url=shop_url, key=key, value=val_str)
-                db.session.add(setting)
-            else:
-                setting.value = val_str
+            if setting: setting.value = val_str
+            else: db.session.add(AppSetting(shop_url=shop_url, key=key, value=val_str))
 
         db.session.commit()
-        
-        # 4. Self-Healing: Re-register webhooks
         automate_webhook_registration(shop_url)
-        
-        # Log success
         log_event('Settings', 'Success', 'Configuration saved successfully', shop_url=shop_url)
         
-        return jsonify({"success": True, "message": "Settings Saved Successfully"})
+        # Return HTML redirect if it was a Form Post, otherwise JSON
+        if not request.json:
+             return f"✅ Settings Saved! <script>window.location.href='/?shop={shop_url}';</script>"
+        return jsonify({"success": True})
 
     except Exception as e:
         db.session.rollback()
-        print(f"❌ Save Error for {shop_url}: {str(e)}")
-        log_event('Settings', 'Error', f"Save Failed: {str(e)}", shop_url=shop_url)
-        return jsonify({"success": False, "message": f"Save Error: {str(e)}"}), 500
+        return jsonify({"success": False, "message": str(e)}), 500
         
 
 @app.route('/test/odoo_health', methods=['GET'])
@@ -2396,4 +2248,4 @@ def api_get_unmapped_products():
 # t.start()
     
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=10000)
