@@ -44,6 +44,28 @@ from email.message import EmailMessage
 
 socket.setdefaulttimeout(60) # Force 60-second timeout for all network calls
 
+def setup_shopify_session(shop_url):
+    """
+    Helper to initialize a Shopify session using the stored access token.
+    """
+    try:
+        # 1. Look up the shop in your Supabase DB
+        shop = Shop.query.filter_by(shop_url=shop_url).first()
+        
+        if not shop or not shop.access_token:
+            print(f"❌ No token found for {shop_url}")
+            return False
+        
+        # 2. Activate the session with the Shopify Python library
+        # Use the latest API version or '2024-01'
+        session = shopify.Session(shop.shop_url, "2024-01", shop.access_token)
+        shopify.ShopifyResource.activate_session(session)
+        
+        return True
+    except Exception as e:
+        print(f"❌ Session Setup Error: {e}")
+        return False
+        
 # --- DECORATOR: ENSURE SESSION IS VALID ---
 def require_shopify_session(f):
     @wraps(f)
