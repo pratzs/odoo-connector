@@ -764,28 +764,34 @@ function toggleTagFields() {
     if(toggle && fields) fields.style.display = toggle.checked ? 'block' : 'none';
 }
 
-// --- DATA FETCHING ---
 function fetchCompanies() {
     const sel = document.getElementById('companySelect');
-    const banner = document.getElementById('connection-error-banner'); // Get the banner element
+    const banner = document.getElementById('connection-error-banner');
     
     if(!sel) return;
     sel.innerHTML = '<option value="">Loading...</option>';
 
     fetch(`/api/odoo/companies?shop=${CURRENT_SHOP_URL}`)
-        .then(r => r.json())
+        .then(response => {
+            // Check if the decorator blocked us (401 Unauthorized)
+            if (response.status === 401) {
+                return response.json().then(data => { throw new Error(data.error); });
+            }
+            if (!response.ok) {
+                throw new Error('Network response was not ok');
+            }
+            return response.json();
+        })
         .then(data => {
             if(data.error) { 
                 sel.innerHTML = `<option value="">Error: ${data.error}</option>`;
-                // --- SHOW THE BANNER ---
                 if(banner) banner.style.display = 'flex'; 
                 return; 
             }
 
-            // --- HIDE THE BANNER ON SUCCESS ---
             if(banner) banner.style.display = 'none';
-
             sel.innerHTML = '<option value="">Select Company</option>';
+            
             if (Array.isArray(data)) {
                 data.forEach(c => {
                     const isSel = (SAVED_SETTINGS.odoo_company_id == c.id) ? 'selected' : '';
@@ -795,8 +801,8 @@ function fetchCompanies() {
             if (SAVED_SETTINGS.odoo_company_id) fetchLocations(SAVED_SETTINGS.odoo_company_id);
         })
         .catch(e => {
-            sel.innerHTML = `<option value="">Network Error</option>`;
-            // Show banner for network timeouts/crashes
+            console.error("Fetch Error:", e);
+            sel.innerHTML = `<option value="">${e.message || "Connection Error"}</option>`;
             if(banner) banner.style.display = 'flex';
         });
 }
