@@ -641,6 +641,65 @@ def save_public_settings():
         db.session.commit()
         return f"✅ Settings Saved! <script>window.location.href='/?shop={shop_url}';</script>"
     return "Error: Shop not found."
+
+#Billing 
+@app.route('/billing/create')
+@require_shopify_session
+def create_billing():
+    shop_url = request.args.get('shop')
+    
+    # 1. Fetch current Shop details from Shopify API
+    # The decorator ensures a session is already active
+    shopify_shop = shopify.Shop.current()
+    raw_plan = shopify_shop.plan_name.lower()
+    
+    # 2. Map Shopify Plan to your Pricing
+    # Dev/Partner stores are 'affiliate' or 'partner_test'
+    if any(x in raw_plan for x in ['affiliate', 'staff', 'test', 'trial']):
+        return redirect(url_for('home', shop=shop_url))
+    
+    if 'plus' in raw_plan:
+        price = 89.0
+        display_name = "Plus Plan"
+    elif 'advanced' in raw_plan:
+        price = 49.0
+        display_name = "Advanced Plan"
+    else:
+        # Basic and Standard plans
+        price = 25.0
+        display_name = "Standard Plan"
+
+    # 3. Create Recurring Charge
+    charge = shopify.RecurringApplicationCharge.create({
+        "name": f"Odoo Connector - {display_name}",
+        "price": price,
+        "return_url": f"{os.getenv('HOST')}/billing/confirm?shop={shop_url}",
+        "test": True, # KEEP TRUE for development and Shopify Review
+        "trial_days": 7
+    })
+    
+    return redirect(charge.confirmation_url)
+
+@app.route('/billing/confirm')
+@require_shopify_session
+def confirm_billing():
+    shop_url = request.args.get('shop')
+    charge_id = request.args.get('charge_id')
+    
+    if not charge_id:
+        return redirect(url_for('home', shop=shop_url))
+
+    charge = shopify.RecurringApplicationCharge.find(charge_id)
+    
+    if charge.activate():
+        shop = Shop.query.filter_by(shop_url=shop_url).first()
+        if shop:
+            shop.charge_id = str(charge_id)
+            shop.plan_name = charge.name
+            db.session.commit()
+        return redirect(url_for('home', shop=shop_url))
+    
+    return "Billing activation failed. Please contact support.", 400
     
 
 # -----------------------------------------------------------------
@@ -743,7 +802,22 @@ def home():
 
     mode = request.args.get('mode')
 
-    # --- 1. SHOW CONNECT FORM (If credentials missing OR user requested edit) ---
+    # --- 1. BILLING CHECK (NEW) ---
+    # Redirect to billing if they don't have a charge_id
+    # The create_billing function we wrote earlier will handle Dev Store bypass
+    if not shop.charge_id:
+        # Fetch shop details to check if it's a dev store before redirecting
+        try:
+            shopify_shop = shopify.Shop.current()
+            raw_plan = shopify_shop.plan_name.lower()
+            is_dev = any(x in raw_plan for x in ['affiliate', 'staff', 'partner_test'])
+            
+            if not is_dev:
+                return redirect(url_for('create_billing', shop=shop_url))
+        except Exception as e:
+            print(f"Billing Check Error: {e}")
+
+    # --- 2. SHOW CONNECT FORM (If credentials missing OR user requested edit) ---
     if not shop.odoo_url or not shop.odoo_password or mode == 'connect':
         html = """
         <!DOCTYPE html>
@@ -805,6 +879,8 @@ def home():
         'odoo_db': shop.odoo_db,
         'odoo_username': shop.odoo_username,
         'odoo_company_id': shop.odoo_company_id,
+        'charge_id': shop.charge_id,
+        'plan_name': shop.plan_name,
         'sync_start_date': shop.sync_start_date,
         'last_inventory_sync_success': shop.last_inventory_sync_success,
         'last_order_sync_success': shop.last_order_sync_success,
