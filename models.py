@@ -15,6 +15,10 @@ class Shop(db.Model):
     last_inventory_sync_success = db.Column(db.DateTime)
     last_order_sync_success = db.Column(db.DateTime)
     last_return_sync_success = db.Column(db.DateTime)
+     # --- ADD THESE BILLING COLUMNS ---
+    charge_id = db.Column(db.String(255), nullable=True)
+    plan_name = db.Column(db.String(100), nullable=True)
+    # ---------------------------------
     
     # STORE ENCRYPTED PASSWORD
     odoo_password_enc = db.Column(db.String(500)) 
