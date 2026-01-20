@@ -181,10 +181,21 @@
         {% endif %}
     </div>
 
-       <div class="d-flex justify-content-between align-items-center mt-2">
-    <span class="text-muted">Current Plan</span>
-    <span class="fw-bold">{{ config.plan_name if config.plan_name else 'Development' }}</span>
-</div>        
+      <div class="mb-4">
+    {% if config.is_free_store %}
+        <span class="badge" style="background-color: #e3fbe3; color: #008060; border: 1px solid #aee9d1; padding: 6px 12px; border-radius: 16px; font-weight: 600;">
+            <i class="bi bi-patch-check-fill"></i> Lifetime Free
+        </span>
+    {% elif config.plan_name == "Development Store" %}
+        <span class="badge" style="background-color: #f6f6f7; color: #454749; border: 1px solid #d2d5d8; padding: 6px 12px; border-radius: 16px; font-weight: 600;">
+            <i class="bi bi-tools"></i> Development Mode
+        </span>
+    {% else %}
+        <span class="badge" style="background-color: #f0f7ff; color: #005bd3; border: 1px solid #b3d1ff; padding: 6px 12px; border-radius: 16px; font-weight: 600;">
+            <i class="bi bi-credit-card-fill"></i> {{ config.plan_name }}
+        </span>
+    {% endif %}
+</div>
 
     <hr style="border-color: var(--p-border);">
     
