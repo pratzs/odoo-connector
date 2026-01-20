@@ -1183,7 +1183,7 @@ def product_webhook():
     # 3. Queue the Job
     # We send the data to Redis immediately. Shopify gets a 200 OK instantly.
     data = request.json
-    q.enqueue(background_product_sync, shop_url, data, job_timeout=300)
+    # q.enqueue(background_product_sync, shop_url, data, job_timeout=300)
     
     return "Queued", 200
 
