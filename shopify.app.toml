@@ -1,11 +1,30 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "014f33e964598705ca20a71531a032a4"
+name = "Live Connector for Odoo"
+application_url = "https://odoo-connector-oivx.onrender.com"
+embedded = true
+
 [webhooks]
 api_version = "2025-10"
 
-[[webhooks.subscriptions]]
-  topics = [ "orders/create", "orders/cancelled", "inventory_levels/update" ]
+  [[webhooks.subscriptions]]
+  topics = [
+  "orders/create",
+  "orders/cancelled",
+  "inventory_levels/update"
+]
   uri = "/webhooks/shopify"
 
-[webhooks.privacy_compliance]
-customer_data_request_url = "https://odoo-connector-oivx.onrender.com/gdpr/customers/data_request"
-customer_redaction_url = "https://odoo-connector-oivx.onrender.com/gdpr/customers/redact"
-shop_redaction_url = "https://odoo-connector-oivx.onrender.com/gdpr/shop/redact"
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "read_customers,read_fulfillments,read_inventory,read_locations,read_merchant_managed_fulfillment_orders,read_orders,read_products,read_third_party_fulfillment_orders,write_customers,write_fulfillments,write_inventory,write_merchant_managed_fulfillment_orders,write_orders,write_products,write_third_party_fulfillment_orders"
+optional_scopes = [ ]
+use_legacy_install_flow = false
+
+[auth]
+redirect_urls = [
+  "https://odoo-connector-oivx.onrender.com/auth/callback",
+  "https://odoo-connector-oivx.onrender.com/",
+  "https://odoo-connector-oivx.onrender.com"
+]
