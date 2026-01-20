@@ -700,6 +700,31 @@ def shopify_webhook():
 
     return "Topic ignored", 200
 
+@app.route('/webhooks/app_uninstalled', methods=['POST'])
+def app_uninstalled():
+    """
+    Triggered when a merchant deletes the app.
+    We mark the shop as inactive to stop background syncs.
+    """
+    data = request.get_json()
+    shop_url = request.headers.get('X-Shopify-Shop-Domain')
+
+    try:
+        shop = Shop.query.filter_by(shop_url=shop_url).first()
+        if shop:
+            shop.is_active = False
+            shop.access_token = None  # Remove token for security
+            db.session.commit()
+            print(f"👋 Shop Uninstalled: {shop_url}. Marked as inactive.")
+            
+            # Optional: Log a system-wide event
+            log_event('System', 'Notice', f"App uninstalled by {shop_url}", shop_url=shop_url)
+            
+        return "OK", 200
+    except Exception as e:
+        print(f"Error handling uninstall for {shop_url}: {e}")
+        return "Error", 500
+
 # Ensure the next route also starts at the far left
 @app.route('/', methods=['GET'])
 @app.route('/settings', methods=['GET'])
