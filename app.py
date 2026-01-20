@@ -32,7 +32,7 @@ socket.setdefaulttimeout(60) # Force 60-second timeout for all network calls
 SHOPIFY_API_KEY = os.getenv('SHOPIFY_API_KEY')
 SHOPIFY_API_SECRET = os.getenv('SHOPIFY_API_SECRET')
 APP_URL = os.getenv('HOST')
-SHOPIFY_API_VERSION = '2025-10'  # UNIFIED VERSION
+SHOPIFY_API_VERSION = os.getenv('SHOPIFY_API_VERSION', '2025-10')
 
 SCOPES = (
     "read_products,write_products,"
