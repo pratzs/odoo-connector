@@ -1788,7 +1788,7 @@ def run_schedule():
                 conn.setex("last_log_cleanup", 86400, "done") 
 
         # Heartbeat sleep
-        time.sleep(60)
+        time.sleep(10)
 
 def sync_images_only_manual(shop_url):
     """
