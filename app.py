@@ -1660,24 +1660,19 @@ def run_schedule():
                 shop_url = shop.shop_url
                 
                 # --- LOG FLUSHER (Runs every 10 mins = 600s) ---
-                # This ensures we don't slow down the main loop, but only flush logs occasionally
                 if not conn.get(f"last_log_flush_{shop_url}"):
                     try:
                         count_key = f"log_buffer_products_{shop_url}"
                         pending_count = conn.get(count_key)
                         
                         if pending_count and int(pending_count) > 0:
-                            # Log the summary line
                             log_event('Product', 'Success', f"Webhook Batch: Updated {int(pending_count)} products in the last 10 minutes.", shop_url=shop_url)
-                            # Reset counter to 0 (delete the key)
                             conn.delete(count_key)
                         
-                        # Set the timer for 10 minutes
                         conn.setex(f"last_log_flush_{shop_url}", 600, "done")
                         
                     except Exception as e:
                         print(f"Log Flush Error: {e}")
-                # ------------------------------------------------
 
                 # --- A. HIGH FREQUENCY TASKS ---
                 
@@ -1698,15 +1693,21 @@ def run_schedule():
                     q.enqueue(sync_odoo_cancellations, shop_url, job_timeout=600)
                     conn.setex(f"last_cancel_{shop_url}", 300, "done")
 
+                # 4. Return Sync (Every 60 mins)
+                if not conn.get(f"last_ret_sync_{shop_url}"):
+                    q.enqueue(sync_odoo_returns, shop_url, job_timeout=600)
+                    conn.setex(f"last_ret_sync_{shop_url}", 3600, "done")
+                    print(f"⏰ Triggered Return Sync for {shop_url}")
+
                 # --- B. DAILY TASKS (24 Hours = 86400s) ---
                 
-                # 4. Master Customer Sync (Once per day)
+                # 5. Master Customer Sync (Once per day)
                 if not conn.get(f"last_cust_sync_{shop_url}"):
                     q.enqueue(sync_customers_master, shop_url, job_timeout=1200)
                     conn.setex(f"last_cust_sync_{shop_url}", 86400, "done")
                     print(f"⏰ Triggered Daily Customer Sync for {shop_url}")
 
-                # 5. Master Product Sync (Once per day)
+                # 6. Master Product Sync (Once per day)
                 if not conn.get(f"last_prod_sync_{shop_url}"):
                     q.enqueue(sync_products_master, shop_url, job_timeout=3600)
                     conn.setex(f"last_prod_sync_{shop_url}", 86400, "done")
@@ -1714,19 +1715,13 @@ def run_schedule():
 
             # --- C. GLOBAL MAINTENANCE ---
             
-            # 6. Cleanup Logs (Once per day)
+            # 7. Cleanup Logs (Once per day)
             if not conn.get("last_log_cleanup"):
                 cleanup_old_logs()
                 conn.setex("last_log_cleanup", 86400, "done") 
 
-        # Keep the main heartbeat at 60s so high-freq tasks (like cancellations) aren't delayed
+        # Heartbeat sleep
         time.sleep(60)
-
-            # 7. Return Sync (Every 60 mins)
-                if not conn.get(f"last_ret_sync_{shop_url}"):
-                    q.enqueue(sync_odoo_returns, shop_url, job_timeout=600)
-                    conn.setex(f"last_ret_sync_{shop_url}", 3600, "done")
-                    print(f"⏰ Triggered Return Sync for {shop_url}")
 
 def sync_images_only_manual(shop_url):
     """
