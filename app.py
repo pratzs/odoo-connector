@@ -1537,34 +1537,43 @@ def api_get_locations():
 @app.route('/save_settings', methods=['POST'])
 @require_shopify_session
 def save_settings():
-    shop_url = request.args.get('shop')
-    
-    # --- FIX STARTS HERE ---
-    # 1. Try to get JSON safely (silent=True prevents the 415 Crash)
+    # 1. Get Data FIRST so we can check it for the shop URL
     data = request.get_json(silent=True)
-    
-    # 2. If no JSON found, fallback to Form Data
     if not data:
         data = request.form.to_dict()
-    # --- FIX ENDS HERE ---
     
-    if not data: return jsonify({"message": "Error: No data provided"}), 400
+    if not data: 
+        return jsonify({"message": "Error: No data provided"}), 400
+
+    # 2. ROBUST SHOP RETRIEVAL
+    # Try URL first, then fall back to the data body (where the HTML form puts it)
+    shop_url = request.args.get('shop')
+    if not shop_url:
+        shop_url = data.get('shop_url') or data.get('shop')
+
+    if not shop_url:
+        return jsonify({"message": "Error: Missing shop parameter"}), 400
 
     try:
+        # 3. Query Database
         shop = Shop.query.filter_by(shop_url=shop_url).first()
-        if not shop: return jsonify({"message": "Shop not found"}), 404
+        if not shop: 
+            return jsonify({"message": f"Shop {shop_url} not found"}), 404
 
-        # 1. Save Core Fields
+        # 4. Save Core Fields
         if 'odoo_company_id' in data: shop.odoo_company_id = int(data['odoo_company_id'])
         if 'company_id' in data: shop.odoo_company_id = int(data['company_id'])
         if 'odoo_url' in data: shop.odoo_url = data['odoo_url']
         if 'odoo_db' in data: shop.odoo_db = data['odoo_db']
         if 'odoo_user' in data: shop.odoo_username = data['odoo_user']
-        if 'odoo_pass' in data and data['odoo_pass']: shop.odoo_password = data['odoo_pass']
+        # Only update password if user typed one (HTML forms send empty string if untouched)
+        if data.get('odoo_pass') and data['odoo_pass'].strip(): 
+            shop.odoo_password = data['odoo_pass']
+            
         if 'sync_start_date' in data: shop.sync_start_date = data['sync_start_date']
 
-        # 2. Save App Settings
-        ignore_fields = ['odoo_company_id', 'company_id', 'sync_start_date', 'shop', 'hmac', 'timestamp', 'odoo_url', 'odoo_db', 'odoo_user', 'odoo_pass']
+        # 5. Save App Settings
+        ignore_fields = ['odoo_company_id', 'company_id', 'sync_start_date', 'shop', 'shop_url', 'hmac', 'timestamp', 'odoo_url', 'odoo_db', 'odoo_user', 'odoo_pass']
         for key, value in data.items():
             if key in ignore_fields: continue
             val_str = json.dumps(value) if isinstance(value, (list, dict, bool)) else str(value)
@@ -1577,11 +1586,12 @@ def save_settings():
         automate_webhook_registration(shop_url)
         log_event('Settings', 'Success', 'Configuration saved successfully', shop_url=shop_url)
         
-        # Return HTML redirect if it was a Form Post, otherwise JSON
-        # We check request.headers to see if they asked for JSON
+        # 6. Response Handling
+        # If the client explicitly asked for JSON, give JSON
         if request.accept_mimetypes.accept_json and not request.accept_mimetypes.accept_html:
              return jsonify({"success": True})
         
+        # Otherwise, assume HTML form submission and Redirect
         return f"✅ Settings Saved! <script>window.location.href='/?shop={shop_url}';</script>"
 
     except Exception as e:
