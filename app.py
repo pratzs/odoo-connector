@@ -101,12 +101,14 @@ SCOPES = (
     "read_assigned_fulfillment_orders,write_assigned_fulfillment_orders,"
     "read_merchant_managed_fulfillment_orders,write_merchant_managed_fulfillment_orders,"
     "read_third_party_fulfillment_orders,write_third_party_fulfillment_orders,"
+    "read_fulfillments,write_fulfillments," # Added for sync consistency
     "read_files,write_files,"
     "read_reports,write_reports,"
     "read_price_rules,write_price_rules,"
     "read_discounts,write_discounts,"
     "read_returns,write_returns,"
-    "read_companies,write_companies" 
+    "read_companies,write_companies,"
+    "write_payments"
 )
 
 # [ADD THIS BLOCK] -> This tells the library your keys globally
