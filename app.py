@@ -1538,8 +1538,15 @@ def api_get_locations():
 @require_shopify_session
 def save_settings():
     shop_url = request.args.get('shop')
-    # Try getting JSON first; if empty, grab Form Data
-    data = request.json or request.form.to_dict()
+    
+    # --- FIX STARTS HERE ---
+    # 1. Try to get JSON safely (silent=True prevents the 415 Crash)
+    data = request.get_json(silent=True)
+    
+    # 2. If no JSON found, fallback to Form Data
+    if not data:
+        data = request.form.to_dict()
+    # --- FIX ENDS HERE ---
     
     if not data: return jsonify({"message": "Error: No data provided"}), 400
 
@@ -1571,9 +1578,11 @@ def save_settings():
         log_event('Settings', 'Success', 'Configuration saved successfully', shop_url=shop_url)
         
         # Return HTML redirect if it was a Form Post, otherwise JSON
-        if not request.json:
-             return f"✅ Settings Saved! <script>window.location.href='/?shop={shop_url}';</script>"
-        return jsonify({"success": True})
+        # We check request.headers to see if they asked for JSON
+        if request.accept_mimetypes.accept_json and not request.accept_mimetypes.accept_html:
+             return jsonify({"success": True})
+        
+        return f"✅ Settings Saved! <script>window.location.href='/?shop={shop_url}';</script>"
 
     except Exception as e:
         db.session.rollback()
