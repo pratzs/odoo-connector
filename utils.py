@@ -145,3 +145,37 @@ def setup_shopify_session(shop_url=None):
     except Exception as e:
         print(f"Shopify Session Error: {e}")
         return False
+
+# 7. Automated Webhook Registrations
+
+def automate_webhook_registration(shop_url):
+    """
+    Called automatically during Auth or Settings save.
+    Registers all required webhooks without user intervention.
+    """
+    if not setup_shopify_session(shop_url):
+        return False
+
+    app_host = os.getenv('HOST')
+    target_address = f"{app_host}/webhooks/shopify"
+    
+    required_topics = [
+        'orders/create', 'orders/updated', 'orders/cancelled',
+        'products/create', 'refunds/create', 'inventory_levels/update'
+    ]
+
+    try:
+        existing_hooks = shopify.Webhook.find()
+        for topic in required_topics:
+            # Check if already registered
+            match = next((h for h in existing_hooks if h.topic == topic and h.address == target_address), None)
+            if not match:
+                new_hook = shopify.Webhook()
+                new_hook.topic = topic
+                new_hook.address = target_address
+                new_hook.format = 'json'
+                new_hook.save()
+        return True
+    except Exception as e:
+        print(f"Auto-Webhook Error for {shop_url}: {e}")
+        return False
