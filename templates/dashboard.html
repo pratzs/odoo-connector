@@ -859,6 +859,7 @@ function saveSettings() {
     if (!companyId) { alert("Please select a Company first."); return; }
 
     const payload = {
+        shop_url: CURRENT_SHOP_URL,
         odoo_company_id: companyId,
         inventory_field: document.querySelector('#invType').value,
         sync_zero_stock: document.getElementById('checkZeroStock').checked,
