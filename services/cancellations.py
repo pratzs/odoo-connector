@@ -5,6 +5,7 @@ from utils import get_odoo_connection, log_event, setup_shopify_session, get_con
 def sync_odoo_cancellations(shop_url):
     """
     Background Task: Checks for orders cancelled in Odoo and cancels them in Shopify.
+    Direction: Odoo -> Shopify
     """
     # Import app inside function to prevent circular errors
     from app import app
@@ -57,3 +58,42 @@ def sync_odoo_cancellations(shop_url):
 
         if sync_count > 0:
             log_event('Cancel Sync', 'Success', f"Synced {sync_count} cancellations from Odoo.", shop_url=shop_url)
+
+
+def process_cancellation(data, shop_url):
+    """
+    Webhook Handler: triggered when an order is cancelled in Shopify.
+    Direction: Shopify -> Odoo
+    """
+    # Note: We don't need 'with app.app_context()' here because 
+    # RQ workers load the context automatically when running the job.
+    
+    shopify_name = data.get('name')
+    client_ref = f"ONLINE_{shopify_name}"
+    
+    odoo = get_odoo_connection(shop_url)
+    if not odoo:
+        log_event('Order Cancel', 'Error', f"Could not connect to Odoo for {shop_url}", shop_url=shop_url)
+        return
+
+    try:
+        # 1. Find the Order ID in Odoo
+        domain = [['client_order_ref', '=', client_ref]]
+        ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+            'sale.order', 'search', [domain])
+        
+        if not ids:
+            log_event('Order Cancel', 'Warning', f"Order {client_ref} not found in Odoo. Skipping.", shop_url=shop_url)
+            return
+
+        order_id = ids[0]
+
+        # 2. Check current state & Cancel
+        try:
+            odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'action_cancel', [[order_id]])
+            log_event('Order Cancel', 'Success', f"Cancelled Odoo Order {client_ref}", shop_url=shop_url)
+        except Exception as e:
+             log_event('Order Cancel', 'Warning', f"Could not cancel {client_ref}. Odoo said: {e}", shop_url=shop_url)
+
+    except Exception as e:
+        log_event('Order Cancel', 'Error', f"Error processing cancellation for {shopify_name}: {e}", shop_url=shop_url)
