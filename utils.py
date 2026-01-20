@@ -179,3 +179,29 @@ def automate_webhook_registration(shop_url):
     except Exception as e:
         print(f"Auto-Webhook Error for {shop_url}: {e}")
         return False
+
+# 8. Setup Shopify Sessions
+def setup_shopify_session(shop_url):
+    """
+    Utility: Loads a shop's access token and activates the Shopify session.
+    Essential for Multi-tenant operations.
+    """
+    try:
+        # 1. Look up the shop in your Supabase database
+        shop = Shop.query.filter_by(shop_url=shop_url).first()
+        
+        if not shop or not shop.access_token:
+            print(f"❌ Session Setup Failed: {shop_url} not found in DB.")
+            return False
+        
+        # 2. Create the session object
+        # Note: SHOPIFY_API_VERSION should be something like '2024-01' or '2025-01'
+        session = shopify.Session(shop.shop_url, SHOPIFY_API_VERSION, shop.access_token)
+        
+        # 3. Tell the library to use this session for all subsequent calls
+        shopify.ShopifyResource.activate_session(session)
+        return True
+        
+    except Exception as e:
+        print(f"❌ Critical Session Error for {shop_url}: {e}")
+        return False
