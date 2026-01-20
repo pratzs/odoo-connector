@@ -810,7 +810,6 @@ def app_uninstalled():
 @app.route('/', methods=['GET'])
 @app.route('/settings', methods=['GET'])
 @app.route('/maintenance', methods=['GET'])
-@require_shopify_session
 def home():
     shop_url = request.args.get('shop')
     if not shop_url: 
