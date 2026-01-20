@@ -119,10 +119,11 @@ def get_odoo_connection(shop_url):
         log_event('System', 'Error', f"Connection failed for {shop_url}: {e}", shop_url=shop_url)
         return None
 
-# 6. SHOPIFY SESSION HELPER (Moved from app.py)
+# --- 6. SHOPIFY SESSION HELPER ---
 def setup_shopify_session(shop_url=None):
     """
     Activates a Shopify session for a specific shop from the Database.
+    Clears any existing global session to prevent 401/403 leakage.
     """
     if not shop_url:
         try:
@@ -133,17 +134,27 @@ def setup_shopify_session(shop_url=None):
     if not shop_url: return False
 
     try:
+        # 1. Clear any old session from library memory
+        shopify.ShopifyResource.clear_session()
+
         shop = Shop.query.filter_by(shop_url=shop_url).first()
-        if not shop: return False
+        if not shop or not shop.access_token: 
+            print(f"❌ DB Lookup Failed for {shop_url}")
+            return False
         
-        # Get Version from Env or Default
-        api_version = os.getenv('SHOPIFY_API_VERSION', '2025-10')
+        # 2. Use the version from app.py or fallback to stable
+        # Note: Ensure SHOPIFY_API_VERSION is imported or defined
+        api_version = os.getenv('SHOPIFY_API_VERSION', '2025-01')
         
         session = shopify.Session(shop.shop_url, api_version, shop.access_token)
         shopify.ShopifyResource.activate_session(session)
+        
+        # 3. Optional: Quick smoke test to verify token
+        # shopify.Shop.current() 
+        
         return True
     except Exception as e:
-        print(f"Shopify Session Error: {e}")
+        print(f"Shopify Session Error for {shop_url}: {e}")
         return False
 
 # 7. Automated Webhook Registrations
@@ -164,14 +175,14 @@ def automate_webhook_registration(shop_url):
     
     # Topic -> Target mapping
     webhook_targets = {
-        'orders/create': general_address,
-        'orders/updated': general_address,
-        'orders/cancelled': general_address,
-        'products/create': general_address,
-        'refunds/create': general_address,
-        'inventory_levels/update': general_address,
-        'app/uninstalled': uninstall_address  # <--- Added & Pointed to correct route
-    }
+    'orders/create': general_address,
+    'orders/updated': general_address,
+    'orders/cancelled': general_address,
+    'products/create': general_address,
+    'refunds/create': general_address,
+    'inventory_levels/update': general_address,
+    'app/uninstalled': uninstall_address
+}
 
     try:
         existing_hooks = shopify.Webhook.find()
@@ -191,30 +202,4 @@ def automate_webhook_registration(shop_url):
         return True
     except Exception as e:
         print(f"Auto-Webhook Error for {shop_url}: {e}")
-        return False
-
-# 8. Setup Shopify Sessions
-def setup_shopify_session(shop_url):
-    """
-    Utility: Loads a shop's access token and activates the Shopify session.
-    Essential for Multi-tenant operations.
-    """
-    try:
-        # 1. Look up the shop in your Supabase database
-        shop = Shop.query.filter_by(shop_url=shop_url).first()
-        
-        if not shop or not shop.access_token:
-            print(f"❌ Session Setup Failed: {shop_url} not found in DB.")
-            return False
-        
-        # 2. Create the session object
-        # Note: SHOPIFY_API_VERSION should be something like '2024-01' or '2025-01'
-        session = shopify.Session(shop.shop_url, SHOPIFY_API_VERSION, shop.access_token)
-        
-        # 3. Tell the library to use this session for all subsequent calls
-        shopify.ShopifyResource.activate_session(session)
-        return True
-        
-    except Exception as e:
-        print(f"❌ Critical Session Error for {shop_url}: {e}")
         return False
