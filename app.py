@@ -9,19 +9,26 @@ import schedule
 import time
 import shopify
 import concurrent.futures
+import requests
+import random
+import xmlrpc.client
+import ssl
+import gc
+import smtplib
+
 from flask import Flask, request, jsonify, render_template, session, url_for, render_template_string, redirect
+from datetime import datetime, timedelta
+from functools import wraps
+from sqlalchemy import text
+from email.message import EmailMessage
+from rq import Retry
+
+# --- CUSTOM MODULES ---
 from models import db, ProductMap, SyncLog, AppSetting, CustomerMap, ProcessedOrder, Shop
 from odoo_client import OdooClient
 from security_utils import require_shopify_session 
-from rq import Retry
-import requests
-from datetime import datetime, timedelta
-from functools import wraps
-import random
-import xmlrpc.client
-from sqlalchemy import text
-import ssl
-import gc
+
+# --- UTILS (Merged & Clean) ---
 from utils import (
     conn, 
     q, 
@@ -31,8 +38,10 @@ from utils import (
     acquire_distributed_lock,
     get_odoo_connection, 
     setup_shopify_session, 
-    automate_webhook_registration
+    automate_webhook_registration  # <--- Crucial! Keep this one.
 )
+
+# --- SERVICES ---
 from services.orders import process_order_data
 from services.products import (
     sync_products_master, 
@@ -42,17 +51,17 @@ from services.products import (
     find_shopify_product_by_sku
 )
 from services.customers import sync_customers_master
-from utils import (
-    conn, q, get_config, set_config, log_event, 
-    acquire_distributed_lock, 
-    get_odoo_connection, setup_shopify_session
-)
 from services.refunds import process_refund_data
 from services.returns import sync_odoo_returns
-import smtplib
-from email.message import EmailMessage
 
-socket.setdefaulttimeout(60) # Force 60-second timeout for all network calls
+# ⚠️ CHECK: Ensure these exist in your services folder, or the app will crash on webhooks
+try:
+    from services.cancellations import process_cancellation
+    from services.fulfillments import sync_odoo_fulfillments
+except ImportError:
+    print("⚠️ Warning: Cancellation or Fulfillment services missing. Skipping import.")
+
+socket.setdefaulttimeout(60)
 
 def setup_shopify_session(shop_url):
     """
