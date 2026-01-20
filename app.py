@@ -2992,21 +2992,19 @@ def gdpr_shop_redact():
 def api_get_unmapped_products():
     shop_url = request.args.get('shop')
     
-    # Safety Check for Helper
-    if 'verify_shopify_session' not in globals():
-        return jsonify({'error': 'Server Error: Helper function missing'}), 500
-
-    if not verify_shopify_session(shop_url): 
-        return jsonify({'error': 'Unauthorized'}), 401
+    # --- FIX START ---
+    # We use setup_shopify_session (which exists), NOT verify_shopify_session (which does not).
+    if not setup_shopify_session(shop_url): 
+        return jsonify({'error': 'Unauthorized: Could not connect to Shopify'}), 401
+    # --- FIX END ---
 
     try:
         with app.app_context():
+            # 1. Get list of ALREADY mapped Odoo IDs to ignore
             mapped_records = ProductMap.query.filter(ProductMap.shop_url == shop_url, ProductMap.odoo_product_id > 0).all()
             mapped_skus = {m.sku for m in mapped_records}
 
-            if not setup_shopify_session(shop_url):
-                 return jsonify({'error': 'Shopify Connection Failed'}), 500
-
+            # 2. Fetch all Shopify products
             unmapped_items = []
             page = shopify.Product.find(limit=250, fields="id,title,variants,images")
             
@@ -3014,6 +3012,7 @@ def api_get_unmapped_products():
                 for p in page:
                     image_url = p.images[0].src if p.images else ""
                     for v in p.variants:
+                        # If variant has a SKU, but that SKU is NOT in our database...
                         if v.sku and v.sku not in mapped_skus:
                             unmapped_items.append({
                                 'shopify_id': p.id,
@@ -3034,6 +3033,8 @@ def api_get_unmapped_products():
             })
 
     except Exception as e:
+        print(f"CRITICAL DIAGNOSTIC ERROR: {str(e)}")
+        return jsonify({'error': str(e)}), 500
         print(f"CRITICAL DIAGNOSTIC ERROR: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
