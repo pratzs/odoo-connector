@@ -591,7 +591,7 @@
 
         // --- UPDATE YOUR DOMContentLoaded TO USE IT ---
         document.addEventListener("DOMContentLoaded", function() {
-            // ... your existing code for setCheck and setVal ...
+           
 
             // Format the status badges
             const invEl = document.getElementById('status-last-inv');
@@ -635,14 +635,12 @@ function handleNavigation() {
     // Listen for initial load
     window.addEventListener('load', handleNavigation);
 
-        // --- Global Config ---
-// --- Global Config with JSON Parsing ---
+// --- 1. Global Config & JSON Parsing ---
 const rawConfig = {{ config | tojson | safe if config else '{}' }};
 const SAVED_SETTINGS = {};
 
 Object.keys(rawConfig).forEach(key => {
     try {
-        // If the value is a JSON string (like "[1, 2]"), parse it back to an array
         if (typeof rawConfig[key] === 'string' && (rawConfig[key].startsWith('[') || rawConfig[key].startsWith('{'))) {
             SAVED_SETTINGS[key] = JSON.parse(rawConfig[key]);
         } else {
@@ -653,88 +651,79 @@ Object.keys(rawConfig).forEach(key => {
     }
 });
 
-// CLEANUP FIX: Ensure the shop URL doesn't have a #hash attached to it
 const CURRENT_SHOP_URL = "{{ shop_url }}".split('#')[0]; 
-
 const modalElement = document.getElementById('orderImportModal');
 const modal = modalElement ? new bootstrap.Modal(modalElement) : null;
 
-// --- HELPERS ---
-function showToast(msg) {
-    const toastEl = document.getElementById('liveToast');
-    if(toastEl) {
-        document.getElementById('toastMessage').innerText = msg;
-        new bootstrap.Toast(toastEl).show();
-    } else { alert(msg); }
-}
-
-function formatLocalTime(utcString) {
-    if (!utcString) return '';
-    try {
-        const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-        return new Date(utcString).toLocaleString(undefined, {
-            timeZone: userTimezone,
-            year: 'numeric', month: '2-digit', day: '2-digit',
-            hour: '2-digit', minute: '2-digit', second: '2-digit',
-            hour12: true
-        });
-    } catch (e) { return utcString; }
-}
-
+// --- 2. Main Initialization ---
 document.addEventListener("DOMContentLoaded", function() {
-            const setCheck = (id, val) => { 
-    const el = document.getElementById(id); 
-    if(el) {
-        // Smart Check: Handles Boolean true/false AND String "true"/"false"/"True"/"False"
-        if (typeof val === 'string') {
-            el.checked = (val.toLowerCase() === 'true');
-        } else {
-            el.checked = !!val;
+    
+    // Helper: Check a checkbox based on a value
+    const setCheck = (id, val) => { 
+        const el = document.getElementById(id); 
+        if(el) {
+            if (typeof val === 'string') {
+                el.checked = (val.toLowerCase() === 'true');
+            } else {
+                el.checked = !!val;
+            }
         }
-    }
-};
-            const setVal = (id, val) => { const el = document.getElementById(id); if(el) el.value = val; };
+    };
+    
+    // Helper: Set an input/select value
+    const setVal = (id, val) => { const el = document.getElementById(id); if(el) el.value = val; };
 
-            // Products
-            setCheck('prodAutoCreate', SAVED_SETTINGS.prod_auto_create);
-            setCheck('prodAutoPublish', SAVED_SETTINGS.prod_auto_publish);
-            setCheck('prodSyncImages', SAVED_SETTINGS.prod_sync_images);
-            setCheck('fieldTags', SAVED_SETTINGS.prod_sync_tags);
-            setCheck('fieldMetaVendorCode', SAVED_SETTINGS.prod_sync_meta_vendor_code);
-            setCheck('fieldMetaOriginalPrice', SAVED_SETTINGS.prod_sync_meta_original_price);
-            setCheck('fieldPrice', SAVED_SETTINGS.prod_sync_price);
-            setCheck('fieldCost', SAVED_SETTINGS.prod_sync_cost);
-            setCheck('fieldTitle', SAVED_SETTINGS.prod_sync_title);
-            setCheck('fieldDesc', SAVED_SETTINGS.prod_sync_desc);
-            setCheck('fieldProductType', SAVED_SETTINGS.prod_sync_type);
-            setCheck('fieldVendor', SAVED_SETTINGS.prod_sync_vendor);
-            setCheck('fieldBarcode', SAVED_SETTINGS.prod_sync_barcode);
+    // --- A. Format Status Badges ---
+    const invEl = document.getElementById('status-last-inv');
+    const ordEl = document.getElementById('status-last-order');
+    const retEl = document.getElementById('status-last-ret'); 
 
-            // Orders
-            setCheck('orderSyncTax', SAVED_SETTINGS.order_sync_tax);
-            setVal('syncStartDate', SAVED_SETTINGS.sync_start_date || '2000-01-01');
+    if(invEl) invEl.innerText = formatTimeAgo(invEl.innerText);
+    if(ordEl) ordEl.innerText = formatTimeAgo(ordEl.innerText);
+    if(retEl) retEl.innerText = formatTimeAgo(retEl.innerText);
 
-            // Inventory (FIXED: Mapping to correct keys from your app.py)
-            setCheck('checkZeroStock', SAVED_SETTINGS.sync_zero_stock); // Changed from sync_zero
-            setCheck('checkCommitted', SAVED_SETTINGS.combine_committed);
-            setVal('invType', SAVED_SETTINGS.inventory_field || 'qty_available'); // Changed from field
-            setVal('alertEmail', SAVED_SETTINGS.alert_email || '');
-            setVal('alertThreshold', SAVED_SETTINGS.alert_threshold || 50);
+    // --- B. Restore Saved Settings to UI ---
+    // Products
+    setCheck('prodAutoCreate', SAVED_SETTINGS.prod_auto_create);
+    setCheck('prodAutoPublish', SAVED_SETTINGS.prod_auto_publish);
+    setCheck('prodSyncImages', SAVED_SETTINGS.prod_sync_images);
+    setCheck('fieldTags', SAVED_SETTINGS.prod_sync_tags);
+    setCheck('fieldMetaVendorCode', SAVED_SETTINGS.prod_sync_meta_vendor_code);
+    setCheck('fieldMetaOriginalPrice', SAVED_SETTINGS.prod_sync_meta_original_price);
+    setCheck('fieldPrice', SAVED_SETTINGS.prod_sync_price);
+    setCheck('fieldCost', SAVED_SETTINGS.prod_sync_cost);
+    setCheck('fieldTitle', SAVED_SETTINGS.prod_sync_title);
+    setCheck('fieldDesc', SAVED_SETTINGS.prod_sync_desc);
+    setCheck('fieldProductType', SAVED_SETTINGS.prod_sync_type);
+    setCheck('fieldVendor', SAVED_SETTINGS.prod_sync_vendor);
+    setCheck('fieldBarcode', SAVED_SETTINGS.prod_sync_barcode);
 
-            // Customers
-            setVal('custSyncDirection', SAVED_SETTINGS.cust_direction || 'bidirectional');
-            setCheck('custAutoSync', SAVED_SETTINGS.cust_auto_sync);
-            setVal('groupCompaniesList', SAVED_SETTINGS.group_companies_list || '');
-            setCheck('custSyncTagsSwitch', SAVED_SETTINGS.cust_sync_tags);
-            setVal('custWhitelistTags', SAVED_SETTINGS.cust_whitelist_tags || '');
-            setVal('custBlacklistTags', SAVED_SETTINGS.cust_blacklist_tags || '');
-            setCheck('custSyncVat', SAVED_SETTINGS.cust_sync_vat);
-            setCheck('custSyncSalesRep', SAVED_SETTINGS.cust_sync_salesrep);
+    // Orders
+    setCheck('orderSyncTax', SAVED_SETTINGS.order_sync_tax);
+    setVal('syncStartDate', SAVED_SETTINGS.sync_start_date || '2000-01-01');
 
-            toggleTagFields(); 
-            if(CURRENT_SHOP_URL) fetchCompanies();
-            handleSidebarNavigation(); // Now runs correctly after settings are restored
-        });
+    // Inventory
+    setCheck('checkZeroStock', SAVED_SETTINGS.sync_zero_stock);
+    setCheck('checkCommitted', SAVED_SETTINGS.combine_committed);
+    setVal('invType', SAVED_SETTINGS.inventory_field || 'qty_available');
+    setVal('alertEmail', SAVED_SETTINGS.alert_email || '');
+    setVal('alertThreshold', SAVED_SETTINGS.alert_threshold || 50);
+
+    // Customers
+    setVal('custSyncDirection', SAVED_SETTINGS.cust_direction || 'bidirectional');
+    setCheck('custAutoSync', SAVED_SETTINGS.cust_auto_sync);
+    setVal('groupCompaniesList', SAVED_SETTINGS.group_companies_list || '');
+    setCheck('custSyncTagsSwitch', SAVED_SETTINGS.cust_sync_tags);
+    setVal('custWhitelistTags', SAVED_SETTINGS.cust_whitelist_tags || '');
+    setVal('custBlacklistTags', SAVED_SETTINGS.cust_blacklist_tags || '');
+    setCheck('custSyncVat', SAVED_SETTINGS.cust_sync_vat);
+    setCheck('custSyncSalesRep', SAVED_SETTINGS.cust_sync_salesrep);
+
+    // --- C. Final Startup Logic ---
+    toggleTagFields(); 
+    if(CURRENT_SHOP_URL) fetchCompanies();
+    handleNavigation(); // Corrected from handleSidebarNavigation
+});
 
 function toggleTagFields() {
     const toggle = document.getElementById('custSyncTagsSwitch');
