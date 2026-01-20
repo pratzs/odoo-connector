@@ -63,7 +63,7 @@ def set_config(key, value, shop_url=None):
         db.session.rollback()
         return False
 
-# 3. LOGGING HELPER
+# 3. LOGGING HELPER (Context-Aware)
 def log_event(entity, status, message, shop_url=None):
     if not shop_url:
         try:
@@ -73,13 +73,25 @@ def log_event(entity, status, message, shop_url=None):
     if not shop_url:
         shop_url = 'System'
 
-    try:
-        log = SyncLog(shop_url=shop_url, entity=entity, status=status, message=message, timestamp=datetime.utcnow())
-        db.session.add(log)
-        db.session.commit()
-    except Exception as e: 
-        print(f"DB LOG ERROR: {e}")
-        db.session.rollback()
+    # Inner function to perform the DB write
+    def write_log():
+        try:
+            log = SyncLog(shop_url=shop_url, entity=entity, status=status, message=message, timestamp=datetime.utcnow())
+            db.session.add(log)
+            db.session.commit()
+        except Exception as e:
+            print(f"DB LOG ERROR: {e}")
+            db.session.rollback()
+
+    # Check if we are inside an application context
+    from flask import current_app
+    if current_app:
+        write_log()
+    else:
+        # If no context (e.g., inside RQ worker), create one manually
+        from app import app
+        with app.app_context():
+            write_log()
 
 # 4. REDIS LOCK HELPER
 @contextmanager
