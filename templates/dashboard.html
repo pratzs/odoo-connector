@@ -119,6 +119,19 @@
     
     <div id="tab-overview" class="tab-content-area active">
     <div class="mb-4">
+        {% if not config.odoo_url %}
+        <div class="p-banner mb-4" style="background-color: #f0f7ff; border: 1px solid #b3d1ff; border-radius: 8px; display: flex; padding: 16px;">
+            <div class="p-banner-icon" style="color: #005bd3; margin-right: 12px;"><i class="bi bi-info-circle-fill"></i></div>
+            <div>
+                <div class="p-banner-title" style="font-weight: 600;">Finish your setup</div>
+                <div class="p-banner-message" style="font-size: 13px;">
+                    Welcome! To start syncing, you need to connect your Odoo instance. 
+                    Go to the <strong><a href="javascript:void(0)" onclick="window.location.pathname='/settings'; handleNavigation();" style="color: #005bd3; text-decoration: underline;">Settings</a></strong> tab to enter your Odoo URL and credentials.
+                </div>
+            </div>
+        </div>
+        {% endif %}
+        
         <h1 class="h3 fw-bold mb-1" style="color: var(--p-on-surface);">Dashboard</h1>
         <p class="text-muted mb-3" style="font-size: 15px;">
             Welcome to the Odoo Connector. Automate your operations with real-time synchronization.
@@ -151,26 +164,34 @@
 
     <div class="row">
         <div class="col-md-4">
-            <div class="card p-3">
-                <div class="section-header">System Status</div>
-                <div class="d-flex justify-content-between mb-3 align-items-center">
-                    <span class="text-muted">Shopify Connection</span>
-                    <span class="badge-status badge-success">Active</span>
-                </div>
-                <div class="d-flex justify-content-between align-items-center">
-                    <span class="text-muted">Odoo Connection</span>
-                    <span class="badge-status badge-success">Active</span>
-                </div>
-                <hr style="border-color: var(--p-border);">
-                <div class="d-grid gap-2">
-                    <button id="btnSyncLocs" onclick="syncLocations()" class="btn btn-secondary text-start">
-                        <i class="bi bi-geo-alt me-2"></i> Sync Locations
-                    </button>
-                    <a href="/install?shop={{ shop_url }}" class="btn btn-secondary text-start text-muted" style="font-size: 12px;">
-                        <i class="bi bi-shield-lock me-1"></i> Re-Authenticate
-                    </a>
-                </div>
-            </div>
+           <div class="card p-3">
+    <div class="section-header">System Status</div>
+    
+    <div class="d-flex justify-content-between mb-3 align-items-center">
+        <span class="text-muted">Shopify Connection</span>
+        <span class="badge-status badge-success">Active</span>
+    </div>
+
+    <div class="d-flex justify-content-between align-items-center">
+        <span class="text-muted">Odoo Connection</span>
+        {% if config.odoo_url %}
+            <span class="badge-status badge-success">Active</span>
+        {% else %}
+            <span class="badge-status badge-danger">Not Connected</span>
+        {% endif %}
+    </div>
+
+    <hr style="border-color: var(--p-border);">
+    
+    <div class="d-grid gap-2">
+        <button id="btnSyncLocs" onclick="syncLocations()" class="btn btn-secondary text-start" {% if not config.odoo_url %}disabled{% endif %}>
+            <i class="bi bi-geo-alt me-2"></i> Sync Locations
+        </button>
+        <a href="/install?shop={{ shop_url }}" class="btn btn-secondary text-start text-muted" style="font-size: 12px;">
+            <i class="bi bi-shield-lock me-1"></i> Re-Authenticate
+        </a>
+    </div>
+</div>
             <div class="card p-3">
                 <div class="section-header">Quick Actions</div>
                 <div class="d-grid gap-2">
