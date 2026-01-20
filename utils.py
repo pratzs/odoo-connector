@@ -151,30 +151,43 @@ def setup_shopify_session(shop_url=None):
 def automate_webhook_registration(shop_url):
     """
     Called automatically during Auth or Settings save.
-    Registers all required webhooks without user intervention.
+    Registers all required webhooks, including the uninstall hook.
     """
     if not setup_shopify_session(shop_url):
         return False
 
     app_host = os.getenv('HOST')
-    target_address = f"{app_host}/webhooks/shopify"
     
-    required_topics = [
-        'orders/create', 'orders/updated', 'orders/cancelled',
-        'products/create', 'refunds/create', 'inventory_levels/update'
-    ]
+    # Define the general receiver and the specific uninstall receiver
+    general_address = f"{app_host}/webhooks/shopify"
+    uninstall_address = f"{app_host}/webhooks/app_uninstalled"
+    
+    # Topic -> Target mapping
+    webhook_targets = {
+        'orders/create': general_address,
+        'orders/updated': general_address,
+        'orders/cancelled': general_address,
+        'products/create': general_address,
+        'refunds/create': general_address,
+        'inventory_levels/update': general_address,
+        'app/uninstalled': uninstall_address  # <--- Added & Pointed to correct route
+    }
 
     try:
         existing_hooks = shopify.Webhook.find()
-        for topic in required_topics:
-            # Check if already registered
-            match = next((h for h in existing_hooks if h.topic == topic and h.address == target_address), None)
+        
+        for topic, target in webhook_targets.items():
+            # Check if this topic is already registered to THIS specific address
+            match = next((h for h in existing_hooks if h.topic == topic and h.address == target), None)
+            
             if not match:
                 new_hook = shopify.Webhook()
                 new_hook.topic = topic
-                new_hook.address = target_address
+                new_hook.address = target
                 new_hook.format = 'json'
                 new_hook.save()
+                print(f"✅ Registered {topic} for {shop_url}")
+                
         return True
     except Exception as e:
         print(f"Auto-Webhook Error for {shop_url}: {e}")
