@@ -1492,42 +1492,46 @@ def api_get_locations():
 
 
 @app.route('/api/settings/save', methods=['POST'])
+@require_shopify_session  # <--- This is the security gate we just built
 def api_save_settings():
+    # shop_url is extracted by the decorator from request.args
     shop_url = request.args.get('shop')
     data = request.json
     
-    if not shop_url:
-        return jsonify({"message": "Error: Missing shop parameter"}), 400
+    if not data:
+        return jsonify({"message": "Error: No data provided"}), 400
 
     try:
         # 1. Update Core Shop Settings (Table: Shop)
         shop = Shop.query.filter_by(shop_url=shop_url).first()
-        if shop:
-            if 'odoo_company_id' in data:
-                shop.odoo_company_id = int(data['odoo_company_id'])
-            elif 'company_id' in data: 
-                shop.odoo_company_id = int(data['company_id'])
+        if not shop:
+            return jsonify({"message": "Error: Shop record not found"}), 404
 
-            if 'sync_start_date' in data:
-                shop.sync_start_date = data['sync_start_date']
+        # Map core fields directly to the Shop table
+        if 'odoo_company_id' in data:
+            shop.odoo_company_id = int(data['odoo_company_id'])
+        elif 'company_id' in data: 
+            shop.odoo_company_id = int(data['company_id'])
 
-            db.session.add(shop)
+        if 'sync_start_date' in data:
+            shop.sync_start_date = data['sync_start_date']
 
         # 2. Update App Settings (Table: AppSetting)
+        # These are the keys your dashboard.html is sending
         configs = [
             'inventory_locations', 'inventory_field', 'sync_zero_stock', 'combine_committed',
-            'cust_direction', 'cust_auto_sync', 'cust_sync_tags', 'cust_whitelist_tags', 'cust_blacklist_tags', 'cust_sync_vat', 'cust_sync_salesrep',
-            'prod_auto_create', 'prod_auto_publish', 'prod_sync_images', 'prod_sync_tags', 'prod_sync_meta_vendor_code',
-            'prod_sync_meta_original_price',
-            'prod_sync_price', 'prod_sync_cost', 'prod_sync_barcode', 'prod_sync_title', 'prod_sync_desc', 'prod_sync_type', 'prod_sync_vendor',
-            'group_companies_list',
-            'order_sync_tax', 'alert_email', 'alert_threshold'
+            'cust_direction', 'cust_auto_sync', 'cust_sync_tags', 'cust_whitelist_tags', 
+            'cust_blacklist_tags', 'cust_sync_vat', 'cust_sync_salesrep',
+            'prod_auto_create', 'prod_auto_publish', 'prod_sync_images', 'prod_sync_tags', 
+            'prod_sync_meta_vendor_code', 'prod_sync_meta_original_price',
+            'prod_sync_price', 'prod_sync_cost', 'prod_sync_barcode', 'prod_sync_title', 
+            'prod_sync_desc', 'prod_sync_type', 'prod_sync_vendor',
+            'group_companies_list', 'order_sync_tax', 'alert_email', 'alert_threshold'
         ]
         
         for key in configs:
             if key in data:
-                # FIX: Explicitly handle boolean values so they save as "true"/"false" (JSON)
-                # instead of "True"/"False" (Python String)
+                # Handle booleans and lists as JSON strings so JS can parse them easily later
                 if isinstance(data[key], (list, dict, bool)): 
                     val_str = json.dumps(data[key])
                 else:
@@ -1540,16 +1544,18 @@ def api_save_settings():
                 else:
                     setting.value = val_str
 
-       # 3. Commit
+        # 3. Commit all changes
         db.session.commit()
         
-        # Self-healing: Ensure webhooks are active when settings are saved
+        # Self-healing: Re-verify webhooks on settings save
         automate_webhook_registration(shop_url)
         
         return jsonify({"message": "Settings Saved Successfully"})
 
     except Exception as e:
         db.session.rollback()
+        # Log the error on the server for debugging
+        print(f"❌ Save Error for {shop_url}: {str(e)}")
         return jsonify({"message": f"Save Error: {str(e)}"}), 500
 
 @app.route('/test/odoo_health', methods=['GET'])
