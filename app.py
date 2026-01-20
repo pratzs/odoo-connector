@@ -111,6 +111,11 @@ SCOPES = (
     "write_payments"
 )
 
+FREE_STORES = [
+    "vjtrading.myshopify.com",
+    "your-dev-store.myshopify.com"
+]
+
 # [ADD THIS BLOCK] -> This tells the library your keys globally
 shopify.Session.setup(api_key=SHOPIFY_API_KEY, secret=SHOPIFY_API_SECRET)
 
@@ -830,17 +835,15 @@ def home():
     # --- 1. BILLING CHECK (NEW) ---
     # Redirect to billing if they don't have a charge_id
     # The create_billing function we wrote earlier will handle Dev Store bypass
-    if not shop.charge_id:
-        # Fetch shop details to check if it's a dev store before redirecting
-        try:
-            shopify_shop = shopify.Shop.current()
-            raw_plan = shopify_shop.plan_name.lower()
-            is_dev = any(x in raw_plan for x in ['affiliate', 'staff', 'partner_test'])
-            
-            if not is_dev:
-                return redirect(url_for('create_billing', shop=shop_url))
-        except Exception as e:
-            print(f"Billing Check Error: {e}")
+   if shop_url not in FREE_STORES:
+        if not shop.charge_id:
+            try:
+                # Double check it's not a dev store
+                shopify_shop = shopify.Shop.current()
+                if not any(x in shopify_shop.plan_name.lower() for x in ['affiliate', 'staff']):
+                    return redirect(url_for('create_billing', shop=shop_url))
+            except Exception as e:
+                print(f"Billing bypass error: {e}")
 
     # --- 2. SHOW CONNECT FORM (If credentials missing OR user requested edit) ---
     if not shop.odoo_url or not shop.odoo_password or mode == 'connect':
