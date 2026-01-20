@@ -13,6 +13,7 @@ from flask import Flask, request, jsonify, render_template, session, url_for, re
 from models import db, ProductMap, SyncLog, AppSetting, CustomerMap, ProcessedOrder, Shop
 from odoo_client import OdooClient
 from security_utils import require_shopify_session 
+from rq import Retry
 import requests
 from datetime import datetime, timedelta
 import random
@@ -1359,19 +1360,25 @@ def order_webhook():
     data = request.json
     order_num = data.get('name')
 
-    # 3. Handle Cancellation (Keep this fast & simple)
     # 3. Handle Cancellation
     if topic == 'orders/cancelled':
-        # CHANGED: We now pass shop_url to the function
-        # Using a background thread or queue here is best practice to avoid timeouts
-        q.enqueue(process_cancellation, data, shop_url) 
+        q.enqueue(
+            process_cancellation, 
+            data, 
+            shop_url,
+            retry=Retry(max=5, interval=[60, 120, 240, 600, 1200])
+        ) 
         return "Cancellation Queued", 200
 
-    # 4. QUEUE THE SYNC (The Fix)
-    # Instead of running process_order_data immediately, we send it to Redis.
-    # This fixes the "Access Denied" and "Timeout" issues.
+   # 4. QUEUE THE SYNC (With Retries)
     if topic in ['orders/create', 'orders/paid', 'orders/updated']:
-        q.enqueue(background_order_sync, shop_url, data, job_timeout=300)
+        q.enqueue(
+            background_order_sync, 
+            shop_url, 
+            data, 
+            job_timeout=300,
+            retry=Retry(max=5, interval=[60, 120, 240, 600, 1200]) # 1m, 2m, 4m, 10m, 20m
+        )
         return "Queued", 200
 
     return "Ignored", 200
