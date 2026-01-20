@@ -37,6 +37,7 @@ from utils import (
     get_odoo_connection, setup_shopify_session
 )
 from services.refunds import process_refund_data
+from services.returns import sync_odoo_returns
 import smtplib
 from email.message import EmailMessage
 
@@ -1720,6 +1721,12 @@ def run_schedule():
 
         # Keep the main heartbeat at 60s so high-freq tasks (like cancellations) aren't delayed
         time.sleep(60)
+
+            # 7. Return Sync (Every 60 mins)
+                if not conn.get(f"last_ret_sync_{shop_url}"):
+                    q.enqueue(sync_odoo_returns, shop_url, job_timeout=600)
+                    conn.setex(f"last_ret_sync_{shop_url}", 3600, "done")
+                    print(f"⏰ Triggered Return Sync for {shop_url}")
 
 def sync_images_only_manual(shop_url):
     """
