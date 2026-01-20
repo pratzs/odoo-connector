@@ -1644,23 +1644,29 @@ def api_get_locations():
         return jsonify({'error': str(e)})
 
 
+
+@app.route('/settings/save', methods=['POST'])
 @app.route('/api/settings/save', methods=['POST'])
-@require_shopify_session  # <--- This is the security gate we just built
-def api_save_settings():
-    # shop_url is extracted by the decorator from request.args
+@require_shopify_session
+def save_settings():
     shop_url = request.args.get('shop')
-    data = request.json
     
+    # 1. ROBUST DATA RETRIEVAL (Fixes "No Data" error)
+    # Try getting JSON first; if empty, grab Form Data
+    data = request.json
+    if not data:
+        data = request.form.to_dict()
+        
     if not data:
         return jsonify({"message": "Error: No data provided"}), 400
 
     try:
-        # 1. Update Core Shop Settings (Table: Shop)
+        # 2. Update Shop Table (Core Settings)
         shop = Shop.query.filter_by(shop_url=shop_url).first()
         if not shop:
             return jsonify({"message": "Error: Shop record not found"}), 404
 
-        # Map core fields directly to the Shop table
+        # Handle Odoo Company ID
         if 'odoo_company_id' in data:
             shop.odoo_company_id = int(data['odoo_company_id'])
         elif 'company_id' in data: 
@@ -1669,47 +1675,42 @@ def api_save_settings():
         if 'sync_start_date' in data:
             shop.sync_start_date = data['sync_start_date']
 
-        # 2. Update App Settings (Table: AppSetting)
-        # These are the keys your dashboard.html is sending
-        configs = [
-            'inventory_locations', 'inventory_field', 'sync_zero_stock', 'combine_committed',
-            'cust_direction', 'cust_auto_sync', 'cust_sync_tags', 'cust_whitelist_tags', 
-            'cust_blacklist_tags', 'cust_sync_vat', 'cust_sync_salesrep',
-            'prod_auto_create', 'prod_auto_publish', 'prod_sync_images', 'prod_sync_tags', 
-            'prod_sync_meta_vendor_code', 'prod_sync_meta_original_price',
-            'prod_sync_price', 'prod_sync_cost', 'prod_sync_barcode', 'prod_sync_title', 
-            'prod_sync_desc', 'prod_sync_type', 'prod_sync_vendor',
-            'group_companies_list', 'order_sync_tax', 'alert_email', 'alert_threshold'
-        ]
+        # 3. Update App Settings (Flexible Loop)
+        # We assume anything that isn't a 'core' field is a setting
+        core_fields = ['odoo_company_id', 'company_id', 'sync_start_date', 'shop', 'hmac', 'timestamp']
         
-        for key in configs:
-            if key in data:
-                # Handle booleans and lists as JSON strings so JS can parse them easily later
-                if isinstance(data[key], (list, dict, bool)): 
-                    val_str = json.dumps(data[key])
-                else:
-                    val_str = str(data[key])
+        for key, value in data.items():
+            if key in core_fields: continue
 
-                setting = AppSetting.query.filter_by(shop_url=shop_url, key=key).first()
-                if not setting:
-                    setting = AppSetting(shop_url=shop_url, key=key, value=val_str)
-                    db.session.add(setting)
-                else:
-                    setting.value = val_str
+            # Convert Lists/Dicts/Bools to JSON strings for storage
+            if isinstance(value, (list, dict, bool)): 
+                val_str = json.dumps(value)
+            else:
+                val_str = str(value)
 
-        # 3. Commit all changes
+            setting = AppSetting.query.filter_by(shop_url=shop_url, key=key).first()
+            if not setting:
+                setting = AppSetting(shop_url=shop_url, key=key, value=val_str)
+                db.session.add(setting)
+            else:
+                setting.value = val_str
+
         db.session.commit()
         
-        # Self-healing: Re-verify webhooks on settings save
+        # 4. Self-Healing: Re-register webhooks
         automate_webhook_registration(shop_url)
         
-        return jsonify({"message": "Settings Saved Successfully"})
+        # Log success
+        log_event('Settings', 'Success', 'Configuration saved successfully', shop_url=shop_url)
+        
+        return jsonify({"success": True, "message": "Settings Saved Successfully"})
 
     except Exception as e:
         db.session.rollback()
-        # Log the error on the server for debugging
         print(f"❌ Save Error for {shop_url}: {str(e)}")
-        return jsonify({"message": f"Save Error: {str(e)}"}), 500
+        log_event('Settings', 'Error', f"Save Failed: {str(e)}", shop_url=shop_url)
+        return jsonify({"success": False, "message": f"Save Error: {str(e)}"}), 500
+        
 
 @app.route('/test/odoo_health', methods=['GET'])
 @require_shopify_session
