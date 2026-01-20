@@ -1380,7 +1380,7 @@ def manual_order_fetch():
     
     # 1. Setup Connections
     if not setup_shopify_session(shop_url): 
-        return jsonify({"orders": [], "error": "Could not authenticate with Shopify"})
+        return jsonify({"orders": [], "error": "Auth Failed: Could not refresh session"})
     
     odoo = get_odoo_connection(shop_url)
     if not odoo:
@@ -1432,32 +1432,42 @@ def manual_order_fetch():
 @app.route('/sync/orders/import_batch', methods=['POST'])
 @require_shopify_session
 def import_selected_orders():
-    ids = request.json.get('order_ids', [])
-    shop_url = request.json.get('shop_url') or request.args.get('shop')
-    
-    shop = Shop.query.filter_by(shop_url=shop_url).first()
-    if not shop: return jsonify({"message": "Shop not found"})
-    
-    headers = {"X-Shopify-Access-Token": shop.access_token}
+    # 1. Get data from JSON body
+    data = request.json
+    ids = data.get('order_ids', [])
+    shop_url = request.args.get('shop') # The decorator ensures this is present
+
+    # 2. Setup Shopify Session properly
+    if not setup_shopify_session(shop_url):
+        return jsonify({"message": "Auth Failed: Could not refresh session"}), 401
+
     odoo = get_odoo_connection(shop_url)
-    
+    if not odoo:
+        return jsonify({"message": "Odoo connection failed"}), 500
+
     synced = 0
     log_event('System', 'Info', f"Manual Trigger: Importing {len(ids)} orders...", shop_url=shop_url)
-    
-    # Recommendation: If users select 50+ orders, this might timeout.
-    # Ideally, we would enqueue this entire loop, but for now this works for small batches.
+
     for oid in ids:
-        res = requests.get(f"https://{shop_url}/admin/api/{SHOPIFY_API_VERSION}/orders/{oid}.json", headers=headers)
-        if res.status_code == 200:
-            # We handle the return type safely here
-            result = process_order_data(res.json().get('order'), odoo, shop_url=shop_url)
+        try:
+            # 3. Use the Library instead of manual requests
+            # This automatically uses the token from setup_shopify_session
+            order = shopify.Order.find(oid)
+            
+            # 4. Pass the dictionary to your processing function
+            result = process_order_data(order.to_dict(), odoo, shop_url=shop_url)
+            
             if isinstance(result, tuple):
                 success = result[0]
             else:
                 success = result
-            
+                
             if success: synced += 1
             
+        except Exception as e:
+            print(f"Error importing order {oid}: {e}")
+            log_event('System', 'Error', f"Import failed for order {oid}: {str(e)}", shop_url=shop_url)
+
     return jsonify({"message": f"Batch Complete. Synced: {synced}"})
 
 def background_refund_sync(shop_url, refund_data):
