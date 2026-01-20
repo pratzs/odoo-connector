@@ -36,6 +36,7 @@ from utils import (
     acquire_distributed_lock, 
     get_odoo_connection, setup_shopify_session
 )
+from services.refunds import process_refund_data
 import smtplib
 from email.message import EmailMessage
 
@@ -1067,6 +1068,7 @@ def register_webhooks_manual():
         'orders/updated',
         'orders/cancelled',
         'products/create',
+        'refunds/create',
         # 'products/update',
         'inventory_levels/update' 
     ]
@@ -1306,6 +1308,15 @@ def import_selected_orders():
             
     return jsonify({"message": f"Batch Complete. Synced: {synced}"})
 
+def background_refund_sync(shop_url, refund_data):
+    with app.app_context():
+        success, message = process_refund_data(refund_data, shop_url)
+        if success:
+            log_event('Refund', 'Success', message, shop_url=shop_url)
+        else:
+            log_event('Refund', 'Error', message, shop_url=shop_url)
+            
+
 def background_order_sync(shop_url, order_data):
     """
     Runs inside the Worker Process.
@@ -1384,7 +1395,25 @@ def order_webhook():
     return "Ignored", 200
 
 @app.route('/webhook/refunds', methods=['POST'])
-def refund_webhook(): return "Received", 200
+def refund_webhook():
+    # 1. Verify
+    hmac_header = request.headers.get('X-Shopify-Hmac-Sha256')
+    if not verify_shopify(request.get_data(), hmac_header):
+        return "Unauthorized", 401
+
+    shop_url = request.headers.get('X-Shopify-Shop-Domain')
+    data = request.json
+
+    # 2. Queue the job with your new Retry logic
+    q.enqueue(
+        background_refund_sync, 
+        shop_url, 
+        data, 
+        job_timeout=300,
+        retry=Retry(max=5, interval=[60, 120, 240, 600, 1200])
+    )
+    
+    return "Refund Received & Queued", 200
 
 @app.route('/test/simulate_order', methods=['POST'])
 def test_sim_dummy():
