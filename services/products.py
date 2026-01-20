@@ -3,15 +3,10 @@ import json
 import gc
 from datetime import datetime
 from models import db, Shop, ProductMap
-from utils import get_config, log_event
+from utils import get_config, log_event, setup_shopify_session, get_odoo_connection
 
 # --- HELPER: GraphQL Product Lookups ---
 def find_shopify_product_by_sku(sku, shop_url=None):
-    """
-    Finds a product ID via GraphQL (More reliable than REST for SKUs).
-    """
-    # 1. Ensure session is active (Session management is usually handled by caller, 
-    # but defensive coding doesn't hurt if we have the resource class available)
     try:
         if not shopify.ShopifyResource.site:
             return None 
@@ -39,6 +34,8 @@ def process_product_data(data, odoo_client, shop_url=None):
 
 def archive_shopify_duplicates(shop_url):
     """Scans Shopify for duplicate SKUs and archives the older ones."""
+    if not setup_shopify_session(shop_url): return
+
     log_event('Duplicate Scan', 'Info', "Starting scan for duplicate SKUs...", shop_url=shop_url)
     
     sku_map = {} 
@@ -73,32 +70,69 @@ def archive_shopify_duplicates(shop_url):
 
     log_event('Duplicate Scan', 'Success', f"Scan Complete. Archived {archived_count} duplicates.", shop_url=shop_url)
 
+def cleanup_shopify_products(shop_url):
+    """
+    Safely cleans up Shopify Duplicates (Archives duplicates, keeps original).
+    """
+    if not setup_shopify_session(shop_url): return
+    seen_skus = set()
+    
+    page = shopify.Product.find(limit=250)
+    archived_count = 0
+    
+    try:
+        while page:
+            for sp in page:
+                variant = sp.variants[0] if sp.variants else None
+                if not variant or not variant.sku: continue
+                
+                sku = variant.sku
+                needs_archive = False
+                
+                # ONLY archive if we have already seen this SKU in this loop (Duplicate)
+                if sku in seen_skus: 
+                    needs_archive = True
+                
+                if needs_archive:
+                    if sp.status != 'archived':
+                        sp.status = 'archived'
+                        sp.save()
+                        archived_count += 1
+                        log_event('System', 'Warning', f"Archived Duplicate in Shopify: {sku}", shop_url=shop_url)
+                else: 
+                    seen_skus.add(sku)
+            
+            if page.has_next_page(): 
+                page = page.next_page()
+            else: 
+                break
+    except Exception as e:
+        print(f"Cleanup Error: {e}")
+        
+    if archived_count > 0: 
+        log_event('System', 'Success', f"Cleanup Complete. Archived {archived_count} duplicates.", shop_url=shop_url)
+
 def sync_products_master(shop_url):
     """
     DYNAMIC Odoo -> Shopify Product Sync.
     """
-    # NOTE: The app_context is provided by the wrapper in app.py or the worker
-    # We rely on the db session being active.
-    
     # 1. Load Shop Data from DB
     shop = Shop.query.filter_by(shop_url=shop_url).first()
     if not shop:
         log_event('System', 'Error', f"Sync Failed: Shop {shop_url} not found in DB.")
         return
 
-    # 2. Connect to Odoo (Import locally to avoid circular dependency if needed, 
-    # or pass odoo client as argument. Here we re-fetch for safety in long jobs)
-    from app import get_odoo_connection # We will fix this import in a moment
+    # 2. Connect to Odoo
     odoo = get_odoo_connection(shop_url)
-    
     if not odoo:
         log_event('System', 'Error', f"Sync Failed: Could not connect to Odoo for {shop_url}")
         return
 
     # 3. Connect to Shopify
     try:
-        session = shopify.Session(shop.shop_url, '2025-10', shop.access_token)
-        shopify.ShopifyResource.activate_session(session)
+        if not setup_shopify_session(shop_url):
+             log_event('System', 'Error', f"Shopify Auth Failed", shop_url=shop_url)
+             return
         shop_info = shopify.Shop.current()
         currency_code = shop_info.currency
     except Exception as e:
