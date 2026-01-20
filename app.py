@@ -1586,12 +1586,12 @@ def save_settings():
         automate_webhook_registration(shop_url)
         log_event('Settings', 'Success', 'Configuration saved successfully', shop_url=shop_url)
         
-        # 6. Response Handling
-        # If the client explicitly asked for JSON, give JSON
-        if request.accept_mimetypes.accept_json and not request.accept_mimetypes.accept_html:
-             return jsonify({"success": True})
+        # --- FIXED RESPONSE LOGIC ---
+        # 1. If the REQUEST was JSON (Dashboard), return JSON
+        if request.is_json:
+             return jsonify({"success": True, "message": "Configuration Saved"})
         
-        # Otherwise, assume HTML form submission and Redirect
+        # 2. Otherwise, it was a standard HTML Form (Connect Page), so Redirect
         return f"✅ Settings Saved! <script>window.location.href='/?shop={shop_url}';</script>"
 
     except Exception as e:
