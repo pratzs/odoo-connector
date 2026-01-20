@@ -8,8 +8,8 @@ def sync_odoo_returns(shop_url):
     Checks Odoo for 'Done' Return Pickings (Incoming shipments) 
     and notifies Shopify.
     """
-    # --- FIX CIRCULAR IMPORT ---
-    # We import 'app' HERE, inside the function, to stop the crash.
+    # --- CRITICAL FIX: IMPORT INSIDE THE FUNCTION ---
+    # This prevents the Circular Import crash
     from app import app 
 
     with app.app_context():
