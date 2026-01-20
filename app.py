@@ -16,6 +16,7 @@ from security_utils import require_shopify_session
 from rq import Retry
 import requests
 from datetime import datetime, timedelta
+from functools import wraps
 import random
 import xmlrpc.client
 from sqlalchemy import text
@@ -42,6 +43,22 @@ import smtplib
 from email.message import EmailMessage
 
 socket.setdefaulttimeout(60) # Force 60-second timeout for all network calls
+
+# --- DECORATOR: ENSURE SESSION IS VALID ---
+def require_shopify_session(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # We look for 'shop' in the URL parameters
+        shop_url = request.args.get('shop')
+        if not shop_url:
+            return jsonify({"error": "Missing shop parameter"}), 400
+            
+        # setup_shopify_session is your helper that loads the token from DB
+        if not setup_shopify_session(shop_url):
+            return jsonify({"error": "Invalid or expired Shopify Session"}), 401
+            
+        return f(*args, **kwargs)
+    return decorated_function
 
 # --- PUBLIC APP CONFIG ---
 SHOPIFY_API_KEY = os.getenv('SHOPIFY_API_KEY')
@@ -1430,22 +1447,29 @@ def test_sim_dummy():
      log_event('System', 'Success', "Test Connection Successful (Logs Working)", shop_url=shop_url)
      return jsonify({"message": "Connection OK - Check Live Logs tab."})
 
-# --- API: Fetch Companies (Dynamic) ---
+# --- API: Fetch Companies (Dynamic & Secured) ---
 @app.route('/api/odoo/companies')
+@require_shopify_session # <--- Security Gate
 def api_get_companies():
     shop_url = request.args.get('shop')
-    if not shop_url: return jsonify({'error': 'Missing shop param'})
-
-    # Connect dynamically
+    
+    # Connect dynamically using your utility
     odoo = get_odoo_connection(shop_url)
-    if not odoo: return jsonify({'error': 'Could not connect to Odoo'})
+    
+    if not odoo:
+        # We return a 401 so the frontend knows it's an Auth/Connection issue
+        return jsonify({
+            'error': 'Connection Failed. Please check your Odoo URL and Credentials.'
+        }), 401
 
     try:
-        # FIX: Use the client's built-in helper method
+        # Use the client's built-in helper method
         companies = odoo.get_companies()
         return jsonify(companies)
     except Exception as e:
-        return jsonify({'error': str(e)})
+        # Log the actual error for you, return a clean message for the user
+        print(f"Odoo Company Fetch Error for {shop_url}: {e}")
+        return jsonify({'error': 'Odoo server is reachable, but failed to fetch company list.'}), 500
 
 # --- API: Fetch Locations (Dynamic) ---
 @app.route('/api/odoo/locations')
