@@ -104,6 +104,13 @@
     </style>
 </head>
 <body>
+    <div id="connection-error-banner" class="p-banner" style="display: none;">
+    <div class="p-banner-icon"><i class="bi bi-exclamation-triangle-fill"></i></div>
+    <div>
+        <div class="p-banner-title">Odoo Connection Failed</div>
+        <div class="p-banner-message">We are unable to reach your Odoo server. Please check your credentials in Settings.</div>
+    </div>
+</div>
     <ui-nav-menu>
         <a href="/" rel="home">Overview</a>
         <a href="/settings">Settings</a>
@@ -734,12 +741,24 @@ function toggleTagFields() {
 // --- DATA FETCHING ---
 function fetchCompanies() {
     const sel = document.getElementById('companySelect');
+    const banner = document.getElementById('connection-error-banner'); // Get the banner element
+    
     if(!sel) return;
     sel.innerHTML = '<option value="">Loading...</option>';
+
     fetch(`/api/odoo/companies?shop=${CURRENT_SHOP_URL}`)
         .then(r => r.json())
         .then(data => {
-            if(data.error) { sel.innerHTML = `<option value="">Error: ${data.error}</option>`; return; }
+            if(data.error) { 
+                sel.innerHTML = `<option value="">Error: ${data.error}</option>`;
+                // --- SHOW THE BANNER ---
+                if(banner) banner.style.display = 'flex'; 
+                return; 
+            }
+
+            // --- HIDE THE BANNER ON SUCCESS ---
+            if(banner) banner.style.display = 'none';
+
             sel.innerHTML = '<option value="">Select Company</option>';
             if (Array.isArray(data)) {
                 data.forEach(c => {
@@ -749,7 +768,11 @@ function fetchCompanies() {
             }
             if (SAVED_SETTINGS.odoo_company_id) fetchLocations(SAVED_SETTINGS.odoo_company_id);
         })
-        .catch(e => sel.innerHTML = `<option value="">Network Error</option>`);
+        .catch(e => {
+            sel.innerHTML = `<option value="">Network Error</option>`;
+            // Show banner for network timeouts/crashes
+            if(banner) banner.style.display = 'flex';
+        });
 }
 
 const companySelect = document.getElementById('companySelect');
