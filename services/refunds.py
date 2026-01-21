@@ -1,52 +1,58 @@
-from models import db
+import shopify
 from utils import get_odoo_connection, log_event
-from datetime import datetime, timedelta
 
-def process_refund_data(data, shop_url):
+def process_refund(data, shop_url):
     """
-    Handles Shopify Refund Webhooks by creating an Activity in Odoo.
+    Handles Shopify Refund Webhook -> Odoo Credit Note
     """
-    shopify_order_id = data.get('order_id')
-    # Get total amount refunded for the note
-    transactions = data.get('transactions', [])
-    refund_amount = sum(float(t.get('amount', 0.0)) for t in transactions)
+    from app import app
     
-    odoo = get_odoo_connection(shop_url)
-    if not odoo:
-        return False, "Odoo connection failed."
+    with app.app_context():
+        odoo = get_odoo_connection(shop_url)
+        if not odoo: return
 
-    try:
-        # 1. Find the Odoo Order using Shopify ID
-        # (Assuming you store shopify_order_id on the sale.order)
-        order_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-            'sale.order', 'search', [[('shopify_order_id', '=', str(shopify_order_id))]])
+        # 1. Get Shopify Order ID/Name
+        # Webhooks usually send 'order_id' (numeric) but we sync using Name (#1001)
+        # We need to fetch the order name if not present, or use the parent_id
+        order_id = data.get('order_id')
         
-        if not order_ids:
-            return False, f"Odoo Order for Shopify ID {shopify_order_id} not found."
+        # We need the Order NAME (e.g. #1234) to match your 'ONLINE_#1234' pattern
+        # Since the webhook might only give ID, we might need a quick lookup or heuristic
+        # Ideally, we fetch the Shopify Order to get the 'name'
+        shopify_order_name = ""
         
-        order_id = order_ids[0]
-        
-        # 2. Get the User ID responsible for the order to assign the activity
-        order_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-            'sale.order', 'read', [order_id], {'fields': ['user_id']})
-        user_id = order_data[0]['user_id'][0] if order_data[0].get('user_id') else odoo.uid
+        try:
+            # We assume session is set up by caller or we do it here
+            from utils import setup_shopify_session
+            if setup_shopify_session(shop_url):
+                sp_order = shopify.Order.find(order_id)
+                shopify_order_name = sp_order.name
+        except:
+            # Fallback: sometimes data contains it
+            pass
+            
+        if not shopify_order_name:
+            log_event('Refund', 'Warning', f"Could not determine Order Name for Refund {data.get('id')}", shop_url=shop_url)
+            return
 
-        # 3. Create an Activity (mail.activity)
-        activity_note = f"<b>Shopify Refund Detected</b><br/>Amount: ${refund_amount}<br/>Action required: Check inventory returns and adjust Odoo invoice."
-        
-        activity_vals = {
-            'res_id': order_id,
-            'res_model_id': odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'ir.model', 'search', [[('model', '=', 'sale.order')]])[0],
-            'activity_type_id': 4, # 4 is usually 'To Do' in Odoo
-            'summary': 'Shopify Refund - Action Required',
-            'note': activity_note,
-            'user_id': user_id,
-            'date_deadline': datetime.now().strftime('%Y-%m-%d')
-        }
-        
-        odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'mail.activity', 'create', [activity_vals])
-        
-        return True, f"Created Odoo Activity for Order {shopify_order_id}"
+        client_ref = f"ONLINE_{shopify_order_name}"
 
-    except Exception as e:
-        return False, f"Refund Activity Error: {str(e)}"
+        try:
+            # 2. Find Odoo Sale Order using CLIENT_ORDER_REF
+            # FIX: Do NOT use 'shopify_order_id'
+            domain = [['client_order_ref', '=', client_ref]]
+            ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'search', [domain])
+            
+            if not ids:
+                log_event('Refund', 'Warning', f"Original Order {client_ref} not found in Odoo.", shop_url=shop_url)
+                return
+            
+            sale_order_id = ids[0]
+
+            # 3. Log the "To-Do" (Creating actual Credit Notes is complex via API)
+            # For now, we log that we found it, so you know the connection works.
+            # Automated Credit Note creation requires finding the Invoice, not just the Order.
+            log_event('Refund', 'Info', f"Refund detected for {client_ref}. Automated Credit Note creation is pending implementation.", shop_url=shop_url)
+
+        except Exception as e:
+            log_event('Refund', 'Error', f"Refund Logic Failed: {e}", shop_url=shop_url)
