@@ -2,9 +2,10 @@ import shopify
 import json
 import gc
 from datetime import datetime
-from app import app, db
 from models import Shop, ProductMap, AppSetting
 from utils import get_odoo_connection, log_event, setup_shopify_session, get_config, q_default
+
+# REMOVED: from app import app, db  <-- This was causing the crash
 
 # =====================================================
 # 1. THE DISPATCHER (Runs fast, queues the work)
@@ -15,6 +16,9 @@ def sync_products_master(shop_url):
     Step 2: Split them into chunks of 50.
     Step 3: Queue a separate job for each chunk.
     """
+    # ✅ FIX: Import inside the function to avoid circular dependency
+    from app import app, db 
+    
     with app.app_context():
         # 1. Basic Setup
         shop = Shop.query.filter_by(shop_url=shop_url).first()
@@ -70,8 +74,10 @@ def sync_products_master(shop_url):
 def sync_product_batch_task(shop_url, batch_ids, batch_name):
     """
     Processes a specific list of 50 IDs.
-    If this job crashes, only these 50 are affected.
     """
+    # ✅ FIX: Import inside the function here too
+    from app import app, db
+    
     with app.app_context():
         # --- A. SETUP ---
         odoo = get_odoo_connection(shop_url)
@@ -93,7 +99,6 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
         except: pass
 
         # --- C. LOAD CONFIGS ---
-        # We load these once per batch
         cfg = {
             'title': get_config('prod_sync_title', True, shop_url=shop_url),
             'price': get_config('prod_sync_price', True, shop_url=shop_url),
@@ -194,10 +199,7 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
                 })
 
             # --- SHOPIFY ACTIONS ---
-            # 1. Find Product
-            from services.products import find_shopify_product_by_sku # Import helper if needed, or define above
-            
-            # Helper to find ID (Defined inline for safety in this batch)
+            # Helper to find ID safely
             def find_sid(target_sku):
                 pm = ProductMap.query.filter_by(sku=target_sku, shop_url=shop_url).first()
                 return pm.shopify_product_id if pm else None
@@ -209,6 +211,13 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
                 try: sp = shopify.Product.find(shopify_id)
                 except: sp = None
             
+            # Search Fallback
+            if not sp:
+                try:
+                    products = shopify.Product.find(limit=1, title=sku)
+                    if products: sp = products[0]
+                except: pass
+
             if not sp:
                 if not cfg['auto_create']: continue
                 sp = shopify.Product()
@@ -332,15 +341,3 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
         del odoo_products
         gc.collect()
         log_event('Product Sync', 'Info', f"✅ Completed {batch_name}. Synced {synced} items.", shop_url=shop_url)
-
-# Helper needed by Batch Logic
-def find_shopify_product_by_sku(sku, shop_url):
-    pm = ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first()
-    if pm: return pm.shopify_product_id
-    
-    # Fallback search
-    try:
-        products = shopify.Product.find(limit=1, title=sku) # Not ideal but fallback
-        if products: return products[0].id
-    except: pass
-    return None
