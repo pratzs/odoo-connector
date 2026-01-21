@@ -1,7 +1,7 @@
 import shopify
 from utils import get_odoo_connection, log_event
 
-def process_refund(data, shop_url):
+def process_refund_data(data, shop_url):
     """
     Handles Shopify Refund Webhook -> Odoo Credit Note
     """
