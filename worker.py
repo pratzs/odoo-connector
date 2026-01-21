@@ -1,22 +1,42 @@
 import os
-import redis
+import multiprocessing
+from redis import Redis
 from rq import Worker, Queue, Connection
-# REMOVED: import threading, run_schedule (Moved to clock.py)
+from app import app # Necessary to load DB context
 
-listen = ['default']
-
-# Get Redis URL from environment
+# Get Redis URL
 redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
+conn = Redis.from_url(redis_url)
 
-conn = redis.from_url(redis_url)
-
-if __name__ == '__main__':
-    print("👷 WORKER PROCESS STARTED")
-    print("Listening for jobs on 'default' queue...")
-    
-    # CRITICAL: We do NOT start the scheduler thread here anymore.
-    # This allows you to run 5 workers if you want, without 5 schedulers running.
+def start_worker(queue_name):
+    """
+    Starts a dedicated worker process for a specific queue.
+    """
+    print(f"👷 Starting Worker for '{queue_name}' queue...")
     
     with Connection(conn):
-        worker = Worker(map(Queue, listen))
-        worker.work()
+        # We listen ONLY to the specific queue assigned to this process
+        w = Worker([Queue(queue_name)], name=f"Worker-{queue_name}")
+        
+        # CRITICAL: Push app context so database queries work inside jobs
+        with app.app_context():
+            w.work()
+
+if __name__ == '__main__':
+    print("🚀 Launching Parallel Workers...")
+
+    # Process 1: The Fast Lane (Inventory, Orders, Fulfillments)
+    # This worker sits idle until a critical job arrives.
+    p1 = multiprocessing.Process(target=start_worker, args=('critical',))
+    
+    # Process 2: The Heavy Lane (Products, Images, Maintenance)
+    # This worker handles the long-running stuff.
+    p2 = multiprocessing.Process(target=start_worker, args=('default',))
+
+    # Start both processes simultaneously
+    p1.start()
+    p2.start()
+    
+    # Keep the main script alive while workers run
+    p1.join()
+    p2.join()
