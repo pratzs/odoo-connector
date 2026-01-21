@@ -9,10 +9,15 @@ from models import db, AppSetting, SyncLog, Shop
 from odoo_client import OdooClient
 from contextlib import contextmanager
 
-# 1. SETUP REDIS
+# 1. SETUP REDIS & QUEUES
 redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
 conn = redis.from_url(redis_url)
-q = Queue(connection=conn)
+
+# q_default = Slow Lane (Products, Images, heavy stuff) -> Timeout: 2 Hours
+q_default = Queue('default', connection=conn, default_timeout=7200)
+
+# q_critical = Fast Lane (Inventory, Orders) -> Timeout: 10 Minutes
+q_critical = Queue('critical', connection=conn, default_timeout=600)
 
 # 2. CONFIG HELPERS
 def get_config(key, default=None, shop_url=None):
