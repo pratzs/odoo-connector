@@ -1617,15 +1617,41 @@ def save_settings():
 
         # 5. Save App Settings
         ignore_fields = ['odoo_company_id', 'company_id', 'sync_start_date', 'shop', 'shop_url', 'hmac', 'timestamp', 'odoo_url', 'odoo_db', 'odoo_user', 'odoo_pass']
+        
+        # --- ROBUST BOOLEAN HANDLING ---
+        # Explicitly list keys that are checkboxes (True/False)
+        boolean_keys = [
+            'prod_sync_title', 'prod_sync_price', 'prod_sync_cost', 
+            'prod_sync_desc', 'prod_sync_tags', 'prod_sync_images', 
+            'prod_sync_vendor', 'prod_sync_barcode', 
+            'prod_auto_create', 'prod_auto_publish',  # <--- CRITICAL ONES
+            'prod_sync_meta_original_price', 'prod_sync_meta_vendor_code'
+        ]
+
+        # Check if we are saving Product Settings (detect by checking if one exists)
+        # This prevents overwriting settings if we are saving a different form (like Customers)
+        if 'prod_sync_price' in data or 'prod_auto_create' in data:
+             for b_key in boolean_keys:
+                 if b_key not in data:
+                     # If missing from form, user unchecked it -> Set to False
+                     data[b_key] = False  
+                 else:
+                     # If present, convert "on"/"true"/"1" string to Python Boolean
+                     raw = str(data[b_key]).lower()
+                     data[b_key] = raw in ['true', 'on', '1', 'yes']
+
         for key, value in data.items():
             if key in ignore_fields: continue
-            val_str = json.dumps(value) if isinstance(value, (list, dict, bool)) else str(value)
+            
+            # Save as JSON string
+            val_str = json.dumps(value) 
             
             setting = AppSetting.query.filter_by(shop_url=shop_url, key=key).first()
             if setting: setting.value = val_str
             else: db.session.add(AppSetting(shop_url=shop_url, key=key, value=val_str))
 
         db.session.commit()
+        
         automate_webhook_registration(shop_url)
         log_event('Settings', 'Success', 'Configuration saved successfully', shop_url=shop_url)
         
