@@ -572,8 +572,8 @@ def auth_callback():
     automate_webhook_registration(shop_url)
     
     # 6. AUTO-CONFIG: Queue an initial discovery sync
-    # This matches existing products by SKU so the merchant doesn't have to.
-    q.enqueue(sync_products_master, shop_url)
+    # ✅ FIX: Use q_default (Master syncs are heavy)
+    q_default.enqueue(sync_products_master, shop_url)
 
     # 7. Redirect to Dashboard
     return redirect(f"https://{shop_url}/admin/apps/{SHOPIFY_API_KEY}")
@@ -634,6 +634,8 @@ def confirm_billing():
 # -----------------------------------------------------------------
 # SHOPIFY WEBHOOK RECEIVER
 # -----------------------------------------------------------------
+# In app.py
+
 @app.route('/webhooks/shopify', methods=['POST'])
 def shopify_webhook():
     """
@@ -651,9 +653,9 @@ def shopify_webhook():
     if topic == 'products/update':
         return "Ignored (Odoo is Master)", 200
 
-    # 1. Handle Orders (Create, Pay, Update)
+    # 1. Handle Orders (Create, Pay, Update) -> CRITICAL QUEUE
     if topic in ['orders/create', 'orders/updated', 'orders/paid']:
-        q.enqueue(
+        q_critical.enqueue(
             background_order_sync, 
             shop_url, 
             data,
@@ -661,9 +663,9 @@ def shopify_webhook():
         )
         return "Order Received", 200
 
-    # 2. Handle Cancellations (NEW)
+    # 2. Handle Cancellations -> CRITICAL QUEUE
     elif topic == 'orders/cancelled':
-        q.enqueue(
+        q_critical.enqueue(
             process_cancellation, 
             data, 
             shop_url,
@@ -671,9 +673,9 @@ def shopify_webhook():
         )
         return "Cancellation Received", 200
 
-    # 3. Handle Refunds (NEW)
+    # 3. Handle Refunds -> CRITICAL QUEUE
     elif topic == 'refunds/create':
-        q.enqueue(
+        q_critical.enqueue(
             background_refund_sync, 
             shop_url, 
             data,
@@ -681,12 +683,13 @@ def shopify_webhook():
         )
         return "Refund Received", 200
 
-    # 4. Handle Products (ONLY New Creations)
+    # 4. Handle Products -> DEFAULT QUEUE (Because it's heavy/less urgent)
     elif topic == 'products/create': 
-        q.enqueue(background_product_sync, shop_url, data)
+        q_default.enqueue(background_product_sync, shop_url, data)
         return "Product Received", 200
 
     return "Topic ignored", 200
+
 
 @app.route('/webhooks/app_uninstalled', methods=['POST'])
 def app_uninstalled():
@@ -935,16 +938,19 @@ def force_tax_all():
 @app.route('/maintenance/clear_queue', methods=['POST'])
 def clear_background_queue():
     """
-    Emergency tool to wipe all pending tasks from the Redis queue.
+    Emergency tool to wipe all pending tasks.
     """
     shop_url = request.args.get('shop')
     try:
-        # This empties the 'default' queue used by your worker
-        q.empty()
-        log_event('System', 'Warning', "Background Task Queue was manually cleared.", shop_url=shop_url)
-        return jsonify({"message": "Background queue cleared successfully."}), 200
+        # ✅ FIX: Empty BOTH queues
+        q_critical.empty()
+        q_default.empty()
+        
+        log_event('System', 'Warning', "All background queues manually cleared.", shop_url=shop_url)
+        return jsonify({"message": "Background queues cleared successfully."}), 200
     except Exception as e:
         return jsonify({"error": f"Failed to clear queue: {str(e)}"}), 500
+        
 
 @app.route('/sync/inventory', methods=['GET'])
 @require_shopify_session        
@@ -952,8 +958,8 @@ def sync_inventory_endpoint():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
     
-    # CHANGED: Increase timeout from 1200 to 3600 (1 Hour)
-    job = q.enqueue(perform_inventory_sync, shop_url, job_timeout=3600)
+    # ✅ FIX: Use q_critical
+    job = q_critical.enqueue(perform_inventory_sync, shop_url, job_timeout=3600)
     
     return jsonify({"message": f"Full Inventory Sync Queued (Job ID: {job.get_id()})"})
 
@@ -1245,9 +1251,9 @@ def product_webhook():
     if not shop_url: return "Missing Shop Header", 400
 
     # 3. Queue the Job
-    # We send the data to Redis immediately. Shopify gets a 200 OK instantly.
     data = request.json
-    # q.enqueue(background_product_sync, shop_url, data, job_timeout=300)
+    
+    # q_default.enqueue(background_product_sync, shop_url, data, job_timeout=300)
     
     return "Queued", 200
 
