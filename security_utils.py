@@ -40,37 +40,3 @@ def decrypt_val(value):
         # This usually happens if the key changed or data is corrupt
         print(f"Decryption Error: {e}")
         return None
-
-# 2. API SECURITY DECORATOR
-def require_shopify_session(f):
-    """
-    Protects AJAX endpoints.
-    Ensures the request comes from an authenticated shopify session 
-    OR has a valid signature.
-    """
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        # A. Try Session (Cookies)
-        if 'shopify_token' in session and 'shopify_url' in session:
-            return f(*args, **kwargs)
-        
-        # B. Try Shop Header (App Bridge Token would go here in V8)
-        # For now, we strictly check if the shop param exists and matches a known shop
-        shop_url = request.args.get('shop')
-        if not shop_url:
-            return jsonify({'error': 'Unauthorized: Missing shop param'}), 401
-        
-        # In a real App Bridge app, you would validate the JWT token here.
-        # For this MVP, we ensure the shop is at least installed in our DB.
-        # We perform a lazy import to avoid circular dependencies with models.py
-        from models import Shop
-        
-        try:
-            shop = Shop.query.filter_by(shop_url=shop_url).first()
-            if not shop or not shop.is_active:
-                 return jsonify({'error': 'Unauthorized: Shop not active'}), 401
-        except Exception:
-             return jsonify({'error': 'Unauthorized: DB Error'}), 500
-             
-        return f(*args, **kwargs)
-    return decorated_function
