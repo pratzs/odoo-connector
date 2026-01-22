@@ -1300,6 +1300,9 @@ def manual_order_fetch():
     odoo = get_odoo_connection(shop_url)
     if not odoo:
         return jsonify({"orders": [], "error": "Could not connect to Odoo"})
+
+    # --- FIX: Get Company ID ---
+    company_id = get_config('odoo_company_id', shop_url=shop_url)
     
     # 2. Fetch Recent Shopify Orders
     try:
@@ -1315,6 +1318,8 @@ def manual_order_fetch():
             client_ref = f"ONLINE_{o.name}"
             plain_name = o.name
             
+            # --- FIX: Strict Company Domain ---
+            # Search for the order refs AND ensure it belongs to THIS company
             domain = [
                 '|', '|', '|',
                 ['client_order_ref', '=', client_ref],
@@ -1322,6 +1327,9 @@ def manual_order_fetch():
                 ['origin', '=', client_ref],
                 ['origin', '=', plain_name]
             ]
+            
+            if company_id:
+                domain.append(['company_id', '=', int(company_id)])
             
             exists = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
                 'sale.order', 'search', [domain])
