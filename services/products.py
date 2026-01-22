@@ -331,3 +331,65 @@ def find_shopify_product_by_sku(sku, shop_url):
 def archive_shopify_duplicates(shop_url):
     # Placeholder for the archive function if needed by app.py imports
     pass
+
+
+
+# =====================================================
+# 5. MAINTENANCE TASKS
+# =====================================================
+def cleanup_shopify_products(shop_url):
+    """
+    Scans for duplicate SKUs on Shopify and archives the older versions.
+    Fixes the 'ImportError' in app.py.
+    """
+    from app import app
+    
+    with app.app_context():
+        if not setup_shopify_session(shop_url): return
+        
+        log_event('Cleanup', 'Info', "Starting duplicate scan...", shop_url=shop_url)
+        
+        try:
+            # 1. Fetch all active products (lightweight)
+            products = []
+            page = shopify.Product.find(limit=250, status='active', fields="id,title,updated_at,variants")
+            while page:
+                products.extend(page)
+                if page.has_next_page(): 
+                    page = page.next_page()
+                else: 
+                    break
+            
+            # 2. Group by SKU
+            sku_map = {}
+            for p in products:
+                if p.variants:
+                    sku = p.variants[0].sku
+                    if sku:
+                        if sku not in sku_map: sku_map[sku] = []
+                        sku_map[sku].append(p)
+            
+            # 3. Archive Duplicates
+            cleaned = 0
+            for sku, items in sku_map.items():
+                if len(items) > 1:
+                    # Sort by updated_at descending (Keep newest, archive older)
+                    items.sort(key=lambda x: x.updated_at, reverse=True)
+                    keep = items[0]
+                    trash = items[1:]
+                    
+                    for t in trash:
+                        try:
+                            t.status = 'archived'
+                            t.save()
+                            cleaned += 1
+                        except Exception as e: 
+                            print(f"Failed to archive {t.id}: {e}")
+                        
+            log_event('Cleanup', 'Success', f"Duplicate scan finished. Archived {cleaned} items.", shop_url=shop_url)
+
+        except Exception as e:
+            log_event('Cleanup', 'Error', f"Cleanup failed: {e}", shop_url=shop_url)
+
+# Alias for compatibility if app.py calls it by the old name
+archive_shopify_duplicates = cleanup_shopify_products
