@@ -1,6 +1,6 @@
 # services/orders.py
 from datetime import datetime
-from models import db, ProcessedOrder, Shop, CustomerMap, Shop
+from models import db, ProcessedOrder, Shop, CustomerMap
 from utils import get_config, log_event, acquire_distributed_lock
 
 def process_order_data(data, odoo_client, shop_url): 
@@ -148,14 +148,31 @@ def process_order_data(data, odoo_client, shop_url):
                     sku = sku.replace('-UNIT', '')
                     is_unit_variant = True
 
-                product_id = odoo.search_product_by_sku(sku, company_id)
+                # ✅ FIX 1: Strict Company-Compatible Search
+                # We specifically look for a product that is EITHER Global OR owned by this Company
+                product_id = None
+                p_domain = [['default_code', '=', sku]]
+                if company_id:
+                    p_domain += ['|', ['company_id', '=', False], ['company_id', '=', int(company_id)]]
+                
+                try:
+                    p_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                        'product.product', 'search', [p_domain], {'limit': 1})
+                    if p_ids: product_id = p_ids[0]
+                except: pass
+
                 if not product_id:
+                    # Fallback: Create if missing (Standard creation logic)
                     if not odoo.check_product_exists_by_sku(sku, company_id):
                         try:
                             new_p = {'name': item['name'], 'default_code': sku, 'list_price': float(item.get('price', 0)), 'type': 'product'}
                             if company_id: new_p['company_id'] = int(company_id)
                             odoo.create_product(new_p)
-                            product_id = odoo.search_product_by_sku(sku, company_id) 
+                            
+                            # Search again after creation
+                            p_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                                'product.product', 'search', [p_domain], {'limit': 1})
+                            if p_ids: product_id = p_ids[0]
                         except: pass
                 
                 if product_id:
@@ -180,14 +197,37 @@ def process_order_data(data, odoo_client, shop_url):
                 cost = float(ship_line.get('price', 0.0))
                 if cost >= 0:
                     s_title = ship_line.get('title', 'Shipping')
-                    sp_id = odoo.search_product_by_name(s_title, company_id) or odoo.search_product_by_sku("SHIP_FEE", company_id)
+                    
+                    # ✅ FIX 2: Strict Company-Compatible Search for Shipping
+                    sp_id = None
+                    # Try Name First
+                    s_domain = [['name', '=', s_title]]
+                    if company_id: s_domain += ['|', ['company_id', '=', False], ['company_id', '=', int(company_id)]]
+                    try:
+                        s_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search', [s_domain], {'limit': 1})
+                        if s_ids: sp_id = s_ids[0]
+                    except: pass
+
+                    # Try SHIP_FEE SKU Second
+                    if not sp_id:
+                        s_sku_domain = [['default_code', '=', 'SHIP_FEE']]
+                        if company_id: s_sku_domain += ['|', ['company_id', '=', False], ['company_id', '=', int(company_id)]]
+                        try:
+                            s_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search', [s_sku_domain], {'limit': 1})
+                            if s_ids: sp_id = s_ids[0]
+                        except: pass
+
                     if not sp_id:
                         try:
                             sv = {'name': s_title, 'type': 'service', 'list_price': 0.0, 'default_code': 'SHIP_FEE'}
                             if company_id: sv['company_id'] = int(company_id)
                             odoo.create_product(sv)
-                            sp_id = odoo.search_product_by_sku("SHIP_FEE", company_id)
+                            
+                            # Re-search strictly
+                            s_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search', [s_sku_domain], {'limit': 1})
+                            if s_ids: sp_id = s_ids[0]
                         except: pass
+
                     if sp_id: lines.append((0, 0, {'product_id': sp_id, 'product_uom_qty': 1, 'price_unit': cost, 'name': s_title, 'discount': 0.0}))
 
             if not lines: return False, "No valid lines"
