@@ -343,7 +343,6 @@ def find_shopify_product_by_sku(sku, shop_url, product_title=None):
         if found: return found[0].id
     except: pass
     
-    # NOTE: REMOVED Title Fallback to prevent duplicates
     return None
 
 def cleanup_batch_task(shop_url, id_list, batch_name):
@@ -437,5 +436,6 @@ def cleanup_duplicates_master(shop_url):
         except Exception as e:
             log_event('Cleanup', 'Error', f"Analysis Failed: {e}", shop_url=shop_url)
 
-# Link the function so the frontend button works
+# ✅ FIX: Link both names so app.py doesn't crash
+cleanup_shopify_products = cleanup_duplicates_master
 archive_shopify_duplicates = cleanup_duplicates_master
