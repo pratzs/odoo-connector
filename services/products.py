@@ -174,6 +174,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
 
     # --- UPDATE ---
     sp.published_scope = 'global'
+    
     # ✅ FIX: Resurrection! Make sure updated products are actually ACTIVE.
     sp.status = 'active' 
 
@@ -306,8 +307,73 @@ def find_shopify_product_by_sku(sku, shop_url):
 
     return None
 
-# Cleanup tools aliases
-def cleanup_batch_task(shop_url, id_list, batch_name): pass
-def cleanup_duplicates_master(shop_url): pass
-cleanup_shopify_products = cleanup_duplicates_master
-archive_shopify_duplicates = cleanup_duplicates_master
+# =====================================================
+# 5. MAINTENANCE TOOLS (FULL IMPLEMENTATION)
+# =====================================================
+
+def archive_shopify_duplicates(shop_url):
+    """
+    Scans ALL Shopify products. 
+    If a SKU is found more than once, it archives the older ones 
+    and keeps the newest active one.
+    """
+    from app import app
+    with app.app_context():
+        if not setup_shopify_session(shop_url): return
+
+        log_event('Cleanup', 'Info', "Starting Duplicate Scan...", shop_url=shop_url)
+        
+        # 1. Map SKU -> List of Products
+        sku_map = {}
+        page = shopify.Product.find(limit=250)
+        count = 0
+
+        while page:
+            for p in page:
+                # Get SKU from first variant
+                sku = p.variants[0].sku if p.variants else None
+                if sku:
+                    if sku not in sku_map: sku_map[sku] = []
+                    sku_map[sku].append(p)
+                count += 1
+            
+            if page.has_next_page():
+                page = page.next_page()
+            else:
+                break
+
+        log_event('Cleanup', 'Info', f"Scanned {count} products. Analyzing for duplicates...", shop_url=shop_url)
+
+        # 2. Identify and Archive
+        duplicates_found = 0
+        archived_count = 0
+
+        for sku, product_list in sku_map.items():
+            if len(product_list) > 1:
+                duplicates_found += 1
+                
+                # Sort: Active first, then by Created At (Newest first)
+                # We want to KEEP the newest, active product.
+                product_list.sort(key=lambda x: (x.status == 'active', x.created_at), reverse=True)
+                
+                # winner = product_list[0]
+                losers = product_list[1:]
+
+                for loser in losers:
+                    try:
+                        if loser.status != 'archived':
+                            loser.status = 'archived'
+                            loser.save()
+                            archived_count += 1
+                            print(f"Archived duplicate {sku} (ID: {loser.id})")
+                    except Exception as e:
+                        print(f"Failed to archive {loser.id}: {e}")
+
+        if archived_count > 0:
+            log_event('Cleanup', 'Success', f"Duplicate cleanup done. Found {duplicates_found} conflicts. Archived {archived_count} redundant products.", shop_url=shop_url)
+        else:
+            log_event('Cleanup', 'Success', "Clean scan. No active duplicates found.", shop_url=shop_url)
+
+# Alias for compatibility with app.py imports
+cleanup_duplicates_master = archive_shopify_duplicates
+cleanup_shopify_products = archive_shopify_duplicates
