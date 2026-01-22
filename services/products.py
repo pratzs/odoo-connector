@@ -174,6 +174,8 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
 
     # --- UPDATE ---
     sp.published_scope = 'global'
+    # ✅ FIX: Resurrection! Make sure updated products are actually ACTIVE.
+    sp.status = 'active' 
 
     if not sp.product_type:
         cat_name = odoo.get_public_category_name(p.get('public_categ_ids', []))
@@ -267,11 +269,12 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
 
 
 # =====================================================
-# 4. HELPERS (WITH FIXED SEARCH SYNTAX)
+# 4. HELPERS (CLEANED & FIXED)
 # =====================================================
 def find_shopify_product_by_sku(sku, shop_url):
     """
     Finds a Product ID. Retries on API failure to prevent false negatives.
+    Uses Variant search for accuracy.
     """
     # 1. DB Lookup (Fast)
     pm = ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first()
@@ -281,56 +284,24 @@ def find_shopify_product_by_sku(sku, shop_url):
             return variant.product_id
         except: pass
 
-    # 2. API Search (Retry 3 times) - CORRECTED SYNTAX
+    # 2. API Search (Retry 3 times)
     retries = 3
     for attempt in range(retries):
         try:
-            # FIX: Use 'shopify.Product.find' with specific query params
-            # This searches for products matching the SKU
-            found = shopify.Product.find(status='active', limit=1, sku=sku) # Incorrect param check
-            
-            # Better approach: Search endpoint
-            found = shopify.Product.find(from_=f"/admin/api/2024-01/products.json?sku={sku}")
-            
-            # OR standard search method if supported by version
-            # The most reliable way in Python Shopify API is usually:
-            # products = shopify.Product.find(query=f"sku:{sku}")
-            
-            products = shopify.Product.find(limit=1, params={'sku': sku}) 
-            # Note: The 'sku' param isn't standard in 'find' for all versions.
-            # Let's use the most robust 'search' method provided by the library wrapper usually.
-            
-            # Actually, standard library usage:
-            products = shopify.Product.find(title=sku) # NO, this is wrong.
-            
-            # Let's stick to the specific GraphQL or REST search query format
-            # Using REST 'find' with kwargs often maps to query params.
-            # But 'sku' isn't a direct filter on GET /products.json.
-            
-            # Fallback to the GraphQL-like search helper if available, or fetch-all-and-filter is too slow.
-            # The previous code used .search() which didn't exist.
-            
-            # CORRECT WAY:
-            # GET /admin/api/2024-01/products.json?fields=id,variants&limit=250
-            # That is slow.
-            
-            # CORRECT WAY (GraphQ/Search):
-            # The Python library doesn't have a direct .search(). It has .find().
-            # But checking if a variant exists with that SKU is better.
-            
-            # Let's try searching for Variants, then get product_id
+            # ✅ CORRECT SEARCH METHOD: Search for Variant by SKU
             variants = shopify.Variant.find(limit=1, params={'sku': sku})
             if variants:
                 return variants[0].product_id
             
-            return None 
+            return None # Checked successfully, found nothing
 
         except Exception as e:
+            # If API fails, wait and retry
             if attempt < retries - 1:
                 time.sleep(2 ** (attempt + 1))
                 continue
             else:
-                # If we fail to check, we MUST crash to prevent duplicates
+                # If we fail 3 times, CRASH to prevent duplicate creation
                 raise e
 
     return None
