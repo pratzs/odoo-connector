@@ -211,21 +211,15 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
         sp.title = p['name']
         sp.vendor = vendor_name
         sp.status = 'active' if cfg['auto_publish'] else 'draft'
-        sp.published_scope = 'global' # ✅ FIX 1: Publish to POS/Google on creation
+        sp.published_scope = 'global' # ✅ Force Visibility
         
-        # Categorization (Only set on creation)
         cat_name = odoo.get_public_category_name(p.get('public_categ_ids', []))
         if cat_name: sp.product_type = cat_name
 
-    # --- UPDATES FOR EXISTING PRODUCTS ---
-    
-    # ✅ FIX 1: Force Visibility on Update too
-    # This ensures existing products appear on POS
+    # --- UPDATES ---
     sp.published_scope = 'global' 
 
-    # ✅ FIX 2: PRESERVE GOOGLE CATEGORY (Product Type)
-    # Only update product_type if it is currently EMPTY.
-    # If it has a value (Google mapping), we DO NOT touch it.
+    # Preserve Google Category if exists
     if not sp.product_type:
         cat_name = odoo.get_public_category_name(p.get('public_categ_ids', []))
         if cat_name: sp.product_type = cat_name
@@ -269,9 +263,7 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
     sp.variants = final_vars
     sp.save()
 
-    # --- POST SAVE UPDATES ---
-    
-    # 1. Cost
+    # Cost
     if sp.variants and cfg['cost']:
         for v in sp.variants:
             d = next((x for x in desired_variants if x['sku'] == v.sku), None)
@@ -283,7 +275,7 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
                     ii.save()
                 except: pass
 
-    # 2. Metafields (Original Price)
+    # Metafields
     if cfg['meta_price']:
         try:
             val = json.dumps({"amount": str(raw_price), "currency_code": cfg['currency']})
@@ -294,7 +286,6 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
             m.save()
         except: pass
 
-    # 3. Metafields (Vendor Code)
     if cfg['meta_code']:
         try:
             code = odoo.get_vendor_product_code(p['id'])
@@ -306,7 +297,7 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
                 sp.add_metafield(m)
         except: pass
 
-    # 4. Images
+    # Images
     if cfg['images'] and p.get('image_1920'):
         if not sp.images:
             try:
@@ -317,7 +308,7 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
                 img.save()
             except: pass
 
-    # 5. Save Map
+    # Map
     try:
         pm = ProductMap.query.filter_by(sku=sku).first()
         if not pm:
@@ -330,14 +321,13 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
 
 
 # =====================================================
-# 4. HELPERS
+# 4. HELPERS & CLEANUP (Batch Logic)
 # =====================================================
 def find_shopify_product_by_sku(sku, shop_url, product_title=None):
     """
     Finds a Product ID for a given SKU.
     1. Checks Database Map.
     2. API Search by SKU (query="sku:ABC").
-    3. API Search by Title (Fallback for legacy items).
     """
     # 1. DB Lookup
     pm = ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first()
@@ -347,63 +337,105 @@ def find_shopify_product_by_sku(sku, shop_url, product_title=None):
             return variant.product_id
         except: pass
 
-    # 2. API Search by SKU
+    # 2. API Search by SKU (STRICT)
     try:
         found = shopify.Product.search(query=f"sku:{sku}")
         if found: return found[0].id
     except: pass
     
-    # 3. Fallback: Search by Title
-    if product_title:
-        try:
-            found = shopify.Product.find(limit=1, title=product_title)
-            if found: return found[0].id
-        except: pass
-        
+    # NOTE: REMOVED Title Fallback to prevent duplicates
     return None
 
-def cleanup_shopify_products(shop_url):
+def cleanup_batch_task(shop_url, id_list, batch_name):
     """
-    Scans for duplicate SKUs on Shopify and archives the older versions.
+    Worker task: Takes a list of Product IDs and deletes them.
     """
     from app import app
-    
     with app.app_context():
         if not setup_shopify_session(shop_url): return
         
-        log_event('Cleanup', 'Info', "Starting duplicate scan...", shop_url=shop_url)
+        count = 0
+        for pid in id_list:
+            try:
+                # We use Archive ('archived') instead of Delete to be safe, 
+                # or you can use .destroy() to delete permanently.
+                p = shopify.Product.find(pid)
+                p.status = 'archived' 
+                p.save()
+                count += 1
+            except Exception as e:
+                print(f"Failed to archive {pid}: {e}")
+        
+        log_event('Cleanup', 'Info', f"{batch_name}: Archived {count} duplicates.", shop_url=shop_url)
+
+def cleanup_duplicates_master(shop_url):
+    """
+    Dispatcher: Scans all products, finds duplicates, queues them for deletion.
+    """
+    from app import app
+    with app.app_context():
+        if not setup_shopify_session(shop_url): return
+        
+        log_event('Cleanup', 'Info', "Starting Analysis (This is fast)...", shop_url=shop_url)
+        
         try:
-            products = []
+            # 1. Download basic info for ALL products (Fast)
+            # We only need ID, Title, UpdatedAt, and Variants
+            all_products = []
             page = shopify.Product.find(limit=250, status='active', fields="id,title,updated_at,variants")
+            
             while page:
-                products.extend(page)
+                all_products.extend(page)
                 if page.has_next_page(): 
                     page = page.next_page()
                 else: 
                     break
             
+            # 2. Group by SKU in memory
             sku_map = {}
-            for p in products:
+            for p in all_products:
                 if p.variants:
                     sku = p.variants[0].sku
                     if sku:
                         if sku not in sku_map: sku_map[sku] = []
                         sku_map[sku].append(p)
             
-            cleaned = 0
+            # 3. Identify Victims (The older duplicates)
+            ids_to_archive = []
+            
             for sku, items in sku_map.items():
                 if len(items) > 1:
+                    # Sort by updated_at (Newest first)
+                    # We keep the [0] (newest) and archive the rest
                     items.sort(key=lambda x: x.updated_at, reverse=True)
-                    trash = items[1:]
-                    for t in trash:
-                        try:
-                            t.status = 'archived'
-                            t.save()
-                            cleaned += 1
-                        except: pass
-                        
-            log_event('Cleanup', 'Success', f"Duplicate scan finished. Archived {cleaned} items.", shop_url=shop_url)
-        except Exception as e:
-            log_event('Cleanup', 'Error', f"Cleanup failed: {e}", shop_url=shop_url)
+                    duplicates = items[1:] 
+                    
+                    for d in duplicates:
+                        ids_to_archive.append(d.id)
 
-archive_shopify_duplicates = cleanup_shopify_products
+            if not ids_to_archive:
+                log_event('Cleanup', 'Success', "No duplicates found.", shop_url=shop_url)
+                return
+
+            log_event('Cleanup', 'Info', f"Found {len(ids_to_archive)} duplicates. Queueing deletion batches...", shop_url=shop_url)
+
+            # 4. Dispatch Batches (50 items per job)
+            BATCH_SIZE = 50
+            chunks = [ids_to_archive[i:i + BATCH_SIZE] for i in range(0, len(ids_to_archive), BATCH_SIZE)]
+
+            for index, batch in enumerate(chunks):
+                q_default.enqueue(
+                    cleanup_batch_task,
+                    shop_url,
+                    batch,
+                    f"Cleanup Batch {index+1}/{len(chunks)}",
+                    job_timeout=600
+                )
+            
+            log_event('Cleanup', 'Success', f"Queued {len(chunks)} batches to archive {len(ids_to_archive)} items.", shop_url=shop_url)
+
+        except Exception as e:
+            log_event('Cleanup', 'Error', f"Analysis Failed: {e}", shop_url=shop_url)
+
+# Link the function so the frontend button works
+archive_shopify_duplicates = cleanup_duplicates_master
