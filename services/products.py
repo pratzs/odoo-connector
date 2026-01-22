@@ -308,20 +308,20 @@ def find_shopify_product_by_sku(sku, shop_url):
     return None
 
 # =====================================================
-# 5. MAINTENANCE TOOLS (FULL IMPLEMENTATION)
+# 5. MAINTENANCE TOOLS (DEEP SCAN VERSION)
 # =====================================================
 
 def archive_shopify_duplicates(shop_url):
     """
-    Scans ALL Shopify products. 
-    If a SKU is found more than once, it archives the older ones 
-    and keeps the newest active one.
+    DEEP SCAN: Checks ALL variants of ALL products.
+    Strips whitespace from SKUs to find hidden duplicates.
+    Archives older products if their SKU conflicts with a newer one.
     """
     from app import app
     with app.app_context():
         if not setup_shopify_session(shop_url): return
 
-        log_event('Cleanup', 'Info', "Starting Duplicate Scan...", shop_url=shop_url)
+        log_event('Cleanup', 'Info', "Starting Deep Duplicate Scan (All Variants)...", shop_url=shop_url)
         
         # 1. Map SKU -> List of Products
         sku_map = {}
@@ -330,11 +330,21 @@ def archive_shopify_duplicates(shop_url):
 
         while page:
             for p in page:
-                # Get SKU from first variant
-                sku = p.variants[0].sku if p.variants else None
-                if sku:
+                # Iterate ALL variants, not just the first one
+                for v in p.variants:
+                    raw_sku = getattr(v, 'sku', '')
+                    if not raw_sku: continue
+                    
+                    # Normalize: Remove whitespace to catch "R0001" vs "R0001 "
+                    sku = str(raw_sku).strip()
+                    if not sku: continue
+
                     if sku not in sku_map: sku_map[sku] = []
-                    sku_map[sku].append(p)
+                    
+                    # Only add the product ONCE per SKU (even if it has the SKU on multiple variants)
+                    if not any(existing.id == p.id for existing in sku_map[sku]):
+                        sku_map[sku].append(p)
+                
                 count += 1
             
             if page.has_next_page():
@@ -342,7 +352,7 @@ def archive_shopify_duplicates(shop_url):
             else:
                 break
 
-        log_event('Cleanup', 'Info', f"Scanned {count} products. Analyzing for duplicates...", shop_url=shop_url)
+        log_event('Cleanup', 'Info', f"Deep Scanned {count} products. Analyzing conflicts...", shop_url=shop_url)
 
         # 2. Identify and Archive
         duplicates_found = 0
@@ -353,27 +363,28 @@ def archive_shopify_duplicates(shop_url):
                 duplicates_found += 1
                 
                 # Sort: Active first, then by Created At (Newest first)
-                # We want to KEEP the newest, active product.
+                # We keep the winner (Newest + Active) and kill the rest.
                 product_list.sort(key=lambda x: (x.status == 'active', x.created_at), reverse=True)
                 
-                # winner = product_list[0]
+                winner = product_list[0]
                 losers = product_list[1:]
 
                 for loser in losers:
                     try:
+                        # Don't archive if it's already archived (waste of API call)
                         if loser.status != 'archived':
                             loser.status = 'archived'
                             loser.save()
                             archived_count += 1
-                            print(f"Archived duplicate {sku} (ID: {loser.id})")
+                            print(f"Archived duplicate {sku} (Product ID: {loser.id})")
                     except Exception as e:
                         print(f"Failed to archive {loser.id}: {e}")
 
         if archived_count > 0:
-            log_event('Cleanup', 'Success', f"Duplicate cleanup done. Found {duplicates_found} conflicts. Archived {archived_count} redundant products.", shop_url=shop_url)
+            log_event('Cleanup', 'Success', f"Deep Clean Complete. Found {duplicates_found} SKU conflicts. Archived {archived_count} products.", shop_url=shop_url)
         else:
-            log_event('Cleanup', 'Success', "Clean scan. No active duplicates found.", shop_url=shop_url)
+            log_event('Cleanup', 'Success', "Deep Clean Complete. No active duplicates found.", shop_url=shop_url)
 
-# Alias for compatibility with app.py imports
+# Alias for compatibility
 cleanup_duplicates_master = archive_shopify_duplicates
 cleanup_shopify_products = archive_shopify_duplicates
