@@ -15,6 +15,7 @@ import xmlrpc.client
 import ssl
 import gc
 import smtplib
+from urllib.parse import urlparse, parse_qs
 
 from flask import Flask, request, jsonify, render_template, session, url_for, render_template_string, redirect
 from datetime import datetime, timedelta
@@ -1352,6 +1353,8 @@ def manual_order_fetch():
     return jsonify({"orders": mapped_orders})
     
 
+from urllib.parse import urlparse, parse_qs # Import at top if missing
+
 @app.route('/sync/orders/import_batch', methods=['POST'])
 @require_shopify_session
 def import_selected_orders():
@@ -1359,15 +1362,30 @@ def import_selected_orders():
     data = request.json
     ids = data.get('order_ids', [])
     
-    # ✅ FIX: Look in JSON body if missing from URL
+    # --- ROBUST SHOP RETRIEVAL ---
+    # 1. Try URL Query Param
     shop_url = request.args.get('shop')
+    
+    # 2. Try JSON Body
     if not shop_url and data:
-        shop_url = data.get('shop')
+        shop_url = data.get('shop') or data.get('shop_url')
 
+    # 3. Try Referer Header (The "Current Page" URL)
     if not shop_url:
-        return jsonify({"message": "Error: Missing shop parameter"}), 400
+        referer = request.headers.get("Referer")
+        if referer:
+            try:
+                parsed = urlparse(referer)
+                params = parse_qs(parsed.query)
+                if 'shop' in params:
+                    shop_url = params['shop'][0]
+            except: pass
 
-    # 2. Setup Shopify Session properly
+    # 4. Fail if still missing
+    if not shop_url:
+        return jsonify({"message": "Error: Missing shop parameter. Please reload the page."}), 400
+
+    # 5. Setup Shopify Session
     if not setup_shopify_session(shop_url):
         return jsonify({"message": "Auth Failed: Could not refresh session"}), 401
 
@@ -1380,10 +1398,10 @@ def import_selected_orders():
 
     for oid in ids:
         try:
-            # 3. Use the Library instead of manual requests
+            # 6. Fetch Order
             order = shopify.Order.find(oid)
             
-            # 4. Pass the dictionary to your processing function
+            # 7. Process
             result = process_order_data(order.to_dict(), odoo, shop_url=shop_url)
             
             if isinstance(result, tuple):
@@ -1398,7 +1416,6 @@ def import_selected_orders():
             log_event('System', 'Error', f"Import failed for order {oid}: {str(e)}", shop_url=shop_url)
 
     return jsonify({"message": f"Batch Complete. Synced: {synced}"})
-
 
 
 def background_refund_sync(shop_url, refund_data):
