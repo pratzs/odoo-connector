@@ -12,13 +12,17 @@ def start_worker(queue_name):
     """
     Starts a dedicated worker process for a specific queue.
     """
-    # Generate a unique name: "Worker-default-12345"
-    unique_name = f"Worker-{queue_name}-{os.getpid()}"
+    # FIX: Use UUID to ensure unique name even if PID is reused during restart
+    # This prevents "ValueError: There exists an active worker..."
+    unique_id = str(uuid.uuid4())[:8]
+    unique_name = f"Worker-{queue_name}-{unique_id}"
     
     print(f"👷 Starting {unique_name} for '{queue_name}' queue...")
     
     with Connection(conn):
-        w = Worker([Queue(queue_name)], name=unique_name)
+        # Listen strictly to the assigned queue
+        q = Queue(queue_name)
+        w = Worker([q], name=unique_name)
         
         with app.app_context():
             w.work()
@@ -26,10 +30,10 @@ def start_worker(queue_name):
 if __name__ == '__main__':
     print("🚀 Launching Parallel Workers...")
 
-    # Process 1: Critical Lane
+    # Process 1: Critical Lane (Orders, Inventory)
     p1 = multiprocessing.Process(target=start_worker, args=('critical',))
     
-    # Process 2: Default Lane
+    # Process 2: Default Lane (Products, Images)
     p2 = multiprocessing.Process(target=start_worker, args=('default',))
 
     p1.start()
