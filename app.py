@@ -1358,7 +1358,14 @@ def import_selected_orders():
     # 1. Get data from JSON body
     data = request.json
     ids = data.get('order_ids', [])
-    shop_url = request.args.get('shop') # The decorator ensures this is present
+    
+    # ✅ FIX: Look in JSON body if missing from URL
+    shop_url = request.args.get('shop')
+    if not shop_url and data:
+        shop_url = data.get('shop')
+
+    if not shop_url:
+        return jsonify({"message": "Error: Missing shop parameter"}), 400
 
     # 2. Setup Shopify Session properly
     if not setup_shopify_session(shop_url):
@@ -1374,7 +1381,6 @@ def import_selected_orders():
     for oid in ids:
         try:
             # 3. Use the Library instead of manual requests
-            # This automatically uses the token from setup_shopify_session
             order = shopify.Order.find(oid)
             
             # 4. Pass the dictionary to your processing function
@@ -1392,6 +1398,8 @@ def import_selected_orders():
             log_event('System', 'Error', f"Import failed for order {oid}: {str(e)}", shop_url=shop_url)
 
     return jsonify({"message": f"Batch Complete. Synced: {synced}"})
+
+
 
 def background_refund_sync(shop_url, refund_data):
     with app.app_context():
