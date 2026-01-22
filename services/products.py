@@ -117,6 +117,7 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
                 process_product_data(p, odoo, shop_url, cfg, uom_map)
                 processed += 1
             except Exception as e:
+                # Log detailed error for debugging
                 print(f"Error syncing {p.get('default_code')}: {e}")
 
         gc.collect()
@@ -130,12 +131,10 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
     """
     Handles the logic for syncing ONE product from Odoo to Shopify.
     """
-    # Import app context only if needed (for db access)
     from app import db
     
     # 1. Config Fallback (if called individually)
     if not cfg:
-        # Load minimal config if not provided
         cfg = {
             'title': True, 'price': True, 'cost': True, 'desc': True, 
             'tags': False, 'meta_price': False, 'images': False,
@@ -199,8 +198,10 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
         })
 
     # --- SHOPIFY API ---
+    # ✅ FIX: Use the updated helper function
     sid = find_shopify_product_by_sku(sku, shop_url)
     sp = None
+    
     if sid:
         try: sp = shopify.Product.find(sid)
         except: sp = None
@@ -308,6 +309,7 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
         pm = ProductMap.query.filter_by(sku=sku).first()
         if not pm:
             vid = sp.variants[0].id if sp.variants else '0'
+            # ✅ FIX: Do NOT try to save shopify_product_id if the column doesn't exist
             pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=str(vid), shop_url=shop_url)
             db.session.add(pm)
         pm.last_synced_at = datetime.utcnow()
@@ -316,31 +318,34 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
 
 
 # =====================================================
-# 4. HELPER
+# 4. HELPERS
 # =====================================================
 def find_shopify_product_by_sku(sku, shop_url):
+    """
+    Finds a Product ID for a given SKU.
+    Correctly handles DB schema limitation (no shopify_product_id column).
+    """
     pm = ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first()
-    if pm: return pm.shopify_product_id
+    
+    # ✅ FIX: Use Variant ID to fetch Product ID (since we don't store Product ID)
+    if pm and pm.shopify_variant_id and pm.shopify_variant_id != '0':
+        try:
+            variant = shopify.Variant.find(pm.shopify_variant_id)
+            return variant.product_id
+        except:
+            pass # Variant might be deleted or ID invalid
+
+    # Fallback: API Search
     try:
-        # Fallback: Search by title/sku
-        prods = shopify.Product.find(limit=1, title=sku)
-        if prods: return prods[0].id
+        products = shopify.Product.find(limit=1, title=sku)
+        if products: return products[0].id
     except: pass
+    
     return None
 
-def archive_shopify_duplicates(shop_url):
-    # Placeholder for the archive function if needed by app.py imports
-    pass
-
-
-
-# =====================================================
-# 5. MAINTENANCE TASKS
-# =====================================================
 def cleanup_shopify_products(shop_url):
     """
     Scans for duplicate SKUs on Shopify and archives the older versions.
-    Fixes the 'ImportError' in app.py.
     """
     from app import app
     
@@ -348,9 +353,7 @@ def cleanup_shopify_products(shop_url):
         if not setup_shopify_session(shop_url): return
         
         log_event('Cleanup', 'Info', "Starting duplicate scan...", shop_url=shop_url)
-        
         try:
-            # 1. Fetch all active products (lightweight)
             products = []
             page = shopify.Product.find(limit=250, status='active', fields="id,title,updated_at,variants")
             while page:
@@ -360,7 +363,6 @@ def cleanup_shopify_products(shop_url):
                 else: 
                     break
             
-            # 2. Group by SKU
             sku_map = {}
             for p in products:
                 if p.variants:
@@ -369,27 +371,21 @@ def cleanup_shopify_products(shop_url):
                         if sku not in sku_map: sku_map[sku] = []
                         sku_map[sku].append(p)
             
-            # 3. Archive Duplicates
             cleaned = 0
             for sku, items in sku_map.items():
                 if len(items) > 1:
-                    # Sort by updated_at descending (Keep newest, archive older)
                     items.sort(key=lambda x: x.updated_at, reverse=True)
-                    keep = items[0]
                     trash = items[1:]
-                    
                     for t in trash:
                         try:
                             t.status = 'archived'
                             t.save()
                             cleaned += 1
-                        except Exception as e: 
-                            print(f"Failed to archive {t.id}: {e}")
+                        except: pass
                         
             log_event('Cleanup', 'Success', f"Duplicate scan finished. Archived {cleaned} items.", shop_url=shop_url)
-
         except Exception as e:
             log_event('Cleanup', 'Error', f"Cleanup failed: {e}", shop_url=shop_url)
 
-# Alias for compatibility if app.py calls it by the old name
+# Alias for compatibility
 archive_shopify_duplicates = cleanup_shopify_products
