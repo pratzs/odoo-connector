@@ -35,6 +35,7 @@ def sync_products_master(shop_url):
         ]
         
         try:
+            # Fetch IDs only
             product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                 'product.product', 'search', [domain])
         except Exception as e:
@@ -44,6 +45,7 @@ def sync_products_master(shop_url):
         total_count = len(product_ids)
         log_event('Product Sync', 'Info', f"Found {total_count} items. Dispatching to queue...", shop_url=shop_url)
 
+        # Split into batches of 50
         BATCH_SIZE = 50
         chunks = [product_ids[i:i + BATCH_SIZE] for i in range(0, len(product_ids), BATCH_SIZE)]
 
@@ -69,6 +71,7 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): return
         
+        # Load configs once for this batch
         cfg = {
             'title': get_config('prod_sync_title', True, shop_url=shop_url),
             'price': get_config('prod_sync_price', True, shop_url=shop_url),
@@ -85,6 +88,7 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
             'currency': shopify.Shop.current().currency
         }
 
+        # Pre-load UOM cache
         uom_map = {}
         try:
             uoms = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'search_read', [], {'fields': ['id', 'name', 'factor_inv']})
@@ -109,9 +113,11 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
         processed = 0
         for p in products:
             try:
+                # Call the single-item logic
                 process_product_data(p, odoo, shop_url, cfg, uom_map)
                 processed += 1
             except Exception as e:
+                # Log detailed error for debugging
                 print(f"Error syncing {p.get('default_code')}: {e}")
 
         gc.collect()
@@ -122,8 +128,12 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
 # 3. SINGLE PRODUCT LOGIC
 # =====================================================
 def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
+    """
+    Handles the logic for syncing ONE product from Odoo to Shopify.
+    """
     from app import db
     
+    # 1. Config Fallback
     if not cfg:
         cfg = {
             'title': True, 'price': True, 'cost': True, 'desc': True, 
@@ -187,8 +197,7 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
             'sku': f"{sku}-UNIT", 'barcode': '', 'cost': str(unit_cost)
         })
 
-    # --- SHOPIFY API LOOKUP (FIXED) ---
-    # We now pass the product_name so fallback search works correctly
+    # --- SHOPIFY API ---
     sid = find_shopify_product_by_sku(sku, shop_url, product_name)
     sp = None
     
@@ -202,7 +211,22 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
         sp.title = p['name']
         sp.vendor = vendor_name
         sp.status = 'active' if cfg['auto_publish'] else 'draft'
+        sp.published_scope = 'global' # ✅ FIX 1: Publish to POS/Google on creation
         
+        # Categorization (Only set on creation)
+        cat_name = odoo.get_public_category_name(p.get('public_categ_ids', []))
+        if cat_name: sp.product_type = cat_name
+
+    # --- UPDATES FOR EXISTING PRODUCTS ---
+    
+    # ✅ FIX 1: Force Visibility on Update too
+    # This ensures existing products appear on POS
+    sp.published_scope = 'global' 
+
+    # ✅ FIX 2: PRESERVE GOOGLE CATEGORY (Product Type)
+    # Only update product_type if it is currently EMPTY.
+    # If it has a value (Google mapping), we DO NOT touch it.
+    if not sp.product_type:
         cat_name = odoo.get_public_category_name(p.get('public_categ_ids', []))
         if cat_name: sp.product_type = cat_name
 
@@ -215,6 +239,7 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
         t_names = odoo.get_tag_names(p.get('product_tag_ids', []))
         if t_names: sp.tags = ",".join(t_names)
 
+    # Options
     if is_pack:
         sp.options = [{'name': 'Pack Size'}]
     elif hasattr(sp, 'options') and sp.options and sp.options[0].name != 'Title':
@@ -222,6 +247,7 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
 
     sp.save()
 
+    # Variants
     existing = getattr(sp, 'variants', [])
     final_vars = []
     
@@ -243,7 +269,9 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
     sp.variants = final_vars
     sp.save()
 
-    # --- COST & METAFIELDS ---
+    # --- POST SAVE UPDATES ---
+    
+    # 1. Cost
     if sp.variants and cfg['cost']:
         for v in sp.variants:
             d = next((x for x in desired_variants if x['sku'] == v.sku), None)
@@ -255,6 +283,7 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
                     ii.save()
                 except: pass
 
+    # 2. Metafields (Original Price)
     if cfg['meta_price']:
         try:
             val = json.dumps({"amount": str(raw_price), "currency_code": cfg['currency']})
@@ -265,6 +294,7 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
             m.save()
         except: pass
 
+    # 3. Metafields (Vendor Code)
     if cfg['meta_code']:
         try:
             code = odoo.get_vendor_product_code(p['id'])
@@ -276,6 +306,7 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
                 sp.add_metafield(m)
         except: pass
 
+    # 4. Images
     if cfg['images'] and p.get('image_1920'):
         if not sp.images:
             try:
@@ -286,6 +317,7 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
                 img.save()
             except: pass
 
+    # 5. Save Map
     try:
         pm = ProductMap.query.filter_by(sku=sku).first()
         if not pm:
@@ -298,7 +330,7 @@ def process_product_data(p, odoo, shop_url, cfg=None, uom_map=None):
 
 
 # =====================================================
-# 4. HELPERS (Corrected Logic)
+# 4. HELPERS
 # =====================================================
 def find_shopify_product_by_sku(sku, shop_url, product_title=None):
     """
@@ -317,13 +349,11 @@ def find_shopify_product_by_sku(sku, shop_url, product_title=None):
 
     # 2. API Search by SKU
     try:
-        # This is the magic query that prevents duplicates
         found = shopify.Product.search(query=f"sku:{sku}")
         if found: return found[0].id
     except: pass
     
     # 3. Fallback: Search by Title
-    # If SKU search fails, we check if a product with the same name exists
     if product_title:
         try:
             found = shopify.Product.find(limit=1, title=product_title)
