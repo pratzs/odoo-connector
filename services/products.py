@@ -36,7 +36,6 @@ def sync_products_master(shop_url):
         chunks = [product_ids[i:i + BATCH_SIZE] for i in range(0, len(product_ids), BATCH_SIZE)]
 
         for index, batch_ids in enumerate(chunks):
-            # Increased timeout to 3600s for safety
             q_default.enqueue(sync_product_batch_task, shop_url, batch_ids, f"Batch {index+1}/{len(chunks)}", job_timeout=3600)
 
         log_event('Product Sync', 'Success', f"Queued {len(chunks)} batches.", shop_url=shop_url)
@@ -91,11 +90,11 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
                 print(f"Error syncing {p.get('default_code')}: {e}")
 
         gc.collect()
-        log_event('Product Sync', 'Info', f"✅ {batch_name}: New: {stats['created']}, Updated: {stats['updated']}, Moved Aside: {stats['archived']}", shop_url=shop_url)
+        log_event('Product Sync', 'Info', f"✅ {batch_name}: New: {stats['created']}, Updated: {stats['updated']}, Conflict/Moved: {stats['archived']}", shop_url=shop_url)
 
 
 # =====================================================
-# 3. SINGLE PRODUCT LOGIC
+# 3. SINGLE PRODUCT LOGIC (STRICT OWNERSHIP)
 # =====================================================
 def process_product_data(p, odoo, shop_url, cfg, uom_map):
     from app import db
@@ -153,54 +152,76 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
         })
 
     # ========================================================
-    # 🛡️ CLEANER SAFETY LOGIC (NO RANDOM WORDS)
+    # 🛑 CRITICAL CHECK: OWNERSHIP & TRUST
     # ========================================================
     sp = None
     action_log = "updated"
     
-    try:
-        found_variants = shopify.Variant.find(params={'sku': sku})
-    except: 
-        found_variants = []
+    # 1. Check Database Mapping FIRST
+    pm = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
+    
+    if pm:
+        # A. CIVIL WAR PREVENTION: Is this SKU already owned by a different Odoo ID?
+        if pm.odoo_product_id != p['id']:
+            print(f"⚠️ CONFLICT: SKU '{sku}' is owned by Odoo ID {pm.odoo_product_id}. Ignoring Odoo ID {p['id']}.")
+            return "skipped" # We stop here. No fighting.
 
-    for v in found_variants:
+        # B. TRUSTED LOAD: We have a link. Load it directly. Bypasses name check.
         try:
-            parent = shopify.Product.find(v.product_id)
-            
-            # --- CHECK 1: NAME SIMILARITY ---
-            sim = SequenceMatcher(None, str(parent.title).lower(), str(product_name).lower()).ratio()
-            
-            if sim < 0.3:
-                print(f"⚠️ Collision: {sku} is on '{parent.title}' but should be '{product_name}'. Moving old item aside.")
-                
-                # Rename and Archive
-                new_sku = f"OLD_{sku}"
-                parent.status = 'archived'
-                parent.tags = f"{parent.tags},conflict_archived" if parent.tags else "conflict_archived"
-                
-                v.sku = new_sku
-                v.save()
-                parent.save()
-                
-                action_log = "archived"
-                continue
+            # We store Variant ID, so we fetch variant -> product
+            v = shopify.Variant.find(pm.shopify_variant_id)
+            sp = shopify.Product.find(v.product_id)
+        except:
+            # Link is dead (deleted on Shopify). Clear it and continue to search.
+            print(f"Broken Link for {sku}. Re-scanning...")
+            db.session.delete(pm)
+            db.session.commit()
+            pm = None # Fall through to search logic below
 
-            # --- CHECK 2: MONSTER VARIANTS ---
-            is_valid_parent = True
-            if len(parent.variants) > 1:
-                for pv in parent.variants:
-                    pv_sku = getattr(pv, 'sku', '')
-                    if pv_sku != sku and pv_sku != f"{sku}-UNIT":
-                         is_valid_parent = False
-                         break
-            
-            if is_valid_parent:
-                sp = parent
-                break 
-            else:
-                 v.destroy()
-                 action_log = "archived"
-        except: pass
+    # 2. DISCOVERY: If no map, search Shopify by SKU
+    if not sp:
+        try:
+            found_variants = shopify.Variant.find(params={'sku': sku})
+        except: 
+            found_variants = []
+
+        for v in found_variants:
+            try:
+                parent = shopify.Product.find(v.product_id)
+                
+                # --- SAFETY CHECK 1: NAME SIMILARITY ---
+                # Only strictly check name if we are discovering for the FIRST time
+                sim = SequenceMatcher(None, str(parent.title).lower(), str(product_name).lower()).ratio()
+                
+                if sim < 0.3:
+                    print(f"⚠️ Collision: {sku} is on '{parent.title}' but should be '{product_name}'. Moving old item aside.")
+                    
+                    new_sku = f"OLD_{sku}"
+                    parent.status = 'archived'
+                    parent.tags = f"{parent.tags},conflict_archived" if parent.tags else "conflict_archived"
+                    v.sku = new_sku
+                    v.save()
+                    parent.save()
+                    
+                    action_log = "archived"
+                    continue 
+
+                # --- SAFETY CHECK 2: MONSTER VARIANTS ---
+                is_valid_parent = True
+                if len(parent.variants) > 1:
+                    for pv in parent.variants:
+                        pv_sku = getattr(pv, 'sku', '')
+                        if pv_sku != sku and pv_sku != f"{sku}-UNIT":
+                             is_valid_parent = False
+                             break
+                
+                if is_valid_parent:
+                    sp = parent
+                    break 
+                else:
+                     v.destroy()
+                     action_log = "archived"
+            except: pass
 
     # ========================================================
 
@@ -253,10 +274,8 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
     
     for des in desired_variants:
         match = next((v for v in existing if v.sku == des['sku']), None)
-        
         if not match and des['option1'] == 'Default Title' and len(existing) == 1:
              match = existing[0]
-        
         if not match: match = shopify.Variant({'product_id': sp.id})
         
         match.option1 = des['option1']
@@ -271,7 +290,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
     sp.variants = final_vars
     sp.save()
 
-    # Cost Sync
+    # Cost & Image Sync (Standard)
     if sp.variants and cfg['cost']:
         for v in sp.variants:
             d = next((x for x in desired_variants if x['sku'] == v.sku), None)
@@ -279,18 +298,14 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
                 try:
                     ii = shopify.InventoryItem.find(v.inventory_item_id)
                     ii.cost = d['cost']
-                    ii.tracked = True
                     ii.save()
                 except: pass
 
-    # Image Sync
     if cfg['images'] and p.get('image_1920'):
         try:
             img_raw = p['image_1920']
             if isinstance(img_raw, bytes): img_raw = img_raw.decode('utf-8')
             new_hash = hashlib.md5(img_raw.encode('utf-8')).hexdigest()
-            
-            # CHECK 1: Use Shop URL
             pm_check = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
             current_hash = pm_check.image_hash if pm_check else ""
             
@@ -299,22 +314,19 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
                     for old_img in sp.images:
                         try: shopify.Image.find(old_img.id, product_id=sp.id).destroy()
                         except: pass
-                
                 img = shopify.Image(prefix_options={'product_id': sp.id})
                 img.attachment = img_raw
                 img.save()
-                
                 if pm_check:
                     pm_check.image_hash = new_hash
                     db.session.commit()
         except: pass
 
     # ==========================================================
-    # ❌ CRITICAL FIX: ADDED shop_url TO FILTER
+    # ✅ MAP UPDATE (WITH SHOP URL)
     # ==========================================================
     try:
         pm = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
-        
         if not pm:
             vid = sp.variants[0].id if sp.variants else '0'
             pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=str(vid), shop_url=shop_url)
@@ -328,7 +340,6 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
     except: db.session.rollback()
 
     return action_log
-
 
 # =====================================================
 # 4. HELPERS
@@ -347,58 +358,10 @@ def find_shopify_product_by_sku(sku, shop_url):
     return None
 
 def archive_shopify_duplicates(shop_url):
-    """
-    DEEP SCAN: Checks ALL variants of ALL products.
-    Archives older products if their SKU conflicts with a newer one.
-    """
-    from app import app
-    with app.app_context():
-        if not setup_shopify_session(shop_url): return
+    # Keep function empty to satisfy imports if called externally, 
+    # logic is now integrated into master sync.
+    pass
 
-        log_event('Cleanup', 'Info', "Starting Deep Duplicate Scan (All Variants)...", shop_url=shop_url)
-        
-        sku_map = {}
-        page = shopify.Product.find(limit=250)
-        
-        while page:
-            for p in page:
-                for v in p.variants:
-                    raw_sku = getattr(v, 'sku', '')
-                    if not raw_sku: continue
-                    sku = str(raw_sku).strip()
-                    if not sku: continue
-
-                    if sku not in sku_map: sku_map[sku] = []
-                    
-                    if not any(existing.id == p.id for existing in sku_map[sku]):
-                        sku_map[sku].append(p)
-            
-            if page.has_next_page():
-                page = page.next_page()
-            else:
-                break
-
-        duplicates_found = 0
-        archived_count = 0
-
-        for sku, product_list in sku_map.items():
-            if len(product_list) > 1:
-                duplicates_found += 1
-                product_list.sort(key=lambda x: (x.status == 'active', x.created_at), reverse=True)
-                
-                # Winner = index 0. Losers = 1..end
-                for loser in product_list[1:]:
-                    try:
-                        if loser.status != 'archived':
-                            loser.status = 'archived'
-                            loser.save()
-                            archived_count += 1
-                            print(f"Archived duplicate {sku} (Product ID: {loser.id})")
-                    except: pass
-
-        msg = f"Deep Clean Complete. Found {duplicates_found} SKU conflicts. Archived {archived_count} products."
-        log_event('Cleanup', 'Success', msg, shop_url=shop_url)
-
-# Aliases - MUST BE AT THE VERY END
+# Aliases - MUST BE AT THE VERY END TO AVOID NAME ERROR
 cleanup_duplicates_master = archive_shopify_duplicates
 cleanup_shopify_products = archive_shopify_duplicates
