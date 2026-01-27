@@ -4,66 +4,104 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Live Logs</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
 
     <style>
-        /* Custom Scrollbar Styling */
+        body {
+            background-color: #fff; /* White background to blend with dashboard card */
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+
+        /* Toolbar Styling */
+        .log-toolbar {
+            background-color: #f8f9fa;
+            border-bottom: 1px solid #dee2e6;
+            padding: 10px 15px;
+            flex-shrink: 0;
+        }
+
+        /* Log Container */
         .log-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 0; /* No padding on container for max space */
+            background-color: #fff;
             scrollbar-width: thin;
-            scrollbar-color: #cbd5e1 #f1f5f9;
         }
-        .log-container::-webkit-scrollbar {
-            width: 8px;
+
+        /* Scrollbar Polish */
+        .log-container::-webkit-scrollbar { width: 6px; }
+        .log-container::-webkit-scrollbar-track { background: transparent; }
+        .log-container::-webkit-scrollbar-thumb { background-color: #adb5bd; border-radius: 3px; }
+
+        /* Log Item Styling */
+        .log-item {
+            padding: 10px 15px;
+            border-bottom: 1px solid #f1f3f5;
+            animation: fadeIn 0.2s ease-out;
+            transition: background-color 0.1s;
         }
-        .log-container::-webkit-scrollbar-track {
-            background: #f1f5f9;
+        .log-item:hover { background-color: #f8f9fa; }
+        
+        .log-item:last-child { border-bottom: none; }
+
+        /* Status Colors */
+        .border-left-indicator { border-left: 3px solid transparent; }
+        .type-info { border-left-color: #0dcaf0; }
+        .type-success { border-left-color: #198754; }
+        .type-warning { border-left-color: #ffc107; }
+        .type-error { border-left-color: #dc3545; }
+
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        
+        /* Status Dot Pulse */
+        .status-dot {
+            width: 8px; height: 8px; 
+            background-color: #198754; 
+            border-radius: 50%; 
+            box-shadow: 0 0 0 0 rgba(25, 135, 84, 0.7);
+            animation: pulse-green 2s infinite;
         }
-        .log-container::-webkit-scrollbar-thumb {
-            background-color: #cbd5e1;
-            border-radius: 4px;
+        @keyframes pulse-green {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(25, 135, 84, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 4px rgba(25, 135, 84, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(25, 135, 84, 0); }
         }
     </style>
 </head>
-<body class="bg-slate-50 h-screen flex flex-col font-sans">
+<body>
 
-    <div class="bg-white border-b border-slate-200 px-6 py-4 flex justify-between items-center shadow-sm shrink-0">
-        <div class="flex items-center gap-3">
-            <div class="h-3 w-3 rounded-full bg-green-500 animate-pulse"></div>
-            <h1 class="text-lg font-semibold text-slate-700 tracking-tight">Live Synchronization Logs</h1>
+    <div class="log-toolbar d-flex justify-content-between align-items-center">
+        <div class="d-flex align-items-center gap-2">
+            <div class="status-dot"></div>
+            <span class="fw-semibold text-secondary" style="font-size: 0.85rem; letter-spacing: 0.5px;">ACTIVITY STREAM</span>
         </div>
-        <div class="flex gap-2">
-            <button onclick="clearLogs()" class="text-xs font-medium text-slate-500 hover:text-red-600 px-3 py-1.5 rounded-md hover:bg-slate-100 transition-colors border border-transparent hover:border-slate-200">
-                Clear History
+        <div class="d-flex align-items-center gap-2">
+            <span class="badge bg-light text-secondary border fw-normal">Live</span>
+            <button onclick="clearLogs()" class="btn btn-sm btn-outline-secondary border-0 py-0" style="font-size: 0.8rem;" title="Clear Logs">
+                <i class="bi bi-trash"></i> Clear
             </button>
-            <span class="text-xs font-medium px-2 py-1 bg-slate-100 text-slate-600 rounded border border-slate-200">
-                Auto-refreshing
-            </span>
         </div>
     </div>
 
-    <div class="flex-1 p-6 overflow-hidden flex flex-col max-w-5xl mx-auto w-full">
-        <div class="bg-white rounded-xl shadow-sm border border-slate-200 flex-1 flex flex-col overflow-hidden">
-            
-            <div id="log-container" class="log-container flex-1 overflow-y-auto p-4 space-y-3">
-                
-                <div id="loading-state" class="flex flex-col items-center justify-center h-full">
-                    <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-slate-300"></div>
-                    <span class="text-xs text-slate-400 mt-4">Connecting to Odoo stream...</span>
-                </div>
-
-                <div id="empty-state" class="hidden flex flex-col items-center justify-center h-full text-center">
-                    <i class="bi bi-terminal text-6xl text-slate-300 mb-4"></i>
-                    <h3 class="text-slate-700 font-semibold mb-1 text-base">No activity recorded yet</h3>
-                    <p class="text-slate-500 text-sm max-w-xs">
-                        Synchronization logs will appear here in real-time once you start a sync or receive an order.
-                    </p>
-                </div>
-
-                <div id="log-list"></div>
-
-            </div>
+    <div id="log-container" class="log-container">
+        
+        <div id="loading-state" class="d-flex flex-column align-items-center justify-content-center h-100">
+            <div class="spinner-border text-secondary spinner-border-sm" role="status"></div>
+            <small class="text-muted mt-2">Connecting...</small>
         </div>
+
+        <div id="empty-state" class="d-none flex-column align-items-center justify-content-center h-100 text-center p-4">
+            <i class="bi bi-terminal text-secondary opacity-25" style="font-size: 3rem;"></i>
+            <p class="text-muted small mt-2">Waiting for sync activity...</p>
+        </div>
+
+        <div id="log-list"></div>
     </div>
 
     <script>
@@ -72,44 +110,45 @@
         const shopParam = urlParams.get('shop');
         const fetchUrl = shopParam ? `${LOG_API_URL}?shop=${shopParam}` : LOG_API_URL;
 
-        const container = document.getElementById('log-container');
         const logList = document.getElementById('log-list');
         const loadingState = document.getElementById('loading-state');
         const emptyState = document.getElementById('empty-state');
         
         let isFirstLoad = true;
 
-        // Status Icons Map
         const ICONS = {
-            'info': 'bi-info-circle text-blue-500',
-            'success': 'bi-check-circle text-green-500',
-            'warning': 'bi-exclamation-triangle text-amber-500',
-            'error': 'bi-x-circle text-red-500'
+            'info': 'bi-info-circle-fill text-info',
+            'success': 'bi-check-circle-fill text-success',
+            'warning': 'bi-exclamation-triangle-fill text-warning',
+            'error': 'bi-x-circle-fill text-danger'
         };
 
-        const BORDERS = {
-            'info': 'border-l-blue-500',
-            'success': 'border-l-green-500',
-            'warning': 'border-l-amber-500',
-            'error': 'border-l-red-500'
+        const TYPES = {
+            'info': 'type-info',
+            'success': 'type-success',
+            'warning': 'type-warning',
+            'error': 'type-error'
         };
 
         function createLogItem(log) {
             const div = document.createElement('div');
-            div.className = `p-3 rounded-r-lg bg-slate-50 border-l-4 ${BORDERS[log.type] || BORDERS['info']} border-y border-r border-slate-200 text-sm animate-fade-in`;
+            const typeClass = TYPES[log.type] || TYPES['info'];
+            div.className = `log-item border-left-indicator ${typeClass}`;
             
             const timeStr = new Date(log.timestamp).toLocaleTimeString([], { hour12: false });
             
             div.innerHTML = `
-                <div class="flex justify-between items-start">
-                    <div class="flex items-start gap-3">
-                        <i class="bi ${ICONS[log.type] || ICONS['info']} mt-0.5 text-base"></i>
-                        <div>
-                            <p class="text-slate-800 leading-snug font-medium">${escapeHtml(log.message)}</p>
-                            ${log.details ? `<p class="text-xs text-slate-500 mt-1 font-mono bg-white px-1.5 py-0.5 rounded border border-slate-100 inline-block">${escapeHtml(log.details)}</p>` : ''}
+                <div class="d-flex justify-content-between align-items-start">
+                    <div class="d-flex gap-2 w-100">
+                        <i class="bi ${ICONS[log.type] || ICONS['info']} mt-1" style="font-size: 1rem;"></i>
+                        <div class="w-100">
+                            <div class="d-flex justify-content-between">
+                                <span class="text-dark fw-medium" style="font-size: 0.9rem;">${escapeHtml(log.message)}</span>
+                                <span class="text-muted small font-monospace ms-2 text-nowrap" style="font-size: 0.75rem;">${timeStr}</span>
+                            </div>
+                            ${log.details ? `<div class="text-muted small mt-1 font-monospace bg-light d-inline-block px-2 rounded border">${escapeHtml(log.details)}</div>` : ''}
                         </div>
                     </div>
-                    <span class="text-xs font-mono text-slate-400 shrink-0 ml-4">${timeStr}</span>
                 </div>
             `;
             return div;
@@ -117,12 +156,7 @@
 
         function escapeHtml(text) {
             if (!text) return "";
-            return text
-                .replace(/&/g, "&amp;")
-                .replace(/</g, "&lt;")
-                .replace(/>/g, "&gt;")
-                .replace(/"/g, "&quot;")
-                .replace(/'/g, "&#039;");
+            return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
         }
 
         async function fetchLogs() {
@@ -131,31 +165,29 @@
                 const data = await res.json();
 
                 if (isFirstLoad) {
-                    loadingState.classList.add('hidden');
+                    loadingState.classList.add('d-none');
                     isFirstLoad = false;
                 }
 
                 if (data.length === 0) {
-                    emptyState.classList.remove('hidden');
+                    emptyState.classList.remove('d-none');
+                    emptyState.classList.add('d-flex');
                     logList.innerHTML = '';
                     return;
                 }
 
-                emptyState.classList.add('hidden');
-                logList.innerHTML = ''; // Wipe and redraw (simple)
+                emptyState.classList.add('d-none');
+                emptyState.classList.remove('d-flex');
+                
+                logList.innerHTML = ''; 
                 data.forEach(log => {
                     logList.appendChild(createLogItem(log));
                 });
-
-            } catch (err) {
-                console.error("Log poll failed", err);
-            }
+            } catch (err) { console.error("Log poll failed", err); }
         }
 
         function clearLogs() {
-             if(confirm('Clear all logs?')) {
-                 fetch('/maintenance/wipe_logs').then(() => fetchLogs());
-             }
+             if(confirm('Clear all logs?')) fetch('/maintenance/wipe_logs').then(() => fetchLogs());
         }
 
         setInterval(fetchLogs, 2000);
