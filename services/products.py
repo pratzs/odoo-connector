@@ -36,7 +36,7 @@ def sync_products_master(shop_url):
         chunks = [product_ids[i:i + BATCH_SIZE] for i in range(0, len(product_ids), BATCH_SIZE)]
 
         for index, batch_ids in enumerate(chunks):
-            # Increased timeout to 3600s to handle large cleanups
+            # Increased timeout to 3600s for safety
             q_default.enqueue(sync_product_batch_task, shop_url, batch_ids, f"Batch {index+1}/{len(chunks)}", job_timeout=3600)
 
         log_event('Product Sync', 'Success', f"Queued {len(chunks)} batches.", shop_url=shop_url)
@@ -300,15 +300,39 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
                 sp.add_metafield(m)
         except: pass
 
+    # --- D. IMAGE UPLOAD (SMART REPLACE) ---
     if cfg['images'] and p.get('image_1920'):
-        if not sp.images:
-            try:
-                img_raw = p['image_1920']
-                if isinstance(img_raw, bytes): img_raw = img_raw.decode('utf-8')
+        try:
+            # 1. Prepare Odoo Image & Calculate Hash
+            img_raw = p['image_1920']
+            if isinstance(img_raw, bytes): img_raw = img_raw.decode('utf-8')
+            new_hash = hashlib.md5(img_raw.encode('utf-8')).hexdigest()
+            
+            # 2. Check DB history to see if image actually changed (Speed Optimization)
+            pm_check = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
+            current_hash = pm_check.image_hash if pm_check else ""
+            
+            # 3. Update Condition: Hash changed OR Shopify has no images
+            if new_hash != current_hash or not sp.images:
+                # A. Wipe ALL existing images (Strict Policy: No wrong images allowed)
+                if sp.images:
+                    for old_img in sp.images:
+                        try: 
+                            shopify.Image.find(old_img.id, product_id=sp.id).destroy()
+                        except: pass
+                
+                # B. Upload New Image
                 img = shopify.Image(prefix_options={'product_id': sp.id})
                 img.attachment = img_raw
                 img.save()
-            except: pass
+                
+                # C. Update Hash in DB immediately
+                if pm_check:
+                    pm_check.image_hash = new_hash
+                    db.session.commit()
+                    
+        except Exception as e:
+            print(f"Image Sync Error {sku}: {e}")
 
     # Map Update
     try:
