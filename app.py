@@ -1167,7 +1167,7 @@ def register_webhooks_manual():
     return jsonify({"message": "Webhook Registration Complete", "details": results})
 
 
-@app.route('/maintenance/clear_product_map', methods=['POST'])
+@app.route('/maintenance/clear_product_map', methods=['GET', 'POST'])
 def clear_product_map():
     shop_url = request.args.get('shop')
     if not shop_url:
