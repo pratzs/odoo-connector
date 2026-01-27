@@ -1193,6 +1193,24 @@ def trigger_fulfillment_sync():
     q_critical.enqueue(sync_odoo_fulfillments, shop_url, job_timeout=600)
     return jsonify({"message": "Started checking for shipments (Queued)."})
 
+@app.route('/sync/cancellations', methods=['GET'])
+def trigger_cancellation_sync():
+    shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+    
+    # Critical Queue (Fast)
+    q_critical.enqueue(sync_odoo_cancellations, shop_url, job_timeout=600)
+    return jsonify({"message": "Odoo Cancellation Sync Queued"})
+
+@app.route('/sync/returns', methods=['GET'])
+def trigger_return_sync():
+    shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+    
+    # Critical Queue (Fast)
+    q_critical.enqueue(sync_odoo_returns, shop_url, job_timeout=600)
+    return jsonify({"message": "Odoo Return Sync Queued"})
+
 @app.route('/sync/categories/run_initial_import', methods=['GET'])
 def run_initial_category_import():
     shop_url = request.args.get('shop')
