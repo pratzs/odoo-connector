@@ -3,7 +3,6 @@ import json
 import gc
 import time
 import hashlib
-from difflib import SequenceMatcher
 from datetime import datetime
 from models import Shop, ProductMap, AppSetting, db
 from utils import get_odoo_connection, log_event, setup_shopify_session, get_config, q_default
@@ -95,7 +94,7 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
 
 
 # =====================================================
-# 3. SINGLE PRODUCT LOGIC (FIXED TO KILL DUPLICATES)
+# 3. SINGLE PRODUCT LOGIC (STRICT SKU MODE)
 # =====================================================
 def process_product_data(p, odoo, shop_url, cfg, uom_map):
     from app import db
@@ -106,7 +105,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
     product_name = p.get('name', 'Unknown')
     vendor_name = product_name.split(' ')[0] if product_name else "Worthy"
 
-    # --- Variant Setup ---
+    # --- Variant / Pack Logic ---
     is_pack = False
     ratio = 1.0
     main_uom_name = 'Outer'
@@ -153,62 +152,76 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
         })
 
     # ========================================================
-    # 🕵️ DUPLICATE KILLER LOGIC (NO MORE A0001 x2)
+    # 🕵️ STRICT MATCHING LOGIC
     # ========================================================
     sp = None
     action_log = "updated"
     
-    # 1. Find ALL variants with this SKU
+    # 1. Find ALL variants on Shopify with this SKU
+    # Note: This finds the VARIANT, not the Product directly yet.
+    found_variants = []
     try:
-        variants_found = shopify.Variant.find(params={'sku': sku})
-    except:
-        variants_found = []
+        found_variants = shopify.Variant.find(params={'sku': sku})
+    except: pass
 
-    good_matches = []
-    bad_matches = []
+    candidate_products = []
+    seen_prod_ids = set()
 
-    # 2. Sort them: Good Match (Correct Title) vs. Bad Match (Monster)
-    seen_ids = set()
-    for v in variants_found:
+    for v in found_variants:
+        if v.product_id in seen_prod_ids: continue
+        
         try:
-            prod_id = v.product_id
-            if prod_id in seen_ids: continue
-            seen_ids.add(prod_id)
-
-            prod = shopify.Product.find(prod_id)
-            similarity = SequenceMatcher(None, str(prod.title).lower(), str(product_name).lower()).ratio()
+            parent = shopify.Product.find(v.product_id)
+            seen_prod_ids.add(v.product_id)
             
-            # If > 40% match, it's a valid candidate. If not, it's a Monster.
-            if similarity > 0.4:
-                good_matches.append(prod)
+            # --- MONSTER CHECK ---
+            # If we are looking for SKU "A", and this product has variants "X", "Y", "Z" and "A"...
+            # "A" shouldn't be here. This is a "Monster Link" (Variant A attached to Product X).
+            
+            # We define "Valid" if the product ONLY contains SKUs related to us (SKU or SKU-UNIT)
+            # or if it's a single variant product that IS us.
+            
+            is_valid_parent = True
+            if len(parent.variants) > 1:
+                for pv in parent.variants:
+                    pv_sku = getattr(pv, 'sku', '')
+                    # If sibling variant is neither ME nor MY UNIT variant, it's a stranger.
+                    if pv_sku != sku and pv_sku != f"{sku}-UNIT":
+                         # Heuristic: If >50% of variants are strangers, I am the intruder.
+                         is_valid_parent = False 
+                         break
+            
+            if is_valid_parent:
+                candidate_products.append(parent)
             else:
-                bad_matches.append({'product': prod, 'variant_id': v.id})
+                # DESTROY THE MONSTER LINK (The specific variant only)
+                print(f"👹 Killing Monster Variant {sku} inside '{parent.title}'")
+                try: 
+                    v.destroy()
+                    action_log = "killed"
+                except: pass
+
         except: pass
 
-    # 3. Kill Monsters (Bad Matches)
-    for item in bad_matches:
-        print(f"👹 Killing Monster Link: SKU {sku} in '{item['product'].title}'")
-        try:
-            v = shopify.Variant.find(item['variant_id'])
-            v.destroy()
-            action_log = "killed"
-        except: pass
-
-    # 4. Handle Duplicates (Multiple Good Matches)
-    if len(good_matches) > 0:
-        # Sort by best name match (highest similarity first)
-        good_matches.sort(key=lambda x: SequenceMatcher(None, str(x.title).lower(), str(product_name).lower()).ratio(), reverse=True)
+    # 2. RESOLVE CANDIDATES
+    if not candidate_products:
+        sp = None # Create new
+    elif len(candidate_products) == 1:
+        sp = candidate_products[0] # Found one perfect match
+    else:
+        # found multiple VALID products? Duplicate products exist.
+        # Sort: Active first, then Newest Created
+        candidate_products.sort(key=lambda x: (x.status == 'active', x.created_at), reverse=True)
         
-        # The Winner!
-        sp = good_matches[0]
+        sp = candidate_products[0]
         
-        # The Losers (Duplicates) - DESTROY THEM
-        for loser in good_matches[1:]:
-            print(f"🔪 Killing Duplicate: '{loser.title}' (ID: {loser.id})")
-            try:
-                loser.destroy()
-                action_log = "killed"
-            except: pass
+        # Archive the losers
+        for loser in candidate_products[1:]:
+            print(f"📦 Archiving Duplicate Product: {loser.title} (ID: {loser.id})")
+            if loser.status == 'active':
+                loser.status = 'archived'
+                loser.save()
+    
     # ========================================================
 
     # --- CREATE ---
@@ -228,6 +241,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
 
     # --- UPDATE ---
     sp.published_scope = 'global'
+    # If we are updating an archived product (that we revived), set it active
     if sp.status == 'archived': sp.status = 'active'
 
     if not sp.product_type:
@@ -241,7 +255,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
         t_names = odoo.get_tag_names(p.get('product_tag_ids', []))
         if t_names: sp.tags = ",".join(t_names)
 
-    # Clean Options
+    # Clean Options (Pack vs Title)
     if is_pack:
         if not sp.options or sp.options[0].name != 'Pack Size':
             sp.options = [{'name': 'Pack Size'}]
@@ -250,16 +264,21 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
 
     sp.save()
 
-    # Variants Update
+    # --- VARIANT SYNC ---
     existing = getattr(sp, 'variants', [])
     final_vars = []
     
     for des in desired_variants:
+        # Try exact SKU match first
         match = next((v for v in existing if v.sku == des['sku']), None)
-        if not match and des['option1'] == 'Default Title':
-             match = next((v for v in existing), None)
         
-        if not match: match = shopify.Variant({'product_id': sp.id})
+        # Fallback: If "Default Title" and we have a single variant, grab it
+        if not match and des['option1'] == 'Default Title' and len(existing) == 1:
+             match = existing[0]
+        
+        if not match: 
+            # New Variant
+            match = shopify.Variant({'product_id': sp.id})
         
         match.option1 = des['option1']
         match.sku = des['sku']
@@ -303,30 +322,23 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
     # --- D. IMAGE UPLOAD (SMART REPLACE) ---
     if cfg['images'] and p.get('image_1920'):
         try:
-            # 1. Prepare Odoo Image & Calculate Hash
             img_raw = p['image_1920']
             if isinstance(img_raw, bytes): img_raw = img_raw.decode('utf-8')
             new_hash = hashlib.md5(img_raw.encode('utf-8')).hexdigest()
             
-            # 2. Check DB history to see if image actually changed (Speed Optimization)
             pm_check = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
             current_hash = pm_check.image_hash if pm_check else ""
             
-            # 3. Update Condition: Hash changed OR Shopify has no images
             if new_hash != current_hash or not sp.images:
-                # A. Wipe ALL existing images (Strict Policy: No wrong images allowed)
                 if sp.images:
                     for old_img in sp.images:
-                        try: 
-                            shopify.Image.find(old_img.id, product_id=sp.id).destroy()
+                        try: shopify.Image.find(old_img.id, product_id=sp.id).destroy()
                         except: pass
                 
-                # B. Upload New Image
                 img = shopify.Image(prefix_options={'product_id': sp.id})
                 img.attachment = img_raw
                 img.save()
                 
-                # C. Update Hash in DB immediately
                 if pm_check:
                     pm_check.image_hash = new_hash
                     db.session.commit()
@@ -355,6 +367,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
 # 4. HELPERS
 # =====================================================
 def find_shopify_product_by_sku(sku, shop_url):
+    # This helper is now mostly used by Image Sync or one-off tools
     pm = ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first()
     if pm and pm.shopify_variant_id and pm.shopify_variant_id != '0':
         try:
@@ -362,17 +375,10 @@ def find_shopify_product_by_sku(sku, shop_url):
             return variant.product_id
         except: pass
 
-    retries = 3
-    for attempt in range(retries):
-        try:
-            variants = shopify.Variant.find(limit=1, params={'sku': sku})
-            if variants: return variants[0].product_id
-            return None
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(2 ** (attempt + 1))
-                continue
-            raise e
+    try:
+        variants = shopify.Variant.find(limit=1, params={'sku': sku})
+        if variants: return variants[0].product_id
+    except: pass
     return None
 
 def archive_shopify_duplicates(shop_url):
@@ -387,10 +393,8 @@ def archive_shopify_duplicates(shop_url):
         log_event('Cleanup', 'Info', "Starting Deep Duplicate Scan (All Variants)...", shop_url=shop_url)
         
         sku_map = {}
-        # Iterate all products
         page = shopify.Product.find(limit=250)
-        count = 0
-
+        
         while page:
             for p in page:
                 for v in p.variants:
@@ -403,7 +407,6 @@ def archive_shopify_duplicates(shop_url):
                     
                     if not any(existing.id == p.id for existing in sku_map[sku]):
                         sku_map[sku].append(p)
-                count += 1
             
             if page.has_next_page():
                 page = page.next_page()
@@ -416,13 +419,10 @@ def archive_shopify_duplicates(shop_url):
         for sku, product_list in sku_map.items():
             if len(product_list) > 1:
                 duplicates_found += 1
-                # Sort: Active first, then by Created At (Newest first)
                 product_list.sort(key=lambda x: (x.status == 'active', x.created_at), reverse=True)
                 
-                winner = product_list[0]
-                losers = product_list[1:]
-
-                for loser in losers:
+                # Winner = index 0. Losers = 1..end
+                for loser in product_list[1:]:
                     try:
                         if loser.status != 'archived':
                             loser.status = 'archived'
