@@ -5,150 +5,175 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Live Logs</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
 
     <style>
-        .no-scrollbar::-webkit-scrollbar { display: none; }
-        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-        
-        /* Polaris Empty State Styling */
-        .empty-state-container {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            height: 100%;
-            padding: 40px;
-            text-align: center;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        /* Custom Scrollbar Styling */
+        .log-container {
+            scrollbar-width: thin;
+            scrollbar-color: #cbd5e1 #f1f5f9;
         }
-        .empty-state-icon {
-            font-size: 64px;
-            color: #babfc3;
-            margin-bottom: 16px;
+        .log-container::-webkit-scrollbar {
+            width: 8px;
+        }
+        .log-container::-webkit-scrollbar-track {
+            background: #f1f5f9;
+        }
+        .log-container::-webkit-scrollbar-thumb {
+            background-color: #cbd5e1;
+            border-radius: 4px;
         }
     </style>
 </head>
-<body class="bg-white h-screen w-full overflow-hidden">
-    <div id="root" class="h-full w-full"></div>
+<body class="bg-slate-50 h-screen flex flex-col font-sans">
 
-    <script type="text/babel">
-        const { useState, useEffect, useRef } = React;
+    <div class="bg-white border-b border-slate-200 px-6 py-4 flex justify-between items-center shadow-sm shrink-0">
+        <div class="flex items-center gap-3">
+            <div class="h-3 w-3 rounded-full bg-green-500 animate-pulse"></div>
+            <h1 class="text-lg font-semibold text-slate-700 tracking-tight">Live Synchronization Logs</h1>
+        </div>
+        <div class="flex gap-2">
+            <button onclick="clearLogs()" class="text-xs font-medium text-slate-500 hover:text-red-600 px-3 py-1.5 rounded-md hover:bg-slate-100 transition-colors border border-transparent hover:border-slate-200">
+                Clear History
+            </button>
+            <span class="text-xs font-medium px-2 py-1 bg-slate-100 text-slate-600 rounded border border-slate-200">
+                Auto-refreshing
+            </span>
+        </div>
+    </div>
 
-        const LogItem = ({ log }) => {
-            const getIcon = (type) => {
-                switch (type) {
-                    case 'error': return <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-red-500"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>;
-                    case 'warning': return <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-amber-500"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" x2="12" y1="9" y2="13"/><line x1="12" x2="12.01" y1="17" y2="17"/></svg>;
-                    case 'success': return <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-green-500"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>;
-                    default: return <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-blue-500"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>;
-                }
-            };
-
-            const getBgColor = (type) => {
-                switch (type) {
-                    case 'error': return 'bg-red-50/50 border-red-100 hover:bg-red-50';
-                    case 'warning': return 'bg-amber-50/50 border-amber-100 hover:bg-amber-50';
-                    case 'success': return 'bg-green-50/50 border-green-100 hover:bg-green-50';
-                    default: return 'bg-white hover:bg-slate-50';
-                }
-            };
-
-            const formatTime = (ts) => {
-                if (!ts) return '';
-                const date = new Date(ts);
-                return date.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-            };
-
-            return (
-                <div className={`flex items-start gap-3 p-3 text-sm border-b border-slate-100 transition-colors ${getBgColor(log.type)}`}>
-                    <div className="mt-0.5 shrink-0">
-                        {getIcon(log.type)}
-                    </div>
-                    <div className="font-mono text-slate-400 text-xs mt-0.5 shrink-0 select-none w-20">
-                        {formatTime(log.timestamp)}
-                    </div>
-                    <div className="flex-1 min-w-0 break-words">
-                        <div className="font-medium text-slate-700">{log.message}</div>
-                        {log.details && (
-                            <div className="text-slate-500 text-xs mt-1 font-mono uppercase tracking-wide">
-                                {log.details}
-                            </div>
-                        )}
-                    </div>
+    <div class="flex-1 p-6 overflow-hidden flex flex-col max-w-5xl mx-auto w-full">
+        <div class="bg-white rounded-xl shadow-sm border border-slate-200 flex-1 flex flex-col overflow-hidden">
+            
+            <div id="log-container" class="log-container flex-1 overflow-y-auto p-4 space-y-3">
+                
+                <div id="loading-state" class="flex flex-col items-center justify-center h-full">
+                    <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-slate-300"></div>
+                    <span class="text-xs text-slate-400 mt-4">Connecting to Odoo stream...</span>
                 </div>
-            );
+
+                <div id="empty-state" class="hidden flex flex-col items-center justify-center h-full text-center">
+                    <i class="bi bi-terminal text-6xl text-slate-300 mb-4"></i>
+                    <h3 class="text-slate-700 font-semibold mb-1 text-base">No activity recorded yet</h3>
+                    <p class="text-slate-500 text-sm max-w-xs">
+                        Synchronization logs will appear here in real-time once you start a sync or receive an order.
+                    </p>
+                </div>
+
+                <div id="log-list"></div>
+
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const LOG_API_URL = '/api/logs/live'; 
+        // Helper to get shop param from parent iframe if needed, or URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const shopParam = urlParams.get('shop');
+        const fetchUrl = shopParam ? `${LOG_API_URL}?shop=${shopParam}` : LOG_API_URL;
+
+        const container = document.getElementById('log-container');
+        const logList = document.getElementById('log-list');
+        const loadingState = document.getElementById('loading-state');
+        const emptyState = document.getElementById('empty-state');
+        
+        let isFirstLoad = true;
+        let lastLogId = 0;
+
+        // Status Icons Map
+        const ICONS = {
+            'info': 'bi-info-circle text-blue-500',
+            'success': 'bi-check-circle text-green-500',
+            'warning': 'bi-exclamation-triangle text-amber-500',
+            'error': 'bi-x-circle text-red-500'
         };
 
-        const App = () => {
-            const [logs, setLogs] = useState([]);
-            const [loading, setLoading] = useState(true);
-            const scrollContainerRef = useRef(null);
+        const BORDERS = {
+            'info': 'border-l-blue-500',
+            'success': 'border-l-green-500',
+            'warning': 'border-l-amber-500',
+            'error': 'border-l-red-500'
+        };
 
-            const fetchLogs = async () => {
-                try {
-                    const urlParams = new URLSearchParams(window.location.search);
-                    const shop = urlParams.get('shop');
-                    const response = await fetch(`/api/logs/live?shop=${shop}&t=` + Date.now());
-                    if (!response.ok) throw new Error("API Error");
-                    const data = await response.json();
-                    setLogs(data); 
-                } catch (err) {
-                    console.error("Fetch Error:", err);
-                } finally {
-                    setLoading(false);
-                }
-            };
-
-            useEffect(() => {
-                fetchLogs();
-                const interval = setInterval(fetchLogs, 2000);
-                return () => clearInterval(interval);
-            }, []);
-
-            return (
-                <div className="flex flex-col h-full bg-white">
-                    {/* Header */}
-                    <div className="flex-none p-2 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                        <div className="flex items-center gap-2">
-                             <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">SQL Stream</span>
-                             <div className={`w-2 h-2 rounded-full ${logs.length > 0 ? 'bg-green-500 animate-pulse' : 'bg-slate-300'}`}></div>
+        function createLogItem(log) {
+            const div = document.createElement('div');
+            div.className = `p-3 rounded-r-lg bg-slate-50 border-l-4 ${BORDERS[log.type] || BORDERS['info']} border-y border-r border-slate-200 text-sm animate-fade-in`;
+            
+            // Safe Date Formatting
+            const timeStr = new Date(log.timestamp).toLocaleTimeString([], { hour12: false });
+            
+            div.innerHTML = `
+                <div class="flex justify-between items-start">
+                    <div class="flex items-start gap-3">
+                        <i class="bi ${ICONS[log.type] || ICONS['info']} mt-0.5 text-base"></i>
+                        <div>
+                            <p class="text-slate-800 leading-snug font-medium">${escapeHtml(log.message)}</p>
+                            ${log.details ? `<p class="text-xs text-slate-500 mt-1 font-mono bg-white px-1.5 py-0.5 rounded border border-slate-100 inline-block">${escapeHtml(log.details)}</p>` : ''}
                         </div>
-                        <span className="text-[10px] text-slate-400 font-mono">
-                            {logs.length} entries
-                        </span>
                     </div>
-
-                    {/* Log List Area */}
-                    <div ref={scrollContainerRef} className="flex-1 overflow-y-auto">
-                         {loading && logs.length === 0 ? (
-                             <div className="empty-state-container">
-                                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-slate-300"></div>
-                                <span className="text-xs text-slate-400 mt-4">Connecting to Odoo stream...</span>
-                             </div>
-                         ) : logs.length === 0 ? (
-                             /* PROFESSIONAL EMPTY STATE */
-                             <div className="empty-state-container">
-                                <i className="bi bi-terminal empty-state-icon"></i>
-                                <h3 className="text-slate-700 font-semibold mb-1 text-base">No activity recorded yet</h3>
-                                <p className="text-slate-500 text-sm max-w-xs">
-                                    Synchronization logs will appear here in real-time once you start a sync or receive an order.
-                                </p>
-                             </div>
-                         ) : (
-                             logs.map(log => <LogItem key={log.id} log={log} />)
-                         )}
-                    </div>
+                    <span class="text-xs font-mono text-slate-400 shrink-0 ml-4">${timeStr}</span>
                 </div>
-            );
-        };
+            `;
+            return div;
+        }
 
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
+        // XSS Prevention
+        function escapeHtml(text) {
+            if (!text) return "";
+            return text
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
+        async function fetchLogs() {
+            try {
+                const res = await fetch(fetchUrl);
+                const data = await res.json();
+
+                if (isFirstLoad) {
+                    loadingState.classList.add('hidden');
+                    isFirstLoad = false;
+                }
+
+                if (data.length === 0) {
+                    emptyState.classList.remove('hidden');
+                    logList.innerHTML = '';
+                    return;
+                }
+
+                emptyState.classList.add('hidden');
+
+                // Determine if we should render new logs
+                // Simple diffing: if first item ID is different, we re-render
+                // OR ideally, your API should support ?since_id=X. 
+                // For now, we just wipe and render to keep it simple as per original code.
+                
+                logList.innerHTML = ''; // Clear current list
+                data.forEach(log => {
+                    logList.appendChild(createLogItem(log));
+                });
+
+            } catch (err) {
+                console.error("Log poll failed", err);
+            }
+        }
+
+        function clearLogs() {
+             // Optional: Call an API to clear logs on server
+             if(confirm('Clear all logs?')) {
+                 fetch('/maintenance/wipe_logs')
+                    .then(() => fetchLogs());
+             }
+        }
+
+        // Poll every 2 seconds
+        setInterval(fetchLogs, 2000);
+        fetchLogs(); // Initial call
+
     </script>
 </body>
 </html>
