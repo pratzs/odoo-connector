@@ -331,6 +331,75 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
 
     return action_log
 
+# =====================================================
+# 4. HELPERS
+# =====================================================
+def find_shopify_product_by_sku(sku, shop_url):
+    pm = ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first()
+    if pm and pm.shopify_variant_id and pm.shopify_variant_id != '0':
+        try:
+            variant = shopify.Variant.find(pm.shopify_variant_id)
+            return variant.product_id
+        except: pass
+    try:
+        variants = shopify.Variant.find(limit=1, params={'sku': sku})
+        if variants: return variants[0].product_id
+    except: pass
+    return None
+
+def archive_shopify_duplicates(shop_url):
+    """
+    DEEP SCAN: Checks ALL variants of ALL products.
+    Archives older products if their SKU conflicts with a newer one.
+    """
+    from app import app
+    with app.app_context():
+        if not setup_shopify_session(shop_url): return
+
+        log_event('Cleanup', 'Info', "Starting Deep Duplicate Scan (All Variants)...", shop_url=shop_url)
+        
+        sku_map = {}
+        page = shopify.Product.find(limit=250)
+        
+        while page:
+            for p in page:
+                for v in p.variants:
+                    raw_sku = getattr(v, 'sku', '')
+                    if not raw_sku: continue
+                    sku = str(raw_sku).strip()
+                    if not sku: continue
+
+                    if sku not in sku_map: sku_map[sku] = []
+                    
+                    if not any(existing.id == p.id for existing in sku_map[sku]):
+                        sku_map[sku].append(p)
+            
+            if page.has_next_page():
+                page = page.next_page()
+            else:
+                break
+
+        duplicates_found = 0
+        archived_count = 0
+
+        for sku, product_list in sku_map.items():
+            if len(product_list) > 1:
+                duplicates_found += 1
+                product_list.sort(key=lambda x: (x.status == 'active', x.created_at), reverse=True)
+                
+                # Winner = index 0. Losers = 1..end
+                for loser in product_list[1:]:
+                    try:
+                        if loser.status != 'archived':
+                            loser.status = 'archived'
+                            loser.save()
+                            archived_count += 1
+                            print(f"Archived duplicate {sku} (Product ID: {loser.id})")
+                    except: pass
+
+        msg = f"Deep Clean Complete. Found {duplicates_found} SKU conflicts. Archived {archived_count} products."
+        log_event('Cleanup', 'Success', msg, shop_url=shop_url)
+
 # Aliases
 cleanup_duplicates_master = archive_shopify_duplicates
 cleanup_shopify_products = archive_shopify_duplicates
