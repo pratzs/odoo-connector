@@ -36,7 +36,7 @@ def sync_products_master(shop_url):
         chunks = [product_ids[i:i + BATCH_SIZE] for i in range(0, len(product_ids), BATCH_SIZE)]
 
         for index, batch_ids in enumerate(chunks):
-            # Increased timeout to 3600s for safety
+            # Increased timeout to 3600s to handle large cleanups
             q_default.enqueue(sync_product_batch_task, shop_url, batch_ids, f"Batch {index+1}/{len(chunks)}", job_timeout=3600)
 
         log_event('Product Sync', 'Success', f"Queued {len(chunks)} batches.", shop_url=shop_url)
@@ -276,10 +276,58 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
     # Cost & Metafields
     if sp.variants and cfg['cost']:
         for v in sp.variants:
-            d = next((x for x in desired_variants if x['sku']
+            d = next((x for x in desired_variants if x['sku'] == v.sku), None)
+            if d and v.inventory_item_id:
+                try:
+                    ii = shopify.InventoryItem.find(v.inventory_item_id)
+                    ii.cost = d['cost']
+                    ii.tracked = True
+                    ii.save()
+                except: pass
 
+    if cfg['meta_price']:
+        try:
+            val = json.dumps({"amount": str(raw_price), "currency_code": cfg['currency']})
+            m = shopify.Metafield({'key': 'original_retail_price', 'value': val, 'type': 'money', 'namespace': 'custom', 'owner_resource': 'product', 'owner_id': sp.id})
+            m.save()
+        except: pass
 
-                      # =====================================================
+    if cfg['meta_code']:
+        try:
+            code = odoo.get_vendor_product_code(p['id'])
+            if code:
+                m = shopify.Metafield({'key': 'vendor_product_code', 'value': code, 'type': 'single_line_text_field', 'namespace': 'custom', 'owner_resource': 'product', 'owner_id': sp.id})
+                sp.add_metafield(m)
+        except: pass
+
+    if cfg['images'] and p.get('image_1920'):
+        if not sp.images:
+            try:
+                img_raw = p['image_1920']
+                if isinstance(img_raw, bytes): img_raw = img_raw.decode('utf-8')
+                img = shopify.Image(prefix_options={'product_id': sp.id})
+                img.attachment = img_raw
+                img.save()
+            except: pass
+
+    # Map Update
+    try:
+        pm = ProductMap.query.filter_by(sku=sku).first()
+        if not pm:
+            vid = sp.variants[0].id if sp.variants else '0'
+            pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=str(vid), shop_url=shop_url)
+            db.session.add(pm)
+        
+        if sp.variants:
+            pm.shopify_variant_id = str(sp.variants[0].id)
+            
+        pm.last_synced_at = datetime.utcnow()
+        db.session.commit()
+    except: db.session.rollback()
+
+    return action_log
+
+# =====================================================
 # 4. HELPERS
 # =====================================================
 def find_shopify_product_by_sku(sku, shop_url):
@@ -303,9 +351,6 @@ def find_shopify_product_by_sku(sku, shop_url):
             raise e
     return None
 
-# =====================================================
-# 5. MAINTENANCE TOOLS (DEEP SCAN PRESERVED)
-# =====================================================
 def archive_shopify_duplicates(shop_url):
     """
     DEEP SCAN: Checks ALL variants of ALL products.
