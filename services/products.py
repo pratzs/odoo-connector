@@ -5,6 +5,7 @@ from difflib import SequenceMatcher
 from datetime import datetime
 from models import Shop, ProductMap, db
 from utils import get_odoo_connection, log_event, setup_shopify_session, q_default
+import shopify
 
 # =====================================================
 # 1. THE DISPATCHER (Triggered by Dashboard Button)
@@ -81,7 +82,8 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
         
         for p in products:
             try:
-                res = process_single_product(p, shop_url)
+                # IMPORTANT: Function name must be 'process_product_data' to match app.py imports
+                res = process_product_data(p, shop_url)
                 stats[res] = stats.get(res, 0) + 1
             except Exception as e:
                 print(f"Error processing {p.get('default_code')}: {e}")
@@ -98,7 +100,7 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
 # =====================================================
 # 3. THE LOGIC (Monster Slayer + Sync)
 # =====================================================
-def process_single_product(p, shop_url):
+def process_product_data(p, shop_url):
     """
     The core logic. It ensures the SKU in Shopify matches the Product Name in Odoo.
     If it doesn't, it destroys the bad link and creates a fresh product.
