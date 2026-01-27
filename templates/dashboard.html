@@ -224,14 +224,8 @@
             </div>
         </div>
         <div class="col-md-8">
-            <div class="card p-3 h-100">
-                <div class="d-flex justify-content-between align-items-center mb-3">
-                    <div class="section-header mb-0" style="border:none;">Sync Health Monitor</div>
-                    <button onclick="document.querySelector('iframe').contentWindow.location.reload();" class="btn btn-sm btn-secondary">Refresh</button>
-                </div>
-                <div class="log-frame-container">
-                    <iframe src="/live_logs?shop={{ shop_url }}" width="100%" height="100%" frameborder="0"></iframe>
-                </div>
+            <div class="card h-100 overflow-hidden border-0 shadow-sm">
+                <iframe src="/live_logs?shop={{ shop_url }}" width="100%" height="100%" frameborder="0" style="display:block;"></iframe>
             </div>
         </div>
     </div>
