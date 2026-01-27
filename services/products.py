@@ -76,24 +76,26 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
         except: pass
 
         fields = ['default_code', 'name', 'list_price', 'standard_price', 'weight', 'active', 'uom_id', 'sh_is_secondary_unit', 'sh_secondary_uom', 'public_categ_ids', 'product_tag_ids', 'description_sale', 'product_tmpl_id', 'image_1920', 'barcode', 'qty_per_pack']
-        
         products = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'read', [batch_ids], {'fields': fields})
 
-        stats = {'created': 0, 'updated': 0, 'fixed': 0, 'skipped': 0}
+        stats = {'created': 0, 'updated': 0, 'killed': 0, 'skipped': 0}
 
         for p in products:
             try:
                 res = process_product_data(p, odoo, shop_url, cfg, uom_map)
-                stats[res] = stats.get(res, 0) + 1
+                if 'killed' in res: stats['killed'] += 1
+                elif 'created' in res: stats['created'] += 1
+                elif 'updated' in res: stats['updated'] += 1
+                else: stats['skipped'] += 1
             except Exception as e:
                 print(f"Error syncing {p.get('default_code')}: {e}")
 
         gc.collect()
-        log_event('Product Sync', 'Info', f"✅ {batch_name}: New: {stats['created']}, Updated: {stats['updated']}, Fixed Monsters: {stats.get('fixed', 0)}", shop_url=shop_url)
+        log_event('Product Sync', 'Info', f"✅ {batch_name}: New: {stats['created']}, Updated: {stats['updated']}, Killed Dupes: {stats['killed']}", shop_url=shop_url)
 
 
 # =====================================================
-# 3. SINGLE PRODUCT LOGIC (Merged: Features + Safety)
+# 3. SINGLE PRODUCT LOGIC (FIXED TO KILL DUPLICATES)
 # =====================================================
 def process_product_data(p, odoo, shop_url, cfg, uom_map):
     from app import db
@@ -104,7 +106,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
     product_name = p.get('name', 'Unknown')
     vendor_name = product_name.split(' ')[0] if product_name else "Worthy"
 
-    # --- Pack & UOM Logic ---
+    # --- Variant Setup ---
     is_pack = False
     ratio = 1.0
     main_uom_name = 'Outer'
@@ -128,7 +130,6 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
     
     if not main_uom_name: main_uom_name = "Outer"
 
-    # --- Prepare Variants ---
     desired_variants = []
     raw_price = float(p.get('list_price', 0.0))
     raw_cost = float(p.get('standard_price', 0.0))
@@ -151,38 +152,64 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
             'sku': f"{sku}-UNIT", 'barcode': '', 'cost': str(unit_cost)
         })
 
-    # --- FIND PRODUCT (With Retry) ---
-    sid = find_shopify_product_by_sku(sku, shop_url)
+    # ========================================================
+    # 🕵️ DUPLICATE KILLER LOGIC (NO MORE A0001 x2)
+    # ========================================================
     sp = None
-    action = "updated"
+    action_log = "updated"
     
-    if sid:
-        try: sp = shopify.Product.find(sid)
-        except: sp = None
-    
-    # === 🛡️ MONSTER SLAYER (Safety Lock) ===
-    # This prevents the "Black Hole" bug by checking name similarity.
-    if sp:
-        shopify_title = str(sp.title or "").lower()
-        odoo_title = str(product_name).lower()
-        
-        # Calculate similarity (0.0 to 1.0). If < 40% match, it's a Monster.
-        similarity = SequenceMatcher(None, shopify_title, odoo_title).ratio()
-        
-        if similarity < 0.4:
-            print(f"👹 MONSTER FOUND: SKU {sku} inside '{sp.title}'. Killing variant...")
-            try:
-                # Destroy only the bad variant to free the SKU
-                for v in sp.variants:
-                    if v.sku == sku:
-                        v.destroy()
-                        break
-            except: pass
+    # 1. Find ALL variants with this SKU
+    try:
+        variants_found = shopify.Variant.find(params={'sku': sku})
+    except:
+        variants_found = []
+
+    good_matches = []
+    bad_matches = []
+
+    # 2. Sort them: Good Match (Correct Title) vs. Bad Match (Monster)
+    seen_ids = set()
+    for v in variants_found:
+        try:
+            prod_id = v.product_id
+            if prod_id in seen_ids: continue
+            seen_ids.add(prod_id)
+
+            prod = shopify.Product.find(prod_id)
+            similarity = SequenceMatcher(None, str(prod.title).lower(), str(product_name).lower()).ratio()
             
-            # Force create new product
-            sp = None
-            action = "fixed"
-    # ========================================
+            # If > 40% match, it's a valid candidate. If not, it's a Monster.
+            if similarity > 0.4:
+                good_matches.append(prod)
+            else:
+                bad_matches.append({'product': prod, 'variant_id': v.id})
+        except: pass
+
+    # 3. Kill Monsters (Bad Matches)
+    for item in bad_matches:
+        print(f"👹 Killing Monster Link: SKU {sku} in '{item['product'].title}'")
+        try:
+            v = shopify.Variant.find(item['variant_id'])
+            v.destroy()
+            action_log = "killed"
+        except: pass
+
+    # 4. Handle Duplicates (Multiple Good Matches)
+    if len(good_matches) > 0:
+        # Sort by best name match (highest similarity first)
+        good_matches.sort(key=lambda x: SequenceMatcher(None, str(x.title).lower(), str(product_name).lower()).ratio(), reverse=True)
+        
+        # The Winner!
+        sp = good_matches[0]
+        
+        # The Losers (Duplicates) - DESTROY THEM
+        for loser in good_matches[1:]:
+            print(f"🔪 Killing Duplicate: '{loser.title}' (ID: {loser.id})")
+            try:
+                loser.destroy()
+                action_log = "killed"
+            except: pass
+    # ========================================================
 
     # --- CREATE ---
     if not sp:
@@ -197,11 +224,10 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
         cat_name = odoo.get_public_category_name(p.get('public_categ_ids', []))
         if cat_name: sp.product_type = cat_name
         
-        if action != "fixed": action = "created"
+        if action_log != "killed": action_log = "created"
 
     # --- UPDATE ---
     sp.published_scope = 'global'
-    # Ensure active if previously archived
     if sp.status == 'archived': sp.status = 'active'
 
     if not sp.product_type:
@@ -215,6 +241,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
         t_names = odoo.get_tag_names(p.get('product_tag_ids', []))
         if t_names: sp.tags = ",".join(t_names)
 
+    # Clean Options
     if is_pack:
         if not sp.options or sp.options[0].name != 'Pack Size':
             sp.options = [{'name': 'Pack Size'}]
@@ -229,7 +256,6 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
     
     for des in desired_variants:
         match = next((v for v in existing if v.sku == des['sku']), None)
-        # Handle case where "Default Title" variant exists but we are renaming it
         if not match and des['option1'] == 'Default Title':
              match = next((v for v in existing), None)
         
@@ -247,64 +273,13 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
     sp.variants = final_vars
     sp.save()
 
-    # Post-Save: Cost & Metafields
+    # Cost & Metafields
     if sp.variants and cfg['cost']:
         for v in sp.variants:
-            d = next((x for x in desired_variants if x['sku'] == v.sku), None)
-            if d and v.inventory_item_id:
-                try:
-                    ii = shopify.InventoryItem.find(v.inventory_item_id)
-                    ii.cost = d['cost']
-                    ii.tracked = True
-                    ii.save()
-                except: pass
-
-    if cfg['meta_price']:
-        try:
-            val = json.dumps({"amount": str(raw_price), "currency_code": cfg['currency']})
-            m = shopify.Metafield({'key': 'original_retail_price', 'value': val, 'type': 'money', 'namespace': 'custom', 'owner_resource': 'product', 'owner_id': sp.id})
-            m.save()
-        except: pass
-
-    if cfg['meta_code']:
-        try:
-            code = odoo.get_vendor_product_code(p['id'])
-            if code:
-                m = shopify.Metafield({'key': 'vendor_product_code', 'value': code, 'type': 'single_line_text_field', 'namespace': 'custom', 'owner_resource': 'product', 'owner_id': sp.id})
-                sp.add_metafield(m)
-        except: pass
-
-    if cfg['images'] and p.get('image_1920'):
-        # Safety: Only upload if no images exist to prevent dupes/slowdown
-        if not sp.images:
-            try:
-                img_raw = p['image_1920']
-                if isinstance(img_raw, bytes): img_raw = img_raw.decode('utf-8')
-                img = shopify.Image(prefix_options={'product_id': sp.id})
-                img.attachment = img_raw
-                img.save()
-            except: pass
-
-    # Map Update
-    try:
-        pm = ProductMap.query.filter_by(sku=sku).first()
-        if not pm:
-            vid = sp.variants[0].id if sp.variants else '0'
-            pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=str(vid), shop_url=shop_url)
-            db.session.add(pm)
-        
-        # Ensure ID is correct
-        if sp.variants:
-            pm.shopify_variant_id = str(sp.variants[0].id)
-            
-        pm.last_synced_at = datetime.utcnow()
-        db.session.commit()
-    except: db.session.rollback()
-
-    return action
+            d = next((x for x in desired_variants if x['sku']
 
 
-# =====================================================
+                      # =====================================================
 # 4. HELPERS
 # =====================================================
 def find_shopify_product_by_sku(sku, shop_url):
@@ -329,7 +304,7 @@ def find_shopify_product_by_sku(sku, shop_url):
     return None
 
 # =====================================================
-# 5. MAINTENANCE TOOLS (RESTORED DEEP SCAN)
+# 5. MAINTENANCE TOOLS (DEEP SCAN PRESERVED)
 # =====================================================
 def archive_shopify_duplicates(shop_url):
     """
