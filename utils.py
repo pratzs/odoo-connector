@@ -224,16 +224,12 @@ def automate_webhook_registration(shop_url):
 
 #8. We need to catch xmlrpc.client.ProtocolError
 def get_odoo_connection(shop_url):
-    """
-    Factory Function: Creates a dynamic Odoo connection for a specific shop.
-    """
     try:
         shop = Shop.query.filter_by(shop_url=shop_url).first()
         if not shop:
             print(f"Error: No credentials found for {shop_url}")
             return None
         
-        # Create a fresh client using the DB credentials
         client = OdooClient(
             url=shop.odoo_url,
             db=shop.odoo_db,
@@ -243,15 +239,10 @@ def get_odoo_connection(shop_url):
         return client
 
     except Exception as e:
-        # --- NEW: DETECT AUTH FAILURES ---
+        # --- IMPROVED ERROR HANDLING ---
         error_str = str(e).lower()
         if "access denied" in error_str or "authentication failed" in error_str:
-            log_event('System', 'Error', f"🛑 AUTH FAILED: Odoo credentials invalid. Please update settings.", shop_url=shop_url)
-            
-            # Optional: Mark shop as inactive to stop hammering the server
-            # shop = Shop.query.filter_by(shop_url=shop_url).first()
-            # shop.is_active = False 
-            # db.session.commit()
+            log_event('System', 'Error', f"🛑 AUTH FAILED: Check Odoo password/username.", shop_url=shop_url)
         else:
-            log_event('System', 'Error', f"Connection failed for {shop_url}: {e}", shop_url=shop_url)
+            log_event('System', 'Error', f"Connection failed: {e}", shop_url=shop_url)
         return None
