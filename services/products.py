@@ -23,8 +23,7 @@ def sync_products_master(shop_url):
         company_id = shop.odoo_company_id
         if not company_id: return
 
-        # Fetch Odoo Products
-        # ✅ CRITICAL FIX: Explicitly require ['active', '=', True]
+        # ✅ CRITICAL: Only sync active products to prevent "ghost" duplicates
         domain = [
             ['sale_ok', '=', True], 
             ['type', 'in', ['product', 'consu']], 
@@ -38,7 +37,6 @@ def sync_products_master(shop_url):
             log_event('Product Sync', 'Error', f"Search Failed: {e}", shop_url=shop_url)
             return
 
-        # Batching
         BATCH_SIZE = 50
         chunks = [product_ids[i:i + BATCH_SIZE] for i in range(0, len(product_ids), BATCH_SIZE)]
 
@@ -57,7 +55,6 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): return
         
-        # Load Configuration
         cfg = {
             'title': get_config('prod_sync_title', True, shop_url=shop_url),
             'price': get_config('prod_sync_price', True, shop_url=shop_url),
@@ -106,24 +103,23 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
 def process_product_data(p, odoo, shop_url, cfg, uom_map):
     from app import db
     
-    # 🛑 GUARD: Double check Active Status just in case
     if not p.get('active'):
         return "skipped"
 
     sku = str(p.get('default_code') or '').strip()
     if not sku: return "skipped"
 
-    # 🛡️ GUARD 1: Strict Ownership (Fixes your Supabase Duplicate Problem)
-    # If the map already has this SKU for a DIFFERENT Odoo ID, skip it immediately.
+    # 🛡️ SAFETY GUARD 1: SKU Ownership
+    # Since you're deleting the table, the first Odoo product to claim this SKU becomes the owner.
     pm = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
     if pm and pm.odoo_product_id != p['id']:
-        print(f"⚠️ BLOCKING: SKU {sku} belongs to Odoo ID {pm.odoo_product_id}. Ignoring Odoo ID {p['id']}.")
+        print(f"⚠️ BLOCKING: SKU {sku} already claimed by Odoo {pm.odoo_product_id}. Skipping {p['id']}.")
         return "skipped"
 
     product_name = p.get('name', 'Unknown')
     vendor_name = product_name.split(' ')[0] if product_name else "Worthy"
 
-    # --- Variant / Pack Logic (YOUR CODE RESTORED) ---
+    # --- Variant / Pack Logic (YOUR ORIGINAL CODE) ---
     is_pack = False; ratio = 1.0; main_uom_name = 'Outer'
     if p.get('sh_is_secondary_unit') is True:
         qty_pack = p.get('qty_per_pack', 0.0)
@@ -154,7 +150,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
         desired_variants.append({'option1': 'Unit', 'price': str(round(raw_price / ratio, 2) if ratio > 0 else 0.0), 'sku': f"{sku}-UNIT", 'barcode': '', 'cost': str(round(raw_cost / ratio, 2) if ratio > 0 else 0.0)})
 
     # ========================================================
-    # 🛡️ MAPPING & CONFLICT CHECK (RESTORED)
+    # 🛡️ MAPPING & CONFLICT DISCOVERY
     # ========================================================
     sp = None
     action_log = "updated"
@@ -170,8 +166,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
         try:
             found_variants = shopify.Variant.find(params={'sku': sku})
             for v in found_variants:
-                # 🛑 GUARD 2: Prevent Variant Hijacking
-                # Ensure this variant isn't mapped to another Odoo ID in our DB
+                # 🛡️ SAFETY GUARD 2: Prevent Variant Hijacking
                 collision = ProductMap.query.filter_by(shopify_variant_id=str(v.id), shop_url=shop_url).first()
                 if collision and collision.odoo_product_id != p['id']:
                     continue
@@ -180,7 +175,6 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
                 sim = SequenceMatcher(None, str(parent.title).lower(), str(product_name).lower()).ratio()
                 
                 if sim < 0.3:
-                    print(f"⚠️ Collision: {sku} name mismatch. Moving conflict.")
                     new_sku = f"OLD_{sku}"; parent.status = 'archived'
                     v.sku = new_sku; v.save(); parent.save()
                     action_log = "archived"; continue 
@@ -188,7 +182,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
                 sp = parent; break
         except: pass
 
-    # --- Create / Update Logic (RESTORED) ---
+    # --- Create / Update Logic (YOUR ORIGINAL CODE) ---
     if not sp:
         if not cfg['auto_create']: return "skipped"
         sp = shopify.Product(); sp.title = p['name']; sp.vendor = vendor_name
@@ -211,6 +205,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
         t_names = odoo.get_tag_names(p.get('product_tag_ids', []))
         if t_names: sp.tags = ",".join(t_names)
 
+    # Clean Options
     if is_pack:
         if not sp.options or sp.options[0].name != 'Pack Size':
             sp.options = [{'name': 'Pack Size'}]
@@ -223,7 +218,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
         print(f"Save Error {sku}: {e}")
         return "error"
 
-    # --- VARIANT SYNC (RESTORED) ---
+    # --- Variant Sync ---
     existing = getattr(sp, 'variants', [])
     final_vars = []
     for des in desired_variants:
@@ -242,7 +237,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
     sp.variants = final_vars
     sp.save()
 
-    # Cost Sync (RESTORED)
+    # Cost Sync
     if sp.variants and cfg['cost']:
         for v in sp.variants:
             d = next((x for x in desired_variants if x['sku'] == v.sku), None)
@@ -252,7 +247,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
                     ii.cost = d['cost']; ii.save()
                 except: pass
 
-    # Image Sync (RESTORED FULL LOGIC)
+    # Image Sync (YOUR FULL LOGIC)
     if cfg['images'] and p.get('image_1920'):
         try:
             img_raw = p['image_1920']
@@ -273,9 +268,8 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
                     db.session.commit()
         except: pass
 
-    # --- MAP UPDATE (RESTORED & FIXED FOR DUPLICATES) ---
+    # --- MAP UPDATE (FIXED FOR CLEAN START) ---
     try:
-        # ✅ THE FIX: Ensure we only update the unique Odoo ID/SKU pairing for this shop
         pm = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
         if not pm:
             vid = sp.variants[0].id if sp.variants else '0'
