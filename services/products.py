@@ -1,4 +1,3 @@
-cat << 'EOF' > services/products.py
 import shopify
 import hashlib
 import time
