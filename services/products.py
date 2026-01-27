@@ -24,7 +24,15 @@ def sync_products_master(shop_url):
         if not company_id: return
 
         # Fetch Odoo Products
-        domain = [['sale_ok', '=', True], ['type', 'in', ['product', 'consu']], ['company_id', '=', int(company_id)]]
+        # ✅ CRITICAL FIX: Explicitly require ['active', '=', True]
+        # This prevents Archived products (which might share SKUs) from entering the sync.
+        domain = [
+            ['sale_ok', '=', True], 
+            ['type', 'in', ['product', 'consu']], 
+            ['company_id', '=', int(company_id)],
+            ['active', '=', True] 
+        ]
+        
         try:
             product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search', [domain])
         except Exception as e:
@@ -94,11 +102,15 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
 
 
 # =====================================================
-# 3. SINGLE PRODUCT LOGIC (STRICT OWNERSHIP)
+# 3. SINGLE PRODUCT LOGIC
 # =====================================================
 def process_product_data(p, odoo, shop_url, cfg, uom_map):
     from app import db
     
+    # 🛑 GUARD: Double check Active Status just in case
+    if not p.get('active'):
+        return "skipped"
+
     sku = str(p.get('default_code') or '').strip()
     if not sku: return "skipped"
 
@@ -152,33 +164,32 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
         })
 
     # ========================================================
-    # 🛑 CRITICAL CHECK: OWNERSHIP & TRUST
+    # 🛡️ MAPPING & CONFLICT CHECK
     # ========================================================
     sp = None
     action_log = "updated"
     
-    # 1. Check Database Mapping FIRST
+    # 1. DATABASE CHECK (The Source of Truth)
     pm = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
     
     if pm:
-        # A. CIVIL WAR PREVENTION: Is this SKU already owned by a different Odoo ID?
+        # A. Civil War Prevention
+        # If the map points to a DIFFERENT Odoo ID, and we are not that ID, we skip.
         if pm.odoo_product_id != p['id']:
-            print(f"⚠️ CONFLICT: SKU '{sku}' is owned by Odoo ID {pm.odoo_product_id}. Ignoring Odoo ID {p['id']}.")
-            return "skipped" # We stop here. No fighting.
+             print(f"⚠️ SKIPPING: SKU {sku} is owned by Odoo ID {pm.odoo_product_id}. I am {p['id']}.")
+             return "skipped"
 
-        # B. TRUSTED LOAD: We have a link. Load it directly. Bypasses name check.
+        # B. Load Linked Product
         try:
-            # We store Variant ID, so we fetch variant -> product
             v = shopify.Variant.find(pm.shopify_variant_id)
             sp = shopify.Product.find(v.product_id)
         except:
-            # Link is dead (deleted on Shopify). Clear it and continue to search.
-            print(f"Broken Link for {sku}. Re-scanning...")
+            # Link Broken - Clear it
             db.session.delete(pm)
             db.session.commit()
-            pm = None # Fall through to search logic below
+            pm = None
 
-    # 2. DISCOVERY: If no map, search Shopify by SKU
+    # 2. DISCOVERY (If no link exists)
     if not sp:
         try:
             found_variants = shopify.Variant.find(params={'sku': sku})
@@ -189,24 +200,24 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
             try:
                 parent = shopify.Product.find(v.product_id)
                 
-                # --- SAFETY CHECK 1: NAME SIMILARITY ---
-                # Only strictly check name if we are discovering for the FIRST time
+                # --- SAFETY GUARD: NAME CHECK ---
                 sim = SequenceMatcher(None, str(parent.title).lower(), str(product_name).lower()).ratio()
                 
                 if sim < 0.3:
-                    print(f"⚠️ Collision: {sku} is on '{parent.title}' but should be '{product_name}'. Moving old item aside.")
+                    # COLLISION DETECTED
+                    print(f"⚠️ Collision: {sku} is on '{parent.title}' but Odoo says '{product_name}'. Moving conflict.")
                     
                     new_sku = f"OLD_{sku}"
                     parent.status = 'archived'
                     parent.tags = f"{parent.tags},conflict_archived" if parent.tags else "conflict_archived"
+                    
                     v.sku = new_sku
                     v.save()
                     parent.save()
-                    
                     action_log = "archived"
                     continue 
 
-                # --- SAFETY CHECK 2: MONSTER VARIANTS ---
+                # --- MONSTER CHECK ---
                 is_valid_parent = True
                 if len(parent.variants) > 1:
                     for pv in parent.variants:
@@ -290,7 +301,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
     sp.variants = final_vars
     sp.save()
 
-    # Cost & Image Sync (Standard)
+    # Cost / Images
     if sp.variants and cfg['cost']:
         for v in sp.variants:
             d = next((x for x in desired_variants if x['sku'] == v.sku), None)
@@ -322,9 +333,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
                     db.session.commit()
         except: pass
 
-    # ==========================================================
-    # ✅ MAP UPDATE (WITH SHOP URL)
-    # ==========================================================
+    # --- MAP UPDATE (FIXED: SHOP URL) ---
     try:
         pm = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
         if not pm:
@@ -358,10 +367,7 @@ def find_shopify_product_by_sku(sku, shop_url):
     return None
 
 def archive_shopify_duplicates(shop_url):
-    # Keep function empty to satisfy imports if called externally, 
-    # logic is now integrated into master sync.
     pass
 
-# Aliases - MUST BE AT THE VERY END TO AVOID NAME ERROR
 cleanup_duplicates_master = archive_shopify_duplicates
 cleanup_shopify_products = archive_shopify_duplicates
