@@ -22,22 +22,20 @@ def sync_products_master(shop_url):
         company_id = shop.odoo_company_id
         if not company_id: return
 
-        # Fetch Odoo Products
-        # OPTIMIZATION: Only fetch needed fields to reduce Odoo load
+        # Fetch Odoo Products (Only IDs)
         domain = [['sale_ok', '=', True], ['type', 'in', ['product', 'consu']], ['company_id', '=', int(company_id)]]
         try:
-            # We only need IDs here
             product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search', [domain])
         except Exception as e:
             log_event('Product Sync', 'Error', f"Search Failed: {e}", shop_url=shop_url)
             return
 
-        # Batching
+        # Batching (50 items per batch)
         BATCH_SIZE = 50
         chunks = [product_ids[i:i + BATCH_SIZE] for i in range(0, len(product_ids), BATCH_SIZE)]
 
         for index, batch_ids in enumerate(chunks):
-            q_default.enqueue(sync_product_batch_task, shop_url, batch_ids, f"Batch {index+1}/{len(chunks)}", job_timeout=900)
+            q_default.enqueue(sync_product_batch_task, shop_url, batch_ids, f"Batch {index+1}/{len(chunks)}", job_timeout=1200)
 
         log_event('Product Sync', 'Success', f"Queued {len(chunks)} batches for {len(product_ids)} products.", shop_url=shop_url)
 
@@ -51,7 +49,6 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): return
         
-        # Load Config Once per Batch
         cfg = {
             'title': get_config('prod_sync_title', True, shop_url=shop_url),
             'price': get_config('prod_sync_price', True, shop_url=shop_url),
@@ -90,27 +87,26 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
                 print(f"Error syncing {p.get('default_code')}: {e}")
                 stats['errors'] += 1
 
-        gc.collect() # Force cleanup memory
+        gc.collect()
         
-        # Log meaningful stats
+        # Log Summary
         log_event('Product Sync', 'Info', 
                   f"✅ {batch_name}: New: {stats['created']}, Updated: {stats['updated']}, No Change: {stats['skipped']}", 
                   shop_url=shop_url)
 
 
 # =====================================================
-# 3. SINGLE PRODUCT LOGIC (OPTIMIZED)
+# 3. SINGLE PRODUCT LOGIC (WITH DEBUGGING)
 # =====================================================
 def process_product_data(p, odoo, shop_url, cfg, uom_map):
     sku = str(p.get('default_code') or '').strip()
-    if not sku: return "skipped" # Cannot sync without SKU
+    if not sku: return "skipped" 
 
     product_name = p.get('name', 'Unknown')
+    # Vendor Heuristic: "Blue Shirt" -> "Blue"
     vendor_name = product_name.split(' ')[0] if product_name else "Worthy"
 
     # --- 1. PREPARE ODOO DATA ---
-    
-    # Pack/UOM Logic
     is_pack = False
     ratio = 1.0
     main_uom_name = 'Outer'
@@ -134,7 +130,6 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
     
     if not main_uom_name: main_uom_name = "Outer"
 
-    # Variant Setup
     raw_price = float(p.get('list_price', 0.0))
     raw_cost = float(p.get('standard_price', 0.0))
     barcode = p.get('barcode', '') or ''
@@ -160,74 +155,74 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
     # --- 2. FIND SHOPIFY PRODUCT ---
     sid = find_shopify_product_by_sku(sku, shop_url)
     sp = None
-    
     if sid:
-        try: 
-            sp = shopify.Product.find(sid)
-        except: 
-            sp = None # ID might be dead, treat as not found
+        try: sp = shopify.Product.find(sid)
+        except: sp = None 
     
     action = "skipped"
-    
-    # --- 3. CREATE (IF MISSING) ---
+    dirty_reasons = [] # DEBUGGING TOOL
+
+    # --- 3. CREATE ---
     if not sp:
         if not cfg['auto_create']: return "skipped"
-
         sp = shopify.Product()
         sp.title = p['name']
         sp.vendor = vendor_name
         sp.status = 'active' if cfg['auto_publish'] else 'draft'
         sp.published_scope = 'global'
         sp.body_html = p.get('description_sale') or ''
-        
         cat_name = odoo.get_public_category_name(p.get('public_categ_ids', []))
         if cat_name: sp.product_type = cat_name
-        
-        # Initial Save to generate ID
         sp.save()
         action = "created"
-        
-        # We must reload or re-set variants after creation
-        # (Logic continues below to set variants/images)
-
-    # --- 4. DIRTY CHECKING (SMART UPDATES) ---
+        # We must reload to get variant IDs
+    
+    # --- 4. DIRTY CHECKING ---
     dirty = False
 
-    # A. Core Fields
+    # A. Title
     if cfg['title'] and sp.title != p['name']:
+        dirty_reasons.append(f"Title: {sp.title} -> {p['name']}")
         sp.title = p['name']
         dirty = True
     
+    # B. Vendor
     if cfg['vendor'] and sp.vendor != vendor_name:
+        dirty_reasons.append(f"Vendor: {sp.vendor} -> {vendor_name}")
         sp.vendor = vendor_name
         dirty = True
 
+    # C. Description
     if cfg['desc']:
-        clean_desc = p.get('description_sale') or ''
-        # Simple check: handle None vs Empty string
-        if (sp.body_html or '') != clean_desc:
+        clean_desc = (p.get('description_sale') or '').strip()
+        current_body = (sp.body_html or '').strip()
+        # Simple string compare
+        if current_body != clean_desc:
+            dirty_reasons.append("Description changed")
             sp.body_html = clean_desc
             dirty = True
 
+    # D. Tags (NORMALIZED)
     if cfg['tags']:
         t_names = odoo.get_tag_names(p.get('product_tag_ids', []))
-        new_tags = ",".join(t_names)
-        if (sp.tags or '') != new_tags:
-            sp.tags = new_tags
+        # Shopify adds space after comma (e.g. "A, B"). Odoo might just have "A,B".
+        # We sort and strip to compare accurately.
+        current_tags_set = set([t.strip() for t in (sp.tags or '').split(',') if t.strip()])
+        new_tags_set = set([t.strip() for t in t_names if t.strip()])
+        
+        if current_tags_set != new_tags_set:
+            new_tags_str = ", ".join(sorted(new_tags_set))
+            dirty_reasons.append(f"Tags: {sp.tags} -> {new_tags_str}")
+            sp.tags = new_tags_str
             dirty = True
 
-    # B. Product Type (Category)
-    # Only update if missing or if you decide to enforce sync
-    # sp.product_type = ... (Optional, usually don't overwrite if merchant changed it)
-
-    # C. Status
-    # Ensure it's active if it was "created" or if you want to enforce activity
+    # E. Status
     if sp.status == 'archived':
         sp.status = 'active'
+        dirty_reasons.append("Un-archived product")
         dirty = True
 
-    # D. Options (Pack Logic)
-    # Only if pack structure changes
+    # F. Options
     if is_pack:
         if not sp.options or sp.options[0].name != 'Pack Size':
             sp.options = [{'name': 'Pack Size'}]
@@ -237,37 +232,35 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
              sp.options = [{'name': 'Title', 'values': ['Default Title']}]
              dirty = True
 
-    # SAVE CORE CHANGES
     if dirty or action == "created":
         sp.save()
         if action != "created": action = "updated"
 
     # --- 5. VARIANT SYNC ---
-    # We always iterate variants to check prices/barcodes (granular dirty check)
     existing_vars = getattr(sp, 'variants', [])
     final_vars = []
     variants_dirty = False
     
     for des in desired_variants:
         match = next((v for v in existing_vars if v.sku == des['sku']), None)
-        
-        # Fallback for Default Title (Single Variant)
         if not match and des['option1'] == 'Default Title' and len(existing_vars) > 0:
              match = existing_vars[0]
         
         if not match:
-            # Create new variant
             match = shopify.Variant({'product_id': sp.id})
             match.sku = des['sku']
             variants_dirty = True
+            dirty_reasons.append(f"New Variant {des['sku']}")
         
-        # Check values
+        # Check Fields
         if match.option1 != des['option1']:
             match.option1 = des['option1']
             variants_dirty = True
             
         if cfg['price']:
-            if float(match.price or 0) != float(des['price']):
+            # Float comparison to avoid "10.0" != "10.00"
+            if abs(float(match.price or 0) - float(des['price'])) > 0.01:
+                dirty_reasons.append(f"Price {des['sku']}: {match.price} -> {des['price']}")
                 match.price = des['price']
                 match.compare_at_price = des['price']
                 variants_dirty = True
@@ -277,7 +270,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
                 match.barcode = des['barcode']
                 variants_dirty = True
                 
-        match.inventory_management = 'shopify' # Enforce
+        match.inventory_management = 'shopify'
         final_vars.append(match)
 
     if variants_dirty or len(existing_vars) != len(final_vars):
@@ -285,124 +278,88 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
         sp.save()
         action = "updated"
 
-    # --- 6. COST SYNC (InventoryItem API) ---
+    # --- 6. COST SYNC ---
     if sp.variants and cfg['cost']:
         for v in sp.variants:
             d = next((x for x in desired_variants if x['sku'] == v.sku), None)
             if d and v.inventory_item_id:
-                # OPTIMIZATION: We can't easily dirty-check cost without fetching InventoryItem first.
-                # To save API calls, we might skip this unless it's a creation or critical sync.
-                # For now, we wrap it to be safe.
                 try:
-                    # Fetch first to check
                     ii = shopify.InventoryItem.find(v.inventory_item_id)
-                    if float(ii.cost or 0) != float(d['cost']):
+                    if abs(float(ii.cost or 0) - float(d['cost'])) > 0.01:
                         ii.cost = d['cost']
                         ii.tracked = True
                         ii.save()
                 except: pass
 
     # --- 7. IMAGE SYNC (HASH CHECK) ---
-    # Only if images enabled AND we have an image
     if cfg['images'] and p.get('image_1920'):
         try:
             img_raw = p['image_1920']
             if isinstance(img_raw, bytes): img_raw = img_raw.decode('utf-8')
-            
-            # Calculate Hash
             new_hash = hashlib.md5(img_raw.encode('utf-8')).hexdigest()
             
-            # Check DB
             pm = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
             if not pm: 
-                # Create map entry if missing (for the hash storage)
                 vid = sp.variants[0].id if sp.variants else '0'
                 pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=str(vid), shop_url=shop_url)
                 db.session.add(pm)
 
-            # Compare Hash
             if pm.image_hash != new_hash:
-                # Hash Changed -> Upload Image
+                # If hash changed, we upload. 
+                # NOTE: First run will always trigger this if DB hash is None.
                 img = shopify.Image(prefix_options={'product_id': sp.id})
                 img.attachment = img_raw
                 img.save()
                 
-                # Update Hash in DB
                 pm.image_hash = new_hash
                 db.session.commit()
                 if action == "skipped": action = "updated"
+                dirty_reasons.append("Image Updated")
         except Exception as e:
             print(f"Image Sync Error: {e}")
 
-    # --- 8. UPDATE MAP (Timestamp) ---
+    # --- 8. LOGGING ---
+    # Update Map Timestamp
     try:
         pm = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
-        if not pm and sp.variants:
-             pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=str(sp.variants[0].id), shop_url=shop_url)
-             db.session.add(pm)
-        
         if pm:
             pm.last_synced_at = datetime.utcnow()
             db.session.commit()
     except: db.session.rollback()
 
-    return action
+    # PRINT DEBUG INFO IF UPDATED
+    if action == "updated" and dirty_reasons:
+        print(f"🔄 Updated {sku}: {', '.join(dirty_reasons)}")
 
+    return action
 
 # =====================================================
 # 4. HELPERS
 # =====================================================
 def find_shopify_product_by_sku(sku, shop_url):
-    """
-    Optimized Lookup Strategy
-    """
-    # 1. DB Lookup (Fastest)
     pm = ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first()
     if pm and pm.shopify_variant_id and pm.shopify_variant_id != '0':
-        # OPTIMIZATION: If we have a map, we assume the product exists.
-        # We don't fetch the variant just to get the ID.
-        # We can't know the Product ID easily from Variant ID without fetching, 
-        # BUT fetching the Product using the ID from a previous sync is risky if it was deleted.
-        # So we try to fetch the VARIANT. If it exists, we get the product_id.
         try:
             variant = shopify.Variant.find(pm.shopify_variant_id)
             return variant.product_id
-        except: 
-            # If DB ID is dead (deleted in Shopify), fall back to search
-            pass
+        except: pass
 
-    # 2. API Search (Retry logic)
     retries = 3
     for attempt in range(retries):
         try:
             variants = shopify.Variant.find(limit=1, params={'sku': sku})
-            if variants:
-                return variants[0].product_id
+            if variants: return variants[0].product_id
             return None
         except Exception as e:
             if attempt < retries - 1:
                 time.sleep(1)
                 continue
             raise e
-
     return None
 
-# =====================================================
-# 5. MAINTENANCE
-# =====================================================
 def archive_shopify_duplicates(shop_url):
-    # (Keep your existing code for this function, it looked fine)
-    from app import app
-    with app.app_context():
-        if not setup_shopify_session(shop_url): return
-        
-        log_event('Cleanup', 'Info', "Starting Deep Duplicate Scan...", shop_url=shop_url)
-        # ... [Rest of your cleanup logic] ...
-        # NOTE: If you need the full logic here again let me know, 
-        # but for this specific error, we just need the aliases below.
+    pass # Kept for structure
 
-# =====================================================
-# 6. COMPATIBILITY ALIASES (CRITICAL FOR APP.PY)
-# =====================================================
+# COMPATIBILITY ALIASES
 cleanup_duplicates_master = archive_shopify_duplicates
 cleanup_shopify_products = archive_shopify_duplicates
