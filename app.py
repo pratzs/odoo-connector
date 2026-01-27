@@ -196,11 +196,13 @@ with app.app_context():
 
 
 def verify_shopify(data, hmac_header):
-    secret = os.getenv('SHOPIFY_SECRET')
+    # FIX: Use the consistent variable name
+    secret = os.getenv('SHOPIFY_API_SECRET') 
     if not secret: return True 
     if not hmac_header: return False
     digest = hmac.new(secret.encode('utf-8'), data, hashlib.sha256).digest()
     return hmac.compare_digest(base64.b64encode(digest).decode(), hmac_header)
+
 
 
 def send_inventory_alert(shop_url, email_address, discrepancies):
