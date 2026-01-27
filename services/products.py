@@ -1,11 +1,12 @@
 import shopify
-import hashlib
+import json
+import gc
 import time
+import hashlib
 from difflib import SequenceMatcher
 from datetime import datetime
-from models import Shop, ProductMap, db
-from utils import get_odoo_connection, log_event, setup_shopify_session, q_default
-import shopify
+from models import Shop, ProductMap, AppSetting, db
+from utils import get_odoo_connection, log_event, setup_shopify_session, get_config, q_default
 
 # =====================================================
 # 1. THE DISPATCHER (Triggered by Dashboard Button)
@@ -209,3 +210,44 @@ def process_product_data(p, shop_url):
     except: db.session.rollback()
 
     return action
+
+# =====================================================
+# 4. HELPERS (Included to prevent import errors)
+# =====================================================
+
+def find_shopify_product_by_sku(sku, shop_url):
+    """
+    Helper to find a product by SKU, checking DB first then API.
+    """
+    # 1. Check DB Map first
+    pm = ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first()
+    if pm and pm.shopify_variant_id and pm.shopify_variant_id != '0':
+        try:
+            variant = shopify.Variant.find(pm.shopify_variant_id)
+            return variant.product_id
+        except: pass
+
+    # 2. Check Shopify API (Search)
+    retries = 3
+    for attempt in range(retries):
+        try:
+            variants = shopify.Variant.find(limit=1, params={'sku': sku})
+            if variants: return variants[0].product_id
+            return None
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(1)
+                continue
+            raise e
+    return None
+
+def archive_shopify_duplicates(shop_url):
+    """
+    Placeholder: The old duplicate logic is replaced by the new Monster Slayer logic.
+    Kept here to prevent ImportErrors if app.py calls it.
+    """
+    pass 
+
+# Aliases to prevent crashes if other files import these names
+cleanup_duplicates_master = archive_shopify_duplicates
+cleanup_shopify_products = archive_shopify_duplicates
