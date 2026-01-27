@@ -113,30 +113,8 @@ def acquire_distributed_lock(lock_name, timeout=20):
             except redis.exceptions.LockError:
                 pass
 
-# 5. ODOO CONNECTION HELPER (Moved from app.py)
-def get_odoo_connection(shop_url):
-    """
-    Factory Function: Creates a dynamic Odoo connection for a specific shop.
-    """
-    try:
-        shop = Shop.query.filter_by(shop_url=shop_url).first()
-        if not shop:
-            print(f"Error: No credentials found for {shop_url}")
-            return None
-        
-        # Create a fresh client using the DB credentials
-        client = OdooClient(
-            url=shop.odoo_url,
-            db=shop.odoo_db,
-            username=shop.odoo_username,
-            password=shop.odoo_password
-        )
-        return client
-    except Exception as e:
-        log_event('System', 'Error', f"Connection failed for {shop_url}: {e}", shop_url=shop_url)
-        return None
 
-# --- 6. SHOPIFY SESSION HELPER ---
+# --- 5. SHOPIFY SESSION HELPER ---
 def setup_shopify_session(shop_url=None):
     """
     Activates a Shopify session for a specific shop from the Database.
@@ -174,7 +152,7 @@ def setup_shopify_session(shop_url=None):
         print(f"Shopify Session Error for {shop_url}: {e}")
         return False
 
-# 7. Automated Webhook Registrations
+# 6. Automated Webhook Registrations
 
 def automate_webhook_registration(shop_url):
     """
@@ -222,7 +200,7 @@ def automate_webhook_registration(shop_url):
         return False
 
 
-#8. We need to catch xmlrpc.client.ProtocolError
+#7. We need to catch xmlrpc.client.ProtocolError
 def get_odoo_connection(shop_url):
     try:
         shop = Shop.query.filter_by(shop_url=shop_url).first()
