@@ -68,7 +68,6 @@
 
     <script>
         const LOG_API_URL = '/api/logs/live'; 
-        // Helper to get shop param from parent iframe if needed, or URL
         const urlParams = new URLSearchParams(window.location.search);
         const shopParam = urlParams.get('shop');
         const fetchUrl = shopParam ? `${LOG_API_URL}?shop=${shopParam}` : LOG_API_URL;
@@ -79,7 +78,6 @@
         const emptyState = document.getElementById('empty-state');
         
         let isFirstLoad = true;
-        let lastLogId = 0;
 
         // Status Icons Map
         const ICONS = {
@@ -100,7 +98,6 @@
             const div = document.createElement('div');
             div.className = `p-3 rounded-r-lg bg-slate-50 border-l-4 ${BORDERS[log.type] || BORDERS['info']} border-y border-r border-slate-200 text-sm animate-fade-in`;
             
-            // Safe Date Formatting
             const timeStr = new Date(log.timestamp).toLocaleTimeString([], { hour12: false });
             
             div.innerHTML = `
@@ -118,7 +115,6 @@
             return div;
         }
 
-        // XSS Prevention
         function escapeHtml(text) {
             if (!text) return "";
             return text
@@ -146,13 +142,7 @@
                 }
 
                 emptyState.classList.add('hidden');
-
-                // Determine if we should render new logs
-                // Simple diffing: if first item ID is different, we re-render
-                // OR ideally, your API should support ?since_id=X. 
-                // For now, we just wipe and render to keep it simple as per original code.
-                
-                logList.innerHTML = ''; // Clear current list
+                logList.innerHTML = ''; // Wipe and redraw (simple)
                 data.forEach(log => {
                     logList.appendChild(createLogItem(log));
                 });
@@ -163,17 +153,13 @@
         }
 
         function clearLogs() {
-             // Optional: Call an API to clear logs on server
              if(confirm('Clear all logs?')) {
-                 fetch('/maintenance/wipe_logs')
-                    .then(() => fetchLogs());
+                 fetch('/maintenance/wipe_logs').then(() => fetchLogs());
              }
         }
 
-        // Poll every 2 seconds
         setInterval(fetchLogs, 2000);
-        fetchLogs(); // Initial call
-
+        fetchLogs(); 
     </script>
 </body>
 </html>
