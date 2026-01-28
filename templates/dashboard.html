@@ -478,6 +478,26 @@
                             <i class="bi bi-chevron-right text-muted"></i>
                         </div>
                     </button>
+                    
+                    <button onclick="triggerAction('/maintenance/register_webhooks', 'GET')" class="btn btn-secondary text-start p-3">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <strong>🔄 Re-Register Webhooks</strong><br>
+                                <small class="text-muted">Reset connection. Fixes issues if orders stop syncing.</small>
+                            </div>
+                            <i class="bi bi-cloud-check text-muted"></i>
+                        </div>
+                    </button>
+
+                    <button onclick="if(confirm('Enable GST for ALL customers? This ensures tax is collected.')) triggerAction('/maintenance/force_tax_all', 'GET')" class="btn btn-secondary text-start p-3">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <strong>💲 Force Enable Tax</strong><br>
+                                <small class="text-muted">Sets "Tax Exempt = False" for all customers.</small>
+                            </div>
+                            <i class="bi bi-cash-coin text-muted"></i>
+                        </div>
+                    </button>
 
                     <button onclick="triggerAction('/sync/products/archive_duplicates', 'POST')" class="btn btn-secondary text-start p-3">
                         <div class="d-flex justify-content-between align-items-center">
