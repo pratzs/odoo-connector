@@ -305,7 +305,80 @@ def find_shopify_product_by_sku(sku, shop_url):
     return None
 
 def archive_shopify_duplicates(shop_url):
-    pass
+    """
+    Scans all Shopify products. If multiple products share the same SKU,
+    it keeps the one linked in ProductMap and archives the others.
+    """
+    from app import app
+    
+    with app.app_context():
+        if not setup_shopify_session(shop_url):
+            return
+
+        log_event('Duplicate Cleanup', 'Info', "Starting scan for duplicate SKUs...", shop_url=shop_url)
+
+        # 1. Fetch all Active Products
+        # We only care about cleaning up active mess.
+        page = shopify.Product.find(limit=250, status='active')
+        sku_tracker = {} # Format: { 'SKU123': [prod_obj_1, prod_obj_2] }
+        
+        while page:
+            for p in page:
+                # We assume the first variant holds the master SKU
+                if not p.variants: continue
+                sku = p.variants[0].sku
+                
+                if not sku: continue
+                
+                if sku not in sku_tracker:
+                    sku_tracker[sku] = []
+                sku_tracker[sku].append(p)
+                
+            if page.has_next_page():
+                page = page.next_page()
+            else:
+                break
+
+        # 2. Analyze & Archive
+        archived_count = 0
+        
+        for sku, products in sku_tracker.items():
+            if len(products) > 1:
+                # FOUND DUPLICATES!
+                
+                # A. Identify the "Master" (The one in our DB)
+                pm = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
+                master_id = int(pm.shopify_variant_id) if pm else 0
+                
+                # If we have a map, find the product that owns that variant
+                master_product = None
+                
+                # Try to find the mapped product in the list
+                if master_id:
+                    for p in products:
+                        # Check if any variant of this product matches the DB ID
+                        if any(str(v.id) == str(master_id) for v in p.variants):
+                            master_product = p
+                            break
+                
+                # Fallback: If no map (or map is wrong), keep the most recently updated one
+                if not master_product:
+                    # Sort by updated_at descending (newest first)
+                    products.sort(key=lambda x: x.updated_at, reverse=True)
+                    master_product = products[0]
+
+                # B. Archive the losers
+                for p in products:
+                    if p.id != master_product.id:
+                        try:
+                            p.status = 'archived'
+                            p.save()
+                            archived_count += 1
+                            print(f"📦 Archived Duplicate: {p.title} (ID: {p.id}) - Kept: {master_product.id}")
+                        except Exception as e:
+                            print(f"Failed to archive {p.id}: {e}")
+
+        log_event('Duplicate Cleanup', 'Success', f"Scan complete. Archived {archived_count} duplicates.", shop_url=shop_url)
 
 cleanup_duplicates_master = archive_shopify_duplicates
 cleanup_shopify_products = archive_shopify_duplicates
