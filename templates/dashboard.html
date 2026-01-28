@@ -242,7 +242,17 @@
             <button onclick="triggerAction('/sync/images/manual')" class="btn btn-secondary text-start">Force Image Sync</button>
             <button onclick="triggerAction('/sync/fulfillments')" class="btn btn-secondary text-start">Push Fulfillment</button>
             <button onclick="triggerAction('/sync/customers/master', 'POST')" class="btn btn-secondary text-start">Force Customer Sync</button>
+            <button onclick="triggerAction('/sync/returns')" class="btn btn-secondary text-start">Sync Returns</button>
+            <button onclick="triggerAction('/sync/cancellations')" class="btn btn-secondary text-start">Sync Cancellations</button>
         </div>
+    </div>
+            <div class="card p-3 mt-3">
+        <div class="section-header">🔍 Diagnose Product</div>
+        <div class="input-group">
+            <input type="text" id="diagSku" class="form-control" placeholder="Enter SKU (e.g. C0547)">
+            <button class="btn btn-dark" onclick="runDiagnosis()">Check Status</button>
+        </div>
+        <div id="diagResult" class="mt-2 p-2 border bg-light d-none" style="white-space: pre-wrap; font-family: monospace; font-size: 12px;"></div>
     </div>
 </div>
         <div class="col-md-8">
@@ -1131,7 +1141,28 @@ function updateSyncStatus() {
 // Start the timer for automatic updates every 15 seconds
 updateSyncStatus();
 setInterval(updateSyncStatus, 15000);
-        
+
+        // DIAGNOSTIC SCRIPT
+function runDiagnosis() {
+    const sku = document.getElementById('diagSku').value;
+    if(!sku) { showToast("Enter a SKU"); return; }
+    
+    const resBox = document.getElementById('diagResult');
+    resBox.classList.remove('d-none');
+    resBox.innerText = "Scanning Odoo & Shopify... please wait.";
+
+    // We need to create a new route in app.py for this, or use a simple fetch if you have it.
+    // Since diagnose.py is a script, let's expose it via a route in app.py first.
+    // For now, this is a placeholder until we add the route below.
+    fetch(`/api/diagnose/${sku}?shop=${CURRENT_SHOP_URL}`)
+        .then(r => r.text())
+        .then(text => {
+            resBox.innerHTML = text; 
+        })
+        .catch(err => {
+            resBox.innerText = "Error: " + err;
+        });
+}
     </script>
 </body>
 </html>
