@@ -164,65 +164,87 @@
 
     <div class="row">
         <div class="col-md-4">
-           <div class="card p-3">
-    <div class="section-header">System Status</div>
-    
-    <div class="d-flex justify-content-between mb-3 align-items-center">
-        <span class="text-muted">Shopify Connection</span>
-        <span class="badge-status badge-success">Active</span>
-    </div>
-
-    <div class="d-flex justify-content-between align-items-center">
-        <span class="text-muted">Odoo Connection</span>
-        {% if config.odoo_url %}
-            <span class="badge-status badge-success">Active</span>
-        {% else %}
-            <span class="badge-status badge-danger">Not Connected</span>
-        {% endif %}
-    </div>
-
-      <div class="mb-4">
-    {% if config.is_free_store %}
-        <span class="badge" style="background-color: #e3fbe3; color: #008060; border: 1px solid #aee9d1; padding: 6px 12px; border-radius: 16px; font-weight: 600;">
-            <i class="bi bi-patch-check-fill"></i> Lifetime Free
-        </span>
-    {% elif config.plan_name == "Development Store" %}
-        <span class="badge" style="background-color: #f6f6f7; color: #454749; border: 1px solid #d2d5d8; padding: 6px 12px; border-radius: 16px; font-weight: 600;">
-            <i class="bi bi-tools"></i> Development Mode
-        </span>
-    {% else %}
-        <span class="badge" style="background-color: #f0f7ff; color: #005bd3; border: 1px solid #b3d1ff; padding: 6px 12px; border-radius: 16px; font-weight: 600;">
-            <i class="bi bi-credit-card-fill"></i> {{ config.plan_name }}
-        </span>
-    {% endif %}
-</div>
-
-    <hr style="border-color: var(--p-border);">
-    
-    <div class="d-grid gap-2">
-        <button id="btnSyncLocs" onclick="syncLocations()" class="btn btn-secondary text-start" {% if not config.odoo_url %}disabled{% endif %}>
-            <i class="bi bi-geo-alt me-2"></i> Sync Locations
-        </button>
-        <a href="/install?shop={{ shop_url }}" class="btn btn-secondary text-start text-muted" style="font-size: 12px;">
-            <i class="bi bi-shield-lock me-1"></i> Re-Authenticate
-        </a>
-    </div>
-</div>
-            <div class="card p-3">
-                <div class="section-header">Quick Actions</div>
-                <div class="d-grid gap-2">
-                    <button onclick="openOrderImportModal()" class="btn btn-primary text-start">
-                        <i class="bi bi-cloud-download me-2"></i> Import Recent Orders
-                    </button>
-                    <div class="text-muted small mt-2 fw-bold text-uppercase" style="font-size: 11px; letter-spacing: 0.5px;">Sync Triggers</div>
-                    <button onclick="triggerAction('/sync/inventory')" class="btn btn-secondary text-start">Force Inventory Sync</button>
-                    <button onclick="triggerAction('/sync/products/master', 'POST')" class="btn btn-secondary text-start">Force Product Sync</button>
-                    <button onclick="triggerAction('/sync/images/manual')" class="btn btn-secondary text-start">Force Image Sync</button>
-                    <button onclick="triggerAction('/sync/fulfillments')" class="btn btn-secondary text-start">Push Fulfillment</button>
-                    <button onclick="triggerAction('/sync/customers/master', 'POST')" class="btn btn-secondary text-start">Force Customer Sync</button>
-                </div>
+    <div class="card p-3 mb-3 border-0 shadow-sm" style="background: #f9fafb; border: 1px solid var(--p-border) !important;">
+        <div class="section-header d-flex justify-content-between align-items-center">
+            <span>🚀 Sync Queue Status</span>
+            <div id="queue-pulse" class="spinner-grow spinner-grow-sm text-success" role="status" style="display:none;"></div>
+        </div>
+        <div class="row text-center g-0">
+            <div class="col-4 border-end">
+                <h4 class="fw-bold mb-0" id="pending-count">0</h4>
+                <small class="text-muted" style="font-size: 10px; text-transform: uppercase;">Pending</small>
+            </div>
+            <div class="col-4 border-end">
+                <h4 class="fw-bold mb-0 text-primary" id="active-workers">0</h4>
+                <small class="text-muted" style="font-size: 10px; text-transform: uppercase;">Active</small>
+            </div>
+            <div class="col-4">
+                <h4 class="fw-bold mb-0 text-danger" id="failed-tasks">0</h4>
+                <small class="text-muted" style="font-size: 10px; text-transform: uppercase;">Failed</small>
             </div>
         </div>
+        <div class="mt-3">
+            <button onclick="updateSyncStatus()" class="btn btn-sm btn-secondary w-100 py-1" style="font-size: 11px;">
+                <i class="bi bi-arrow-clockwise"></i> Refresh Status
+            </button>
+        </div>
+    </div>
+
+    <div class="card p-3">
+        <div class="section-header">System Status</div>
+        <div class="d-flex justify-content-between mb-3 align-items-center">
+            <span class="text-muted">Shopify Connection</span>
+            <span class="badge-status badge-success">Active</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-center">
+            <span class="text-muted">Odoo Connection</span>
+            {% if config.odoo_url %}
+                <span class="badge-status badge-success">Active</span>
+            {% else %}
+                <span class="badge-status badge-danger">Not Connected</span>
+            {% endif %}
+        </div>
+        <div class="mb-4">
+            {% if config.is_free_store %}
+                <span class="badge" style="background-color: #e3fbe3; color: #008060; border: 1px solid #aee9d1; padding: 6px 12px; border-radius: 16px; font-weight: 600;">
+                    <i class="bi bi-patch-check-fill"></i> Lifetime Free
+                </span>
+            {% elif config.plan_name == "Development Store" %}
+                <span class="badge" style="background-color: #f6f6f7; color: #454749; border: 1px solid #d2d5d8; padding: 6px 12px; border-radius: 16px; font-weight: 600;">
+                    <i class="bi bi-tools"></i> Development Mode
+                </span>
+            {% else %}
+                <span class="badge" style="background-color: #f0f7ff; color: #005bd3; border: 1px solid #b3d1ff; padding: 6px 12px; border-radius: 16px; font-weight: 600;">
+                    <i class="bi bi-credit-card-fill"></i> {{ config.plan_name }}
+                </span>
+            {% endif %}
+        </div>
+        <hr style="border-color: var(--p-border);">
+        <div class="d-grid gap-2">
+            <button id="btnSyncLocs" onclick="syncLocations()" class="btn btn-secondary text-start" {% if not config.odoo_url %}disabled{% endif %}>
+                <i class="bi bi-geo-alt me-2"></i> Sync Locations
+            </button>
+            <a href="/install?shop={{ shop_url }}" class="btn btn-secondary text-start text-muted" style="font-size: 12px;">
+                <i class="bi bi-shield-lock me-1"></i> Re-Authenticate
+            </a>
+        </div>
+    </div>
+
+    <div class="card p-3">
+        <div class="section-header">Quick Actions</div>
+        <div class="d-grid gap-2">
+            <button onclick="openOrderImportModal()" class="btn btn-primary text-start">
+                <i class="bi bi-cloud-download me-2"></i> Import Recent Orders
+            </button>
+            <div class="text-muted small mt-2 fw-bold text-uppercase" style="font-size: 11px; letter-spacing: 0.5px;">Sync Triggers</div>
+            <button onclick="triggerAction('/sync/inventory')" class="btn btn-secondary text-start">Force Inventory Sync</button>
+            <button onclick="triggerAction('/sync/products/master', 'POST')" class="btn btn-secondary text-start">Force Product Sync</button>
+            <button onclick="triggerAction('/sync/images/manual')" class="btn btn-secondary text-start">Force Image Sync</button>
+            <button onclick="triggerAction('/sync/fulfillments')" class="btn btn-secondary text-start">Push Fulfillment</button>
+            <button onclick="triggerAction('/sync/customers/master', 'POST')" class="btn btn-secondary text-start">Force Customer Sync</button>
+        </div>
+    </div>
+</div>
         <div class="col-md-8">
             <div class="card h-100 overflow-hidden border-0 shadow-sm">
                 <iframe src="/live_logs?shop={{ shop_url }}" width="100%" height="100%" frameborder="0" style="display:block;"></iframe>
@@ -1079,6 +1101,36 @@ function openUnmappedModal() {
 
 const selectAll = document.getElementById('selectAllOrders');
 if(selectAll) selectAll.addEventListener('change', function() { document.querySelectorAll('.order-select').forEach(cb => cb.checked = this.checked); });
+
+        // --- SYNC QUEUE LIVE UPDATES ---
+function updateSyncStatus() {
+    const pulse = document.getElementById('queue-pulse');
+    if(pulse) pulse.style.display = 'inline-block';
+
+    fetch(`/sync/status?shop=${CURRENT_SHOP_URL}`)
+        .then(response => response.json())
+        .then(data => {
+            // Update the numbers in the new card
+            const pendingEl = document.getElementById('pending-count');
+            const activeEl = document.getElementById('active-workers');
+            const failedEl = document.getElementById('failed-tasks');
+
+            if(pendingEl) pendingEl.innerText = data.pending_batches || 0;
+            if(activeEl) activeEl.innerText = data.active_workers || 0;
+            if(failedEl) failedEl.innerText = data.failed_tasks || 0;
+
+            // Hide the pulse indicator after a small delay
+            setTimeout(() => { if(pulse) pulse.style.display = 'none'; }, 800);
+        })
+        .catch(err => {
+            console.error('Queue Status Error:', err);
+            if(pulse) pulse.style.display = 'none';
+        });
+}
+
+// Start the timer for automatic updates every 15 seconds
+updateSyncStatus();
+setInterval(updateSyncStatus, 15000);
         
     </script>
 </body>
