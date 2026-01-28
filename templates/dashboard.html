@@ -670,10 +670,10 @@
                     <thead class="table-light sticky-top">
                         <tr>
                             <th style="width: 15%">Time</th>
-                            <th style="width: 15%">Queue</th>
+                            <th style="width: 10%">Queue</th>
                             <th style="width: 25%">Task</th>
-                            <th style="width: 45%">Details / Error</th>
-                        </tr>
+                            <th style="width: 40%">Details / Error</th>
+                            <th style="width: 10%">Action</th> </tr>
                     </thead>
                     <tbody id="jobModalBody">
                         </tbody>
@@ -1216,56 +1216,95 @@ function runDiagnosis() {
         });
 }
 
-        function openJobModal(status) {
-    // 1. Set Title based on what was clicked
+function openJobModal(status) {
+    // 1. Set Title
     const titles = {
-        'pending': '⏳ Pending Jobs (Waiting to start)',
-        'active': '🏃 Active Jobs (Currently running)',
-        'failed': '❌ Failed Jobs (Crashed or Timed Out)'
+        'pending': '⏳ Pending Jobs (Click Cancel to stop)',
+        'active': '🏃 Active Jobs (Running)',
+        'failed': '❌ Failed Jobs (Click Retry to run again)'
     };
     document.getElementById('jobModalTitle').innerText = titles[status] || 'Jobs';
     
-    // 2. Show "Loading..." state
+    // 2. Show Loading
     const tbody = document.getElementById('jobModalBody');
-    tbody.innerHTML = '<tr><td colspan="4" class="text-center p-4 text-muted"><div class="spinner-border spinner-border-sm me-2"></div>Loading data...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="text-center p-4"><div class="spinner-border spinner-border-sm me-2"></div>Loading data...</td></tr>';
     
-    // 3. Open the Modal
+    // 3. Open Modal
     const modal = new bootstrap.Modal(document.getElementById('jobModal'));
     modal.show();
 
-    // 4. Fetch Data from Backend
+    // 4. Fetch Data
     fetch(`/api/jobs/${status}?shop=${CURRENT_SHOP_URL}`)
         .then(r => r.json())
         .then(data => {
-            tbody.innerHTML = ''; // Clear loading state
+            tbody.innerHTML = ''; // Clear loading
             
             if (!data.jobs || data.jobs.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="4" class="text-center p-4 text-muted">No jobs found in this state.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="5" class="text-center p-4 text-muted">No jobs found in this state.</td></tr>';
                 return;
             }
 
-            // 5. Populate Table
             data.jobs.forEach(job => {
-                let details = `<span class="text-muted">${job.args}</span>`;
-                
-                // If it's a failed job, highlight the error in red
-                if (status === 'failed' && job.error) {
-                    details = `<span class="text-danger fw-bold">${job.error}</span><br><small class="text-muted">${job.args}</small>`;
+                let details = `<span class="text-muted small">${job.args}</span>`;
+                let actionBtn = '';
+
+                // --- BUTTON LOGIC ---
+                if (status === 'failed') {
+                    // Show Error + Retry Button
+                    details = `<span class="text-danger small fw-bold">${job.error}</span><br>${details}`;
+                    actionBtn = `<button onclick="doJobAction('retry', '${job.id}', this)" class="btn btn-sm btn-outline-primary py-0" style="font-size: 11px;">Retry</button>`;
+                } else if (status === 'pending') {
+                    // Show Cancel Button
+                    actionBtn = `<button onclick="doJobAction('cancel', '${job.id}', this)" class="btn btn-sm btn-outline-danger py-0" style="font-size: 11px;">Cancel</button>`;
+                } else {
+                    // Active jobs cannot be touched safely
+                    actionBtn = `<span class="badge bg-light text-dark border">Running</span>`;
                 }
 
                 const row = `
                     <tr>
-                        <td class="text-nowrap">${job.created_at}</td>
-                        <td><span class="badge bg-secondary opacity-75">${job.queue}</span></td>
-                        <td class="fw-bold text-dark">${job.function}</td>
+                        <td class="text-nowrap small">${job.created_at}</td>
+                        <td><span class="badge bg-secondary opacity-75 small">${job.queue}</span></td>
+                        <td class="fw-bold small text-dark">${job.function}</td>
                         <td style="word-break: break-word;">${details}</td>
+                        <td class="text-end">${actionBtn}</td>
                     </tr>
                 `;
                 tbody.innerHTML += row;
             });
         })
         .catch(err => {
-            tbody.innerHTML = `<tr><td colspan="4" class="text-center text-danger p-3">Error loading data: ${err}</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="5" class="text-center text-danger p-3">Error loading data: ${err}</td></tr>`;
+        });
+}
+
+// --- NEW FUNCTION: Handles the Retry/Cancel clicks ---
+function doJobAction(action, jobId, btn) {
+    // 1. Visual Feedback (Disable button)
+    const originalText = btn.innerText;
+    btn.disabled = true;
+    btn.innerText = "...";
+
+    // 2. Send Request
+    fetch(`/api/jobs/${action}/${jobId}?shop=${CURRENT_SHOP_URL}`, { method: 'POST' })
+        .then(r => r.json())
+        .then(res => {
+            if (res.success) {
+                // Success: Fade out the row to show it's handled
+                const row = btn.closest('tr');
+                row.style.opacity = '0.3';
+                btn.innerText = (action === 'retry') ? "Requeued" : "Deleted";
+                btn.classList.remove('btn-outline-primary', 'btn-outline-danger');
+                btn.classList.add('btn-success', 'text-white');
+                
+                // Update the counters on the dashboard immediately
+                updateSyncStatus();
+            } else {
+                // Error: Re-enable button
+                alert("Error: " + res.message);
+                btn.disabled = false;
+                btn.innerText = originalText;
+            }
         });
 }
     </script>
