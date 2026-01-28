@@ -2348,6 +2348,7 @@ def api_get_unmapped_products():
         return jsonify({'error': str(e)}), 500
         print(f"CRITICAL DIAGNOSTIC ERROR: {str(e)}")
         return jsonify({'error': str(e)}), 500
+        
 
 @app.route('/api/diagnose/<sku>', methods=['GET'])
 @require_shopify_session
@@ -2376,6 +2377,60 @@ def api_diagnose_product(sku):
             else: print("❌ ODOO: Not found")
             
     return f.getvalue().replace('\n', '<br>')
+
+
+@app.route('/api/jobs/<status>', methods=['GET'])
+@require_shopify_session
+def api_inspect_jobs(status):
+    """
+    Returns JSON data for the requested job state (failed, active, pending).
+    Limits to 50 items to prevent UI crashes.
+    """
+    from rq.registry import FailedJobRegistry, StartedJobRegistry
+    from utils import q_default, q_critical
+    
+    data = []
+    
+    # Check both queues
+    for q_name, queue in [('Critical (Fast)', q_critical), ('Default (Slow)', q_default)]:
+        job_ids = []
+        
+        if status == 'failed':
+            registry = FailedJobRegistry(queue=queue)
+            job_ids = registry.get_job_ids()
+        elif status == 'active':
+            registry = StartedJobRegistry(queue=queue)
+            job_ids = registry.get_job_ids()
+        elif status == 'pending':
+            job_ids = queue.get_job_ids()
+            
+        # Get details for the first 50 jobs (Newest first)
+        for jid in job_ids[:50]:
+            try:
+                job = queue.fetch_job(jid)
+                if not job: continue
+                
+                # Format arguments nicely
+                args_display = str(job.args)
+                if len(args_display) > 50: args_display = args_display[:50] + "..."
+                
+                # Format error (if any)
+                error_msg = ""
+                if job.exc_info:
+                    # Get the last line of the traceback (usually the actual error)
+                    error_msg = job.exc_info.strip().split('\n')[-1]
+
+                data.append({
+                    'id': job.id,
+                    'queue': q_name,
+                    'function': job.func_name.split('.')[-1], # Show only function name
+                    'args': args_display,
+                    'created_at': job.created_at.strftime('%H:%M:%S') if job.created_at else '--',
+                    'error': error_msg
+                })
+            except: pass
+
+    return jsonify({'jobs': data, 'count': len(data)})
 
 # Start scheduler thread
 # t = threading.Thread(target=run_schedule, daemon=True)
