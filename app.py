@@ -2432,6 +2432,35 @@ def api_inspect_jobs(status):
 
     return jsonify({'jobs': data, 'count': len(data)})
 
+
+@app.route('/api/jobs/<action>/<job_id>', methods=['POST'])
+@require_shopify_session
+def api_job_action(action, job_id):
+    from rq.job import Job
+    from utils import conn
+    from rq.registry import FailedJobRegistry
+    
+    try:
+        job = Job.fetch(job_id, connection=conn)
+    except:
+        return jsonify({'success': False, 'message': 'Job not found'})
+
+    try:
+        if action == 'retry':
+            # Retry a failed job
+            job.requeue()
+            return jsonify({'success': True, 'message': 'Job Requeued'})
+            
+        elif action == 'cancel':
+            # Delete a pending or failed job
+            job.delete()
+            return jsonify({'success': True, 'message': 'Job Cancelled/Deleted'})
+            
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+        
+    return jsonify({'success': False, 'message': 'Invalid Action'})
+
 # Start scheduler thread
 # t = threading.Thread(target=run_schedule, daemon=True)
 # t.start()
