@@ -47,7 +47,7 @@ def sync_products_master(shop_url):
 
 
 # =====================================================
-# 2. THE WORKER
+# 2. THE WORKER (OPTIMIZED WITH BULK FETCHING)
 # =====================================================
 def sync_product_batch_task(shop_url, batch_ids, batch_name):
     from app import app
@@ -61,16 +61,47 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
             'cost': get_config('prod_sync_cost', True, shop_url=shop_url),
             'desc': get_config('prod_sync_desc', True, shop_url=shop_url),
             'tags': get_config('prod_sync_tags', False, shop_url=shop_url),
-            'meta_price': get_config('prod_sync_meta_original_price', False, shop_url=shop_url),
             'images': get_config('prod_sync_images', False, shop_url=shop_url),
             'vendor': get_config('prod_sync_vendor', True, shop_url=shop_url),
             'barcode': get_config('prod_sync_barcode', True, shop_url=shop_url),
             'auto_create': get_config('prod_auto_create', False, shop_url=shop_url),
             'auto_publish': get_config('prod_auto_publish', False, shop_url=shop_url),
-            'meta_code': get_config('prod_sync_meta_vendor_code', False, shop_url=shop_url),
             'currency': shopify.Shop.current().currency
         }
 
+        # --- A. PREFETCH ODOO DATA ---
+        fields = ['default_code', 'name', 'list_price', 'standard_price', 'active', 
+                  'uom_id', 'sh_is_secondary_unit', 'sh_secondary_uom', 
+                  'public_categ_ids', 'product_tag_ids', 'description_sale', 
+                  'image_1920', 'barcode', 'qty_per_pack']
+        
+        try:
+            products = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'read', [batch_ids], {'fields': fields})
+        except Exception as e:
+            print(f"Odoo Batch Read Error: {e}")
+            return
+
+        # Bulk fetch Categories & Tags (Reduces Odoo calls from 2000 to ~40)
+        all_categ_ids = set()
+        all_tag_ids = set()
+        for p in products:
+            all_categ_ids.update(p.get('public_categ_ids', []))
+            all_tag_ids.update(p.get('product_tag_ids', []))
+            
+        categ_map = {}
+        if all_categ_ids:
+            try:
+                cats = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.public.category', 'read', [list(all_categ_ids)], {'fields': ['name']})
+                categ_map = {c['id']: c['name'] for c in cats}
+            except: pass
+
+        tag_map = {}
+        if all_tag_ids:
+            try:
+                tags = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.tag', 'read', [list(all_tag_ids)], {'fields': ['name']})
+                tag_map = {t['id']: t['name'] for t in tags}
+            except: pass
+            
         uom_map = {}
         try:
             uoms = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'search_read', [], {'fields': ['id', 'name', 'factor_inv']})
@@ -78,14 +109,52 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
                 uom_map[u['id']] = {'name': u['name'], 'ratio': float(u.get('factor_inv', 1.0))}
         except: pass
 
-        fields = ['default_code', 'name', 'list_price', 'standard_price', 'weight', 'active', 'uom_id', 'sh_is_secondary_unit', 'sh_secondary_uom', 'public_categ_ids', 'product_tag_ids', 'description_sale', 'product_tmpl_id', 'image_1920', 'barcode', 'qty_per_pack']
-        products = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'read', [batch_ids], {'fields': fields})
+        # --- B. PREFETCH SHOPIFY DATA ---
+        batch_skus = [str(p.get('default_code')).strip() for p in products if p.get('default_code')]
+        
+        # 1. Bulk DB Lookup (Reduces DB queries)
+        db_map_dict = {} 
+        if batch_skus:
+            maps = ProductMap.query.filter(ProductMap.shop_url == shop_url, ProductMap.sku.in_(batch_skus)).all()
+            db_map_dict = {m.sku: m for m in maps}
 
+        # 2. Bulk Shopify Fetch (Reduces Shopify calls drastically)
+        shopify_product_cache = {} 
+        variant_ids_to_fetch = []
+        for pm in db_map_dict.values():
+            if pm.shopify_variant_id and pm.shopify_variant_id != '0':
+                variant_ids_to_fetch.append(pm.shopify_variant_id)
+
+        if variant_ids_to_fetch:
+            try:
+                # Chunk IDs into 50s for Shopify API limit safety
+                v_chunks = [variant_ids_to_fetch[i:i + 50] for i in range(0, len(variant_ids_to_fetch), 50)]
+                product_ids_to_fetch = set()
+                
+                for v_chunk in v_chunks:
+                    variants = shopify.Variant.find(ids=",".join(v_chunk))
+                    for v in variants:
+                        product_ids_to_fetch.add(str(v.product_id))
+
+                if product_ids_to_fetch:
+                    p_chunks = [list(product_ids_to_fetch)[i:i + 50] for i in range(0, len(product_ids_to_fetch), 50)]
+                    for p_chunk in p_chunks:
+                        s_products = shopify.Product.find(ids=",".join(p_chunk))
+                        for sp in s_products:
+                            # Map retrieved product to its SKUs in memory
+                            for v in sp.variants:
+                                if v.sku: shopify_product_cache[v.sku] = sp
+            except Exception as e:
+                print(f"Batch Shopify Fetch Error: {e}")
+
+        # --- C. PROCESS LOOP ---
         stats = {'created': 0, 'updated': 0, 'archived': 0, 'skipped': 0}
 
         for p in products:
             try:
-                res = process_product_data(p, odoo, shop_url, cfg, uom_map)
+                # We pass the new maps into the processor
+                res = process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db_map_dict, shopify_product_cache)
+                
                 if 'archived' in res: stats['archived'] += 1
                 elif 'created' in res: stats['created'] += 1
                 elif 'updated' in res: stats['updated'] += 1
@@ -94,32 +163,30 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
                 print(f"Error syncing {p.get('default_code')}: {e}")
 
         gc.collect()
-        log_event('Product Sync', 'Info', f"✅ {batch_name}: New: {stats['created']}, Updated: {stats['updated']}, Conflict/Moved: {stats['archived']}", shop_url=shop_url)
-
+        log_event('Product Sync', 'Info', f"✅ {batch_name}: New: {stats['created']}, Updated: {stats['updated']}", shop_url=shop_url)
 
 # =====================================================
-# 3. SINGLE PRODUCT LOGIC
+# 3. SINGLE PRODUCT LOGIC (MEMORY OPTIMIZED)
 # =====================================================
-def process_product_data(p, odoo, shop_url, cfg, uom_map):
+def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db_map_dict, shopify_product_cache):
     from app import db
     
-    if not p.get('active'):
-        return "skipped"
-
+    if not p.get('active'): return "skipped"
     sku = str(p.get('default_code') or '').strip()
     if not sku: return "skipped"
 
-    # 🛡️ SAFETY GUARD 1: SKU Ownership
-    # Since you're deleting the table, the first Odoo product to claim this SKU becomes the owner.
-    pm = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
+    # 1. CHECK DB MAP (From Memory)
+    pm = db_map_dict.get(sku)
+    
+    # Ownership Guard
     if pm and pm.odoo_product_id != p['id']:
-        print(f"⚠️ BLOCKING: SKU {sku} already claimed by Odoo {pm.odoo_product_id}. Skipping {p['id']}.")
+        print(f"⚠️ BLOCKING: SKU {sku} already claimed by Odoo {pm.odoo_product_id}. Skipping.")
         return "skipped"
 
     product_name = p.get('name', 'Unknown')
     vendor_name = product_name.split(' ')[0] if product_name else "Worthy"
 
-    # --- Variant / Pack Logic (YOUR ORIGINAL CODE) ---
+    # --- Variant / Pack Logic ---
     is_pack = False; ratio = 1.0; main_uom_name = 'Outer'
     if p.get('sh_is_secondary_unit') is True:
         qty_pack = p.get('qty_per_pack', 0.0)
@@ -150,30 +217,22 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
         desired_variants.append({'option1': 'Unit', 'price': str(round(raw_price / ratio, 2) if ratio > 0 else 0.0), 'sku': f"{sku}-UNIT", 'barcode': '', 'cost': str(round(raw_cost / ratio, 2) if ratio > 0 else 0.0)})
 
     # ========================================================
-    # 🛡️ MAPPING & CONFLICT DISCOVERY
+    # 2. FIND SHOPIFY PRODUCT (From Memory Cache)
     # ========================================================
-    sp = None
+    sp = shopify_product_cache.get(sku)
     action_log = "updated"
     
-    if pm:
-        try:
-            v = shopify.Variant.find(pm.shopify_variant_id)
-            sp = shopify.Product.find(v.product_id)
-        except:
-            db.session.delete(pm); db.session.commit(); pm = None
-
+    # If not in cache, fallback to slow search (Standard safety logic)
     if not sp:
         try:
             found_variants = shopify.Variant.find(params={'sku': sku})
             for v in found_variants:
-                # 🛡️ SAFETY GUARD 2: Prevent Variant Hijacking
                 collision = ProductMap.query.filter_by(shopify_variant_id=str(v.id), shop_url=shop_url).first()
                 if collision and collision.odoo_product_id != p['id']:
                     continue
-
+                
                 parent = shopify.Product.find(v.product_id)
                 sim = SequenceMatcher(None, str(parent.title).lower(), str(product_name).lower()).ratio()
-                
                 if sim < 0.3:
                     new_sku = f"OLD_{sku}"; parent.status = 'archived'
                     v.sku = new_sku; v.save(); parent.save()
@@ -182,34 +241,29 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
                 sp = parent; break
         except: pass
 
-    # --- Create / Update Logic (YOUR ORIGINAL CODE) ---
+    # --- Create Logic ---
     if not sp:
         if not cfg['auto_create']: return "skipped"
         sp = shopify.Product(); sp.title = p['name']; sp.vendor = vendor_name
         sp.status = 'active' if cfg['auto_publish'] else 'draft'
         sp.published_scope = 'global'
-        cat_name = odoo.get_public_category_name(p.get('public_categ_ids', []))
-        if cat_name: sp.product_type = cat_name
+        # Category from Memory
+        if p.get('public_categ_ids'):
+            cat_id = p['public_categ_ids'][0]
+            if cat_id in categ_map: sp.product_type = categ_map[cat_id]
+        
         if action_log != "archived": action_log = "created"
 
-    sp.published_scope = 'global'
     if sp.status == 'archived': sp.status = 'active'
 
-    # Attempt to fetch category, but do not force a label if empty
-    try:
-        cat_name = odoo.get_public_category_name(p.get('public_categ_ids', []))
-        if cat_name: 
-            sp.product_type = cat_name
-        # If cat_name is empty, we do nothing (leaving it empty or as-is in Shopify)
-    except Exception as e:
-        print(f"Category Fetch Error for {sku}: {e}")
-        # We catch the error but don't assign any "General" labels
-
+    # Updates
     if cfg['title']: sp.title = p['name']
     if cfg['vendor']: sp.vendor = vendor_name
     if cfg['desc']: sp.body_html = p.get('description_sale') or ''
-    if cfg['tags']:
-        t_names = odoo.get_tag_names(p.get('product_tag_ids', []))
+    
+    # Tags from Memory
+    if cfg['tags'] and p.get('product_tag_ids'):
+        t_names = [tag_map[tid] for tid in p['product_tag_ids'] if tid in tag_map]
         if t_names: sp.tags = ",".join(t_names)
 
     # Clean Options
@@ -254,14 +308,15 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
                     ii.cost = d['cost']; ii.save()
                 except: pass
 
-    # Image Sync (YOUR FULL LOGIC)
+    # Image Sync (Memory Hash Check)
     if cfg['images'] and p.get('image_1920'):
         try:
             img_raw = p['image_1920']
             if isinstance(img_raw, bytes): img_raw = img_raw.decode('utf-8')
             new_hash = hashlib.md5(img_raw.encode('utf-8')).hexdigest()
-            pm_check = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
-            current_hash = pm_check.image_hash if pm_check else ""
+            
+            # Check Hash from Memory Map (if available) or DB
+            current_hash = pm.image_hash if pm else ""
             
             if new_hash != current_hash or not sp.images:
                 if sp.images:
@@ -270,27 +325,33 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
                         except: pass
                 img = shopify.Image(prefix_options={'product_id': sp.id})
                 img.attachment = img_raw; img.save()
-                if pm_check:
-                    pm_check.image_hash = new_hash
+                
+                # Update DB (We need to query fresh to ensure session is attached)
+                pm_update = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
+                if pm_update:
+                    pm_update.image_hash = new_hash
                     db.session.commit()
         except: pass
 
-    # --- MAP UPDATE (FIXED FOR CLEAN START) ---
+    # --- MAP UPDATE ---
     try:
-        pm = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
-        if not pm:
+        # Check if we already have the map in memory to avoid query if unchanged? 
+        # Safest to query fresh for the write operation.
+        pm_final = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
+        if not pm_final:
             vid = sp.variants[0].id if sp.variants else '0'
-            pm = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=str(vid), shop_url=shop_url)
-            db.session.add(pm)
+            pm_final = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=str(vid), shop_url=shop_url)
+            db.session.add(pm_final)
         
         if sp.variants:
-            pm.shopify_variant_id = str(sp.variants[0].id)
+            pm_final.shopify_variant_id = str(sp.variants[0].id)
             
-        pm.last_synced_at = datetime.utcnow()
+        pm_final.last_synced_at = datetime.utcnow()
         db.session.commit()
     except: db.session.rollback()
 
     return action_log
+
 
 # =====================================================
 # 4. HELPERS
