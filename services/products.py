@@ -309,3 +309,83 @@ def archive_shopify_duplicates(shop_url):
 
 cleanup_duplicates_master = archive_shopify_duplicates
 cleanup_shopify_products = archive_shopify_duplicates
+
+
+# =====================================================
+# 5. FORCE IMAGE SYNC (STRICT REPLACEMENT)
+# =====================================================
+def sync_images_only_manual(shop_url):
+    """
+    Dispatcher for the 'Force Image Sync' button.
+    Loops through the ProductMap and enqueues individual image repairs.
+    """
+    from app import app
+    with app.app_context():
+        # 1. Get all mapped products for this shop
+        mapped_products = ProductMap.query.filter_by(shop_url=shop_url).all()
+        
+        if not mapped_products:
+            log_event('Force Image Sync', 'Info', "No products found in map to sync.", shop_url=shop_url)
+            return
+
+        # 2. Chunk them to avoid overloading the queue
+        for pm in mapped_products:
+            q_default.enqueue(repair_single_product_image, shop_url, pm.sku, job_timeout=300)
+
+        log_event('Force Image Sync', 'Success', f"Queued image repair for {len(mapped_products)} products.", shop_url=shop_url)
+
+
+def repair_single_product_image(shop_url, sku):
+    """
+    The Worker: Strictly replaces Shopify images with Odoo images.
+    """
+    from app import app
+    with app.app_context():
+        odoo = get_odoo_connection(shop_url)
+        if not odoo or not setup_shopify_session(shop_url): return
+
+        # 1. Find the Shopify Product
+        shopify_product_id = find_shopify_product_by_sku(sku, shop_url)
+        if not shopify_product_id: return
+
+        try:
+            sp = shopify.Product.find(shopify_product_id)
+            
+            # 2. Fetch fresh image from Odoo
+            # We search for the product to get the latest image_1920
+            odoo_p = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search_read', 
+                [[['default_code', '=', sku], ['active', '=', True]]], 
+                {'fields': ['image_1920'], 'limit': 1}
+            )
+
+            if not odoo_p or not odoo_p[0].get('image_1920'):
+                print(f"Skipping {sku}: No image found in Odoo.")
+                return
+
+            # 3. THE WIPE: Delete ALL existing images on Shopify first
+            if sp.images:
+                print(f"🧹 Wiping {len(sp.images)} images for {sku}...")
+                for img in sp.images:
+                    try:
+                        shopify.Image.find(img.id, product_id=sp.id).destroy()
+                    except: pass
+
+            # 4. THE INJECTION: Upload the fresh Odoo image
+            new_image = shopify.Image(prefix_options={'product_id': sp.id})
+            img_data = odoo_p[0]['image_1920']
+            if isinstance(img_data, bytes): img_data = img_data.decode('utf-8')
+            
+            new_image.attachment = img_data
+            new_image.save()
+
+            # 5. Update the Hash in DB so the regular sync doesn't try to "fix" it again
+            new_hash = hashlib.md5(img_data.encode('utf-8')).hexdigest()
+            pm = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
+            if pm:
+                pm.image_hash = new_hash
+                db.session.commit()
+                
+            print(f"✅ Image for {sku} replaced successfully.")
+
+        except Exception as e:
+            print(f"❌ Error repairing image for {sku}: {e}")
