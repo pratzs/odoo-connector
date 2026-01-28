@@ -1438,6 +1438,24 @@ def import_selected_orders():
     return jsonify({"message": f"Batch Complete. Synced: {synced}"})
 
 
+@app.route('/sync/status')
+def get_sync_status():
+    from utils import q_default
+    
+    # Get counts from the Redis queue
+    queued_count = q_default.count  # Tasks waiting to start
+    started_jobs = q_default.started_job_registry.count # Tasks currently running
+    failed_count = q_default.failed_job_registry.count # Tasks that crashed
+    
+    return jsonify({
+        "status": "Online",
+        "pending_batches": queued_count,
+        "active_workers": started_jobs,
+        "failed_tasks": failed_count,
+        "queue_name": q_default.name
+    })
+
+
 def background_refund_sync(shop_url, refund_data):
     with app.app_context():
         success, message = process_refund_data(refund_data, shop_url)
