@@ -194,9 +194,16 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
 
     sp.published_scope = 'global'
     if sp.status == 'archived': sp.status = 'active'
-    if not sp.product_type:
+
+    # Attempt to fetch category, but do not force a label if empty
+    try:
         cat_name = odoo.get_public_category_name(p.get('public_categ_ids', []))
-        if cat_name: sp.product_type = cat_name
+        if cat_name: 
+            sp.product_type = cat_name
+        # If cat_name is empty, we do nothing (leaving it empty or as-is in Shopify)
+    except Exception as e:
+        print(f"Category Fetch Error for {sku}: {e}")
+        # We catch the error but don't assign any "General" labels
 
     if cfg['title']: sp.title = p['name']
     if cfg['vendor']: sp.vendor = vendor_name
