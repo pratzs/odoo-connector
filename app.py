@@ -2349,6 +2349,34 @@ def api_get_unmapped_products():
         print(f"CRITICAL DIAGNOSTIC ERROR: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/diagnose/<sku>', methods=['GET'])
+@require_shopify_session
+def api_diagnose_product(sku):
+    shop_url = request.args.get('shop')
+    
+    # Capture output
+    import io, sys
+    from contextlib import redirect_stdout
+    
+    f = io.StringIO()
+    with redirect_stdout(f):
+        # We manually run the logic from diagnose.py here
+        print(f"--- DIAGNOSTIC FOR {sku} ---")
+        
+        # 1. DB Map
+        pm = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
+        if pm: print(f"✅ DB MAP: Found (Odoo ID: {pm.odoo_product_id})")
+        else: print("❌ DB MAP: Not found")
+        
+        # 2. Odoo
+        odoo = get_odoo_connection(shop_url)
+        if odoo:
+            p = odoo.search_product_by_sku(sku)
+            if p: print(f"✅ ODOO: Found Product ID {p}")
+            else: print("❌ ODOO: Not found")
+            
+    return f.getvalue().replace('\n', '<br>')
+
 # Start scheduler thread
 # t = threading.Thread(target=run_schedule, daemon=True)
 # t.start()
