@@ -206,14 +206,15 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
             if sec_data[0] in uom_map:
                 sec_ratio = uom_map[sec_data[0]]['ratio']
         
-        # 2. Determine if it is a pack
+       # 2. Determine if it is a pack
         if main_ratio > 1.0 or sec_ratio != 1.0:
             is_pack = True
             
-            # 3. FORCE FORMATTING: "CTNX6" -> "6 per pack"
+            # 3. FORCE FORMATTING: "6 per pack"
             if sec_ratio > 1.0:
                 sec_name = f"{int(sec_ratio)} per pack"
 
+    
     # 3. Main UOM Name
     main_uom_name = "Outer"
     if p.get('uom_id') and p['uom_id'][0] in uom_map:
@@ -602,7 +603,7 @@ def fix_variant_mess_task(shop_url, company_id):
                     if main_ratio > 1.0 or sec_ratio != 1.0:
                         is_pack = True
                         
-                        # 3. FORCE FORMATTING: "CTNX6" -> "6 per pack"
+                        # 3. FORCE FORMATTING: "6 per pack"
                         if sec_ratio > 1.0:
                             sec_name = f"{int(sec_ratio)} per pack"
     
