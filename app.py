@@ -2366,27 +2366,105 @@ def api_get_unmapped_products():
 def api_diagnose_product(sku):
     shop_url = request.args.get('shop')
     
-    # Capture output
-    import io, sys
+    # Capture output to display in browser
+    import io
     from contextlib import redirect_stdout
-    
     f = io.StringIO()
+    
     with redirect_stdout(f):
-        # We manually run the logic from diagnose.py here
-        print(f"--- DIAGNOSTIC FOR {sku} ---")
-        
-        # 1. DB Map
-        pm = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
-        if pm: print(f"✅ DB MAP: Found (Odoo ID: {pm.odoo_product_id})")
-        else: print("❌ DB MAP: Not found")
-        
-        # 2. Odoo
+        print(f"🕵️‍♂️ STARTING DEEP TRACE FOR SKU: '{sku}'")
+        print(f"--------------------------------------------------")
+
+        # 1. SETUP
         odoo = get_odoo_connection(shop_url)
-        if odoo:
-            p = odoo.search_product_by_sku(sku)
-            if p: print(f"✅ ODOO: Found Product ID {p}")
-            else: print("❌ ODOO: Not found")
+        if not odoo: 
+            print("❌ CRITICAL: Could not connect to Odoo.")
+            return f.getvalue().replace('\n', '<br>')
+
+        # 2. CHECK ODOO DATA
+        print(f"👉 STEP 1: Checking Odoo...")
+        try:
+            # Search strictly
+            p_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'product.product', 'search', [[['default_code', '=', sku]]])
             
+            if not p_ids:
+                print(f"❌ Odoo: Product not found with default_code='{sku}'")
+            else:
+                p_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                    'product.product', 'read', [p_ids], {'fields': ['id', 'name', 'active', 'default_code']})
+                p = p_data[0]
+                print(f"✅ Odoo: Found ID {p['id']}")
+                print(f"   Name: '{p['name']}'")
+                print(f"   Active: {p['active']}")
+                print(f"   SKU Raw: '{p['default_code']}'")
+        except Exception as e:
+            print(f"❌ Odoo Error: {e}")
+
+        # 3. CHECK DATABASE MAP
+        print(f"\n👉 STEP 2: Checking App Database...")
+        pm = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
+        if pm:
+            print(f"⚠️ Map Found in DB:")
+            print(f"   Linked Odoo ID: {pm.odoo_product_id}")
+            print(f"   Linked Shopify Variant ID: {pm.shopify_variant_id}")
+            if pm.shopify_variant_id == '0':
+                print("   ❌ ALERT: Map is a 'Zombie' (ID is 0). This causes duplicates.")
+        else:
+            print(f"ℹ️ Database: No mapping exists for this SKU.")
+
+        # 4. CHECK SHOPIFY API (DIRECT SKU SEARCH)
+        print(f"\n👉 STEP 3: Checking Shopify (Direct SKU Search)...")
+        try:
+            # This is exactly what the Sync Logic does
+            found_variants = shopify.Variant.find(sku=sku)
+            
+            if not found_variants:
+                print(f"❌ API Result: EMPTY list []")
+                print(f"   CONCLUSION: Shopify's 'Search by SKU' API is failing for this item.")
+                print(f"   (This is the 'Glitch' that forces us to use the Rescue Guard)")
+            else:
+                print(f"✅ API Result: Found {len(found_variants)} variants.")
+                for v in found_variants:
+                    print(f"   - Found Variant ID: {v.id} | SKU: '{v.sku}'")
+                    if str(v.sku).strip() == str(sku).strip():
+                        print(f"     ✅ EXACT MATCH CONFIRMED.")
+                    else:
+                        print(f"     ❌ MISMATCH: '{v.sku}' != '{sku}'")
+        except Exception as e:
+            print(f"❌ Shopify API Error: {e}")
+
+        # 5. CHECK RESCUE GUARD (NAME SEARCH)
+        if 'p' in locals():
+            print(f"\n👉 STEP 4: Checking Rescue Guard (Search by Name)...")
+            try:
+                first_word = p['name'].split()[0]
+                clean_word = "".join(ch for ch in first_word if ch.isalnum())
+                print(f"   Searching Shopify for title containing: '{clean_word}'")
+                
+                candidates = shopify.Product.find(title=clean_word, status='any', limit=10)
+                
+                if not candidates:
+                    print(f"❌ Rescue Result: No products found starting with '{clean_word}'.")
+                    print(f"   CAUSE: The product name in Odoo ('{p['name']}') is too different from Shopify.")
+                else:
+                    print(f"   Found {len(candidates)} candidates. Scanning for SKU '{sku}'...")
+                    match_found = False
+                    for c in candidates:
+                        print(f"   🔎 Checking '{c.title}' (ID: {c.id})...")
+                        for v in c.variants:
+                            print(f"      - Variant SKU: '{v.sku}'")
+                            if str(v.sku).strip() == str(sku).strip():
+                                print(f"        ✅ MATCH FOUND! The Rescue Guard SHOULD link this.")
+                                match_found = True
+                    
+                    if not match_found:
+                        print(f"   ❌ FAILED: Candidates found, but none contained SKU '{sku}'.")
+                        print(f"   RESULT: Sync assumes product is missing -> Creates Duplicate.")
+
+            except Exception as e:
+                print(f"❌ Rescue Logic Error: {e}")
+
     return f.getvalue().replace('\n', '<br>')
 
 
