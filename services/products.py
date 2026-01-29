@@ -6,7 +6,7 @@ import hashlib
 import math
 from difflib import SequenceMatcher
 from datetime import datetime
-from models import Shop, ProductMap, AppSetting, ShopSettings, db
+from models import Shop, ProductMap, AppSetting, db
 from utils import get_odoo_connection, log_event, setup_shopify_session, get_config, q_default
 
 
