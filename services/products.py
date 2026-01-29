@@ -109,7 +109,7 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
                 uom_map[u['id']] = {'name': u['name'], 'ratio': float(u.get('factor_inv', 1.0))}
         except: pass
 
-        # --- B. PREFETCH SHOPIFY DATA ---
+       # --- B. PREFETCH SHOPIFY DATA ---
         batch_skus = [str(p.get('default_code')).strip() for p in products if p.get('default_code')]
         
         # 1. Bulk DB Lookup (Reduces DB queries)
@@ -118,7 +118,7 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
             maps = ProductMap.query.filter(ProductMap.shop_url == shop_url, ProductMap.sku.in_(batch_skus)).all()
             db_map_dict = {m.sku: m for m in maps}
 
-        # 2. Bulk Shopify Fetch (Reduces Shopify calls drastically)
+        # 2. Bulk Shopify Fetch
         shopify_product_cache = {} 
         variant_ids_to_fetch = []
         for pm in db_map_dict.values():
@@ -135,15 +135,21 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
                     variants = shopify.Variant.find(ids=",".join(v_chunk))
                     for v in variants:
                         product_ids_to_fetch.add(str(v.product_id))
+                    
+                    # ✅ SAFETY BRAKE: Sleep 0.5s between Shopify calls
+                    time.sleep(0.5) 
 
                 if product_ids_to_fetch:
                     p_chunks = [list(product_ids_to_fetch)[i:i + 50] for i in range(0, len(product_ids_to_fetch), 50)]
                     for p_chunk in p_chunks:
                         s_products = shopify.Product.find(ids=",".join(p_chunk))
                         for sp in s_products:
-                            # Map retrieved product to its SKUs in memory
                             for v in sp.variants:
                                 if v.sku: shopify_product_cache[v.sku] = sp
+                        
+                        # ✅ SAFETY BRAKE: Sleep 0.5s between Shopify calls
+                        time.sleep(0.5)
+
             except Exception as e:
                 print(f"Batch Shopify Fetch Error: {e}")
 
