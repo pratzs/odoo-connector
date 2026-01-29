@@ -1189,6 +1189,9 @@ def trigger_fulfillment_sync():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
 
+    # 1. IMMEDIATE LOG: Confirm button click
+    log_event('Fulfillment', 'Info', "Manual fulfillment sync triggered.", shop_url=shop_url)
+
     # FAST LANE (Fulfillments are critical/fast)
     q_critical.enqueue(sync_odoo_fulfillments, shop_url, job_timeout=600)
     return jsonify({"message": "Started checking for shipments (Queued)."})
@@ -1198,6 +1201,9 @@ def trigger_cancellation_sync():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
     
+    # 1. IMMEDIATE LOG: Confirm button click
+    log_event('Order Cancel', 'Info', "Manual cancellation sync triggered.", shop_url=shop_url)
+    
     # Critical Queue (Fast)
     q_critical.enqueue(sync_odoo_cancellations, shop_url, job_timeout=600)
     return jsonify({"message": "Odoo Cancellation Sync Queued"})
@@ -1206,6 +1212,9 @@ def trigger_cancellation_sync():
 def trigger_return_sync():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+    
+    # 1. IMMEDIATE LOG: Confirm button click
+    log_event('Return Sync', 'Info', "Manual return sync triggered.", shop_url=shop_url)
     
     # Critical Queue (Fast)
     q_critical.enqueue(sync_odoo_returns, shop_url, job_timeout=600)
