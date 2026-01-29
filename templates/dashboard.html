@@ -1231,13 +1231,20 @@ updateSyncStatus();
 setInterval(updateSyncStatus, 15000);
 
 function openJobModal(status) {
-    // 1. Set Title
+    // 1. Set Title & Headers
     const titles = {
         'pending': '⏳ Pending Jobs (Click Cancel to stop)',
         'active': '🏃 Active Jobs (Running)',
-        'failed': '❌ Failed Jobs (Click Retry to run again)'
+        'failed': '❌ Failed Jobs'
     };
-    document.getElementById('jobModalTitle').innerText = titles[status] || 'Jobs';
+    
+    // Add "Clear All" button only for Failed status
+    let titleHtml = titles[status] || 'Jobs';
+    if (status === 'failed') {
+        titleHtml += ` <button onclick="clearAllFailed()" class="btn btn-sm btn-danger ms-3" style="font-size: 11px;">🗑️ Clear All Failed</button>`;
+    }
+    
+    document.getElementById('jobModalTitle').innerHTML = titleHtml;
     
     // 2. Show Loading
     const tbody = document.getElementById('jobModalBody');
@@ -1258,7 +1265,12 @@ function openJobModal(status) {
                 return;
             }
 
-            data.jobs.forEach(job => {
+            // --- SORTING: NEWEST FIRST ---
+            // Assuming jobs come in order, reversing them shows newest first.
+            // If they have timestamps, we could sort by that, but array reverse is usually sufficient for RQ.
+            const sortedJobs = data.jobs.reverse();
+
+            sortedJobs.forEach(job => {
                 let details = `<span class="text-muted small">${job.args}</span>`;
                 let actionBtn = '';
 
@@ -1292,7 +1304,22 @@ function openJobModal(status) {
         });
 }
 
-// --- NEW FUNCTION: Handles the Retry/Cancel clicks ---
+function clearAllFailed() {
+    if(!confirm("Are you sure you want to delete ALL failed jobs? This cannot be undone.")) return;
+    
+    fetch(`/api/jobs/clear_failed?shop=${CURRENT_SHOP_URL}`, { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            showToast(data.message);
+            // Refresh the modal content immediately
+            openJobModal('failed');
+            // Refresh dashboard counters
+            updateSyncStatus();
+        })
+        .catch(err => showToast("Error clearing jobs"));
+}
+
+// ---  Handles the Retry/Cancel clicks ---
 function doJobAction(action, jobId, btn) {
     // 1. Visual Feedback (Disable button)
     const originalText = btn.innerText;
