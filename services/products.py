@@ -190,7 +190,7 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
         log_event('Product Sync', 'Info', f"✅ {batch_name}: New: {stats['created']}, Updated: {stats['updated']}", shop_url=shop_url)
 
 # =====================================================
-# 3. SINGLE PRODUCT LOGIC (ROBUST SEARCH & RESCUE)
+# 3. SINGLE PRODUCT LOGIC (FORCED SEARCH & RESCUE)
 # =====================================================
 def process_product_data(p, odoo, shop_url, cfg, uom_map):
     from app import db
@@ -200,7 +200,6 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
     if not sku: return "skipped"
 
     # 1. CHECK DB MAP (From Memory)
-    # Since you deleted the table, this will be empty.
     pm = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
     
     # Ownership Guard
@@ -242,63 +241,61 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
         desired_variants.append({'option1': 'Unit', 'price': str(round(raw_price / ratio, 2) if ratio > 0 else 0.0), 'sku': f"{sku}-UNIT", 'barcode': '', 'cost': str(round(raw_cost / ratio, 2) if ratio > 0 else 0.0)})
 
     # ========================================================
-    # 2. FIND SHOPIFY PRODUCT (TRIPLE CHECK + RESCUE)
+    # 2. FIND SHOPIFY PRODUCT (TRIPLE CHECK + FORCED RESCUE)
     # ========================================================
     sp = None
     action_log = "updated"
 
-    # A. If we have a map, trust it first
+    # A. Check Map
     if pm:
         try:
             v = shopify.Variant.find(pm.shopify_variant_id)
             sp = shopify.Product.find(v.product_id)
         except:
-            # Map is dead (stale). Delete it and fall through to Search.
             db.session.delete(pm); db.session.commit(); pm = None
 
-    # B. If no map (or map died), Search Shopify
+    # B. Check SKU (Triple Retry)
     if not sp:
-        # 1. Try SKU Search (3 Attempts)
         existing_variant = safe_find_variant_by_sku(sku)
-        
         if existing_variant:
             try: sp = shopify.Product.find(existing_variant.product_id)
             except: sp = None
 
-    # C. RESCUE GUARD: If SKU Search failed, search by NAME (The "Athena" Fix)
+    # C. RESCUE GUARD: Run this ALWAYS (Fixes the "0 Updated" issue)
     if not sp:
-        if cfg['auto_create']: # Only search if we are about to create
-            try:
-                # Search by First Word Only (Fixes "+Magnesium" bugs)
-                first_word = p['name'].split()[0]
-                first_word = "".join(ch for ch in first_word if ch.isalnum())
-                
-                candidates = shopify.Product.find(title=first_word, status='any', limit=50)
-                best_match = None
-                highest_ratio = 0.0
+        try:
+            # Search by First Word Only
+            first_word = p['name'].split()[0]
+            first_word = "".join(ch for ch in first_word if ch.isalnum())
+            
+            # 🛑 CRITICAL: We search even if auto_create is OFF, to find existing links.
+            candidates = shopify.Product.find(title=first_word, status='any', limit=50)
+            best_match = None
+            highest_ratio = 0.0
 
-                for c in candidates:
-                    # CHECK 1: Is our SKU hiding inside this product?
-                    if any(str(v.sku).strip() == sku for v in c.variants):
-                        print(f"🛑 RESCUE: Found SKU {sku} inside '{c.title}'. Linking.")
-                        sp = c
-                        break
+            for c in candidates:
+                # CHECK 1: Is our SKU hiding inside? (100% Match)
+                if any(str(v.sku).strip() == sku for v in c.variants):
+                    print(f"🛑 RESCUE: Found SKU {sku} inside '{c.title}'. Linking.")
+                    sp = c
+                    break
 
-                    # CHECK 2: Fuzzy Title Match (>90%)
-                    ratio = SequenceMatcher(None, c.title.lower(), p['name'].lower()).ratio()
-                    if ratio > 0.90:
-                        if ratio > highest_ratio:
-                            highest_ratio = ratio
-                            best_match = c
-                
-                if not sp and best_match:
-                    print(f"🛑 FUZZY MATCH: Found '{best_match.title}' ({int(highest_ratio*100)}%). Linking.")
-                    sp = best_match
-            except Exception as e:
-                print(f"Rescue Error: {e}")
+                # CHECK 2: Fuzzy Title Match (>90%)
+                ratio = SequenceMatcher(None, c.title.lower(), p['name'].lower()).ratio()
+                if ratio > 0.90:
+                    if ratio > highest_ratio:
+                        highest_ratio = ratio
+                        best_match = c
+            
+            if not sp and best_match:
+                print(f"🛑 FUZZY MATCH: Found '{best_match.title}' ({int(highest_ratio*100)}%). Linking.")
+                sp = best_match
+
+        except Exception as e:
+            print(f"Rescue Error: {e}")
 
     # ========================================================
-    # 3. EXECUTE (CREATE or UPDATE)
+    # 3. EXECUTE
     # ========================================================
     if not sp:
         if not cfg['auto_create']: return "skipped"
@@ -380,9 +377,8 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
                     pm_check.image_hash = new_hash; db.session.commit()
         except: pass
 
-    # --- MAP UPDATE (REBUILD) ---
+    # --- MAP UPDATE ---
     try:
-        # Re-fetch map to be safe
         pm_final = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
         if not pm_final:
             vid = sp.variants[0].id if sp.variants else '0'
