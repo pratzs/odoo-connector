@@ -35,6 +35,12 @@ def sync_odoo_returns(shop_url):
             log_event('Return Sync', 'Error', f"Odoo Search Failed: {e}", shop_url=shop_url)
             return
 
+        # --- FIX START: Log if nothing found so the user isn't left guessing ---
+        if not returns:
+            log_event('Return Sync', 'Info', "Job Complete: No new returns (incoming shipments) found.", shop_url=shop_url)
+            return
+        # --- FIX END -----------------------------------------------------------
+
         for ret in returns:
             if not ret.get('origin'): continue
             shopify_order_name = ret['origin'].replace('ONLINE_', '').strip()
