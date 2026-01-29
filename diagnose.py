@@ -15,10 +15,9 @@ from models import ProductMap, CustomerMap, SyncLog
 # ==========================================
 
 def run_diagnosis(shop_url, target_sku=None, target_email=None):
-    print(f"\n🕵️‍♂️ --- STARTING DIAGNOSIS FOR STORE: {shop_url} ---")
+    print(f"\n🕵️‍♂️ --- STARTING DIAGNOSIS FOR TENANT: {shop_url} ---")
     
     # We import app inside the function or rely on the caller to provide context
-    # This prevents the circular import error when app.py calls this script.
     from app import app
     
     with app.app_context():
@@ -26,12 +25,10 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
         odoo = get_odoo_connection(shop_url)
         if not odoo:
             print(f"❌ FATAL: Could not connect to Odoo for {shop_url}.")
-            print("   (Check if the shop is installed and credentials are correct in the DB)")
             return
 
         if not setup_shopify_session(shop_url):
             print(f"❌ FATAL: Could not connect to Shopify for {shop_url}.")
-            print("   (Check if the Access Token is valid)")
             return
 
         # =====================================================
@@ -42,22 +39,18 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
             
             # 1. CHECK DATABASE MAPPING
             pm = ProductMap.query.filter_by(sku=target_sku, shop_url=shop_url).first()
+            mapped_shopify_id = str(pm.shopify_variant_id) if pm else None
             mapped_odoo_id = pm.odoo_product_id if pm else None
-
+            
             if pm:
                 print(f"   ✅ DB MAPPING: Found! (Shopify Variant ID: {pm.shopify_variant_id} | Odoo ID: {pm.odoo_product_id})")
                 print(f"      - Last Synced: {pm.last_synced_at}")
-                print(f"      - Image Hash: {pm.image_hash}")
             else:
                 print("   ❌ DB MAPPING: NOT FOUND. (This product is unlinked)")
 
             # 2. CHECK ODOO DATA (Active Only)
             print(f"\n   👉 ODOO DATA (Active Only):")
-            
-            # --- CHANGE: STRICTLY ACTIVE PRODUCTS ONLY ---
             domain = [['default_code', '=', target_sku], ['active', '=', True]]
-            
-            # Fields for Pack Logic and Validation
             fields = ['name', 'active', 'sale_ok', 'barcode', 'list_price', 
                       'uom_id', 'sh_is_secondary_unit', 'qty_per_pack', 'image_1920']
             
@@ -70,54 +63,22 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
             
             odoo_prod = None
             odoo_stock = 0
-            
+
             if not odoo_results:
-                 print("      ❌ NOT FOUND IN ODOO (No Active Product with this Internal Reference).")
+                print("      ❌ NOT FOUND IN ODOO (No Active Product with this SKU).")
             else:
-                # --- DUPLICATE CHECK (Active Duplicates are still a problem) ---
                 if len(odoo_results) > 1:
-                    print(f"      ⚠️ CRITICAL WARNING: {len(odoo_results)} ACTIVE PRODUCTS FOUND WITH SKU '{target_sku}'!")
-                    for p in odoo_results:
-                        marker = "👈 (Mapped in DB)" if p['id'] == mapped_odoo_id else ""
-                        print(f"         - [ID: {p['id']}] {p['name']} {marker}")
-                    
-                    # Try to pick the "correct" one (matches DB map)
+                    print(f"      ⚠️ WARNING: {len(odoo_results)} ACTIVE PRODUCTS FOUND IN ODOO!")
+                    # Try to match by ID if mapped, otherwise pick first
                     odoo_prod = next((p for p in odoo_results if p['id'] == mapped_odoo_id), odoo_results[0])
-                    print(f"      ℹ️  Using ID {odoo_prod['id']} for comparison below.")
                 else:
                     odoo_prod = odoo_results[0]
                     print(f"      ✅ Found 1 Active Product (ID: {odoo_prod['id']})")
 
-                # Print Details
                 print(f"      - Name: {odoo_prod['name']}")
-                print(f"      - Active: {odoo_prod['active']}")
                 print(f"      - Price: {odoo_prod['list_price']}")
-                print(f"      - Barcode: {odoo_prod['barcode'] or 'None'}")
                 
-                # --- PACK VS UNIT CHECK ---
-                is_pack = odoo_prod.get('sh_is_secondary_unit')
-                qty = odoo_prod.get('qty_per_pack')
-                print(f"      🔍 PACK LOGIC CHECK:")
-                print(f"         - Is Secondary Unit: {is_pack}")
-                print(f"         - Qty Per Pack: {qty}")
-                if is_pack and qty > 1:
-                    print(f"         => CONCLUSION: This SHOULD sync as a 'Pack' ({qty}x).")
-                else:
-                    print(f"         => CONCLUSION: This should sync as a 'Single Unit'.")
-
-                # --- IMAGE HASH CHECK ---
-                img_data = odoo_prod.get('image_1920')
-                if img_data:
-                    calc_hash = hashlib.md5(img_data.encode('utf-8')).hexdigest()
-                    db_hash = pm.image_hash if pm else "None"
-                    match = "✅ Match" if calc_hash == db_hash else "❌ Mismatch (Will Trigger Sync)"
-                    print(f"      🖼️ IMAGE HASH:")
-                    print(f"         - Odoo Hash: {calc_hash}")
-                    print(f"         - DB Hash:   {db_hash} -> {match}")
-                else:
-                    print(f"      🖼️ IMAGE: No image in Odoo.")
-
-                # --- LIVE INVENTORY CHECK ---
+                # Live Inventory Check
                 try:
                     stock_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
                         'stock.quant', 'read_group', 
@@ -128,54 +89,60 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
                 except Exception as e:
                     print(f"      ⚠️ Stock Fetch Error: {e}")
 
-
-            # 3. CHECK SHOPIFY DATA
+            # 3. CHECK SHOPIFY DATA (Handle Duplicates)
             print(f"\n   👉 SHOPIFY DATA:")
+            target_shopify_variant = None
+            
             try:
-                # Search by SKU
-                variants = shopify.Variant.find(limit=1, params={'sku': target_sku})
-                if variants:
-                    v = variants[0]
-                    p = shopify.Product.find(v.product_id)
-                    print(f"      ✅ Found in Shopify (Variant ID: {v.id})")
-                    print(f"      - Product: {p.title}")
-                    print(f"      - Price: {v.price}")
-                    print(f"      - Stock: {v.inventory_quantity}")
-                    print(f"      - Barcode: {v.barcode}")
-
-                    # 4. FINAL COMPARISON
-                    print(f"\n   ⚖️ COMPARISON (Odoo vs Shopify):")
-                    
-                    if odoo_prod:
-                        # Price Check
-                        p_match = float(v.price) == float(odoo_prod['list_price'])
-                        if p_match:
-                            print(f"      - Price: ✅ Match")
-                        else:
-                            print(f"      - Price: ❌ MISMATCH ({odoo_prod['list_price']} vs {v.price})")
-                        
-                        # Stock Check
-                        s_match = int(v.inventory_quantity) == int(odoo_stock)
-                        if s_match:
-                            print(f"      - Stock: ✅ Match")
-                        else:
-                            print(f"      - Stock: ❌ MISMATCH ({odoo_stock} vs {v.inventory_quantity})")
-                        
-                        # Barcode Check
-                        b_match = str(v.barcode or '') == str(odoo_prod['barcode'] or '')
-                        if b_match:
-                            print(f"      - Barcode: ✅ Match")
-                        else:
-                            print(f"      - Barcode: ❌ MISMATCH ({odoo_prod['barcode']} vs {v.barcode})")
-                            
+                # Find ALL variants with this SKU
+                variants = shopify.Variant.find(params={'sku': target_sku})
+                
+                if not variants:
+                     print("      ❌ NOT FOUND IN SHOPIFY.")
                 else:
-                    print("      ❌ NOT FOUND IN SHOPIFY.")
+                    if len(variants) > 1:
+                        print(f"      ⚠️ DUPLICATE SKU DETECTED: Found {len(variants)} products in Shopify with SKU '{target_sku}':")
+                    
+                    for v in variants:
+                        p = shopify.Product.find(v.product_id)
+                        is_mapped = (str(v.id) == mapped_shopify_id)
+                        marker = "👈 (CORRECT / MAPPED)" if is_mapped else "❌ (DUPLICATE / WRONG)"
+                        
+                        print(f"      🔹 Product: {p.title}")
+                        print(f"         Variant ID: {v.id} {marker}")
+                        print(f"         Price: {v.price} | Stock: {v.inventory_quantity}")
+                        
+                        if is_mapped:
+                            target_shopify_variant = v
+                    
+                    # If we didn't find the mapped one in the list, but list exists, default to first (or none)
+                    if not target_shopify_variant and len(variants) == 1:
+                        target_shopify_variant = variants[0]
+
             except Exception as e:
                 print(f"      ⚠️ Shopify Error: {e}")
 
+            # 4. FINAL COMPARISON (Only if we found the RIGHT one)
+            if odoo_prod and target_shopify_variant:
+                print(f"\n   ⚖️ COMPARISON (Odoo vs Correct Shopify Variant):")
+                v = target_shopify_variant
+                
+                # Price Check
+                if float(v.price) == float(odoo_prod['list_price']):
+                    print(f"      - Price: ✅ Match")
+                else:
+                    print(f"      - Price: ❌ MISMATCH ({odoo_prod['list_price']} vs {v.price})")
+                
+                # Stock Check
+                if int(v.inventory_quantity) == int(odoo_stock):
+                    print(f"      - Stock: ✅ Match")
+                else:
+                    print(f"      - Stock: ❌ MISMATCH ({odoo_stock} vs {v.inventory_quantity})")
+            else:
+                print(f"\n   ⚖️ COMPARISON: Skipping (Could not match Odoo Product to specific Shopify Variant)")
+
             # 5. RECENT LOGS
             print(f"\n   📜 RECENT LOGS (Last 5 for SKU):")
-            # Filter logs strictly by this tenant
             logs = SyncLog.query.filter(SyncLog.shop_url == shop_url)\
                 .filter(SyncLog.message.contains(target_sku))\
                 .order_by(SyncLog.timestamp.desc()).limit(5).all()
@@ -186,66 +153,56 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
             else:
                 print("      (No recent logs found for this SKU)")
 
+    # PART B (Customer) remains the same...
+    if target_email:
+        print(f"\n\n👥 --- DIAGNOSING CUSTOMER: {target_email} ---")
+        
+        # 1. CHECK DB MAP
+        cm = CustomerMap.query.filter_by(email=target_email, shop_url=shop_url).first()
+        if cm:
+            print(f"   ✅ DB MAPPING: Found! (Shopify ID: {cm.shopify_customer_id} | Odoo ID: {cm.odoo_partner_id})")
+        else:
+            print("   ❌ DB MAPPING: NOT FOUND.")
 
-        # =====================================================
-        # 👥 PART B: CUSTOMER DIAGNOSIS (EMAIL)
-        # =====================================================
-        if target_email:
-            print(f"\n\n👥 --- DIAGNOSING CUSTOMER: {target_email} ---")
+        # 2. CHECK ODOO
+        try:
+            partners = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'res.partner', 'search_read', [[['email', '=', target_email]]], {'fields': ['name', 'id', 'parent_id']})
             
-            # 1. CHECK DB MAP
-            cm = CustomerMap.query.filter_by(email=target_email, shop_url=shop_url).first()
-            if cm:
-                print(f"   ✅ DB MAPPING: Found! (Shopify ID: {cm.shopify_customer_id} | Odoo ID: {cm.odoo_partner_id})")
+            if partners:
+                p = partners[0]
+                print(f"   ✅ FOUND IN ODOO: {p['name']} (ID: {p['id']})")
+                if p.get('parent_id'):
+                    print(f"      - Parent Company: {p['parent_id'][1]}")
             else:
-                print("   ❌ DB MAPPING: NOT FOUND.")
+                print("   ❌ NOT FOUND IN ODOO.")
+        except Exception as e:
+            print(f"   ⚠️ Odoo Customer Search Error: {e}")
 
-            # 2. CHECK ODOO
-            try:
-                partners = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                    'res.partner', 'search_read', [[['email', '=', target_email]]], {'fields': ['name', 'id', 'parent_id']})
-                
-                if partners:
-                    p = partners[0]
-                    print(f"   ✅ FOUND IN ODOO: {p['name']} (ID: {p['id']})")
-                    if p.get('parent_id'):
-                        print(f"      - Parent Company: {p['parent_id'][1]}")
-                else:
-                    print("   ❌ NOT FOUND IN ODOO.")
-            except Exception as e:
-                print(f"   ⚠️ Odoo Customer Search Error: {e}")
-
-            # 3. CHECK SHOPIFY
-            try:
-                customers = shopify.Customer.search(query=f"email:{target_email}")
-                if customers:
-                    c = customers[0]
-                    print(f"   ✅ FOUND IN SHOPIFY: {c.first_name} {c.last_name} (ID: {c.id})")
-                    print(f"      - Orders Count: {c.orders_count}")
-                    print(f"      - State: {c.state}")
-                else:
-                    print("   ❌ NOT FOUND IN SHOPIFY.")
-            except Exception as e:
-                print(f"   ⚠️ Shopify Customer Search Error: {e}")
+        # 3. CHECK SHOPIFY
+        try:
+            customers = shopify.Customer.search(query=f"email:{target_email}")
+            if customers:
+                c = customers[0]
+                print(f"   ✅ FOUND IN SHOPIFY: {c.first_name} {c.last_name} (ID: {c.id})")
+                print(f"      - Orders Count: {c.orders_count}")
+                print(f"      - State: {c.state}")
+            else:
+                print("   ❌ NOT FOUND IN SHOPIFY.")
+        except Exception as e:
+            print(f"   ⚠️ Shopify Customer Search Error: {e}")
 
     print("\n🕵️‍♂️ --- DIAGNOSIS COMPLETE ---\n")
 
 if __name__ == "__main__":
     from app import app
-    parser = argparse.ArgumentParser(description="Multi-Tenant Odoo Connector Diagnostic Tool")
-    
-    # Required Argument: Shop URL
-    parser.add_argument('--shop', required=True, help="The Shopify domain (e.g., client.myshopify.com)")
-    
-    # Optional Arguments: What to check
-    parser.add_argument('--sku', help="Product SKU to diagnose")
-    parser.add_argument('--email', help="Customer Email to diagnose")
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--shop', required=True)
+    parser.add_argument('--sku')
+    parser.add_argument('--email')
     args = parser.parse_args()
-    
-    # Ensure at least one target is provided
+
     if not args.sku and not args.email:
-        print("❌ Error: You must provide at least one target to diagnose (--sku or --email).")
         sys.exit(1)
 
     run_diagnosis(args.shop, args.sku, args.email)
