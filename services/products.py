@@ -706,10 +706,22 @@ def fix_variant_mess_task(shop_url, company_id):
                         match.inventory_management = 'shopify'
                         dirty = True
 
-                    # Update core fields
-                    if match.option1 != target['option1']: match.option1 = target['option1']; dirty = True
-                    if match.price != target['price']: match.price = target['price']; dirty = True
-                    if match.sku != target['sku']: match.sku = target['sku']; dirty = True
+                   # Update core fields (Using getattr to prevent AttributeError on new objects)
+                    current_opt1 = getattr(match, 'option1', None)
+                    current_price = getattr(match, 'price', None)
+                    current_sku = getattr(match, 'sku', None)
+
+                    if current_opt1 != target['option1']: 
+                        match.option1 = target['option1']
+                        dirty = True
+                    
+                    if str(current_price) != str(target['price']): 
+                        match.price = target['price']
+                        dirty = True
+                    
+                    if current_sku != target['sku']: 
+                        match.sku = target['sku']
+                        dirty = True
                     
                     final_list.append(match)
 
