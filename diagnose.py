@@ -15,7 +15,7 @@ from models import ProductMap, CustomerMap, SyncLog
 # ==========================================
 
 def run_diagnosis(shop_url, target_sku=None, target_email=None):
-    print(f"\n🕵️‍♂️ --- STARTING DIAGNOSIS FOR TENANT: {shop_url} ---")
+    print(f"\n🕵️‍♂️ --- STARTING DIAGNOSIS FOR STORE: {shop_url} ---")
     
     # We import app inside the function or rely on the caller to provide context
     # This prevents the circular import error when app.py calls this script.
