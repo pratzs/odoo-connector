@@ -688,7 +688,7 @@ def shopify_webhook():
 
     # 4. Handle Products -> DEFAULT QUEUE (Because it's heavy/less urgent)
     elif topic == 'products/create': 
-        q_default.enqueue(background_product_sync, shop_url, data)
+       # q_default.enqueue(background_product_sync, shop_url, data)
         return "Product Received", 200
 
     return "Topic ignored", 200
@@ -2404,8 +2404,15 @@ def api_inspect_jobs(status):
         elif status == 'pending':
             job_ids = queue.get_job_ids()
             
-        # Get details for the first 50 jobs (Newest first)
-        for jid in job_ids[:50]:
+        # --- SORTING LOGIC ---
+        # 1. Pending: Keep standard order (Oldest/Next-to-run first)
+        # 2. Failed/Active: Reverse to show Newest first
+        target_ids = job_ids[:50] 
+        if status in ['failed', 'active']:
+            target_ids = job_ids[-50:] # Grab the LAST 50 (Newest)
+            target_ids.reverse()       # Flip them so Newest is at top
+
+        for jid in target_ids:
             try:
                 job = queue.fetch_job(jid)
                 if not job: continue
