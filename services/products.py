@@ -273,17 +273,43 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
                     sp = None
 
     # --- Create Logic ---
+   # --- Create Logic ---
     if not sp:
         if not cfg['auto_create']: return "skipped"
-        sp = shopify.Product(); sp.title = p['name']; sp.vendor = vendor_name
-        sp.status = 'active' if cfg['auto_publish'] else 'draft'
-        sp.published_scope = 'global'
-        # Category from Memory
-        if p.get('public_categ_ids'):
-            cat_id = p['public_categ_ids'][0]
-            if cat_id in categ_map: sp.product_type = categ_map[cat_id]
-        
-        if action_log != "archived": action_log = "created"
+
+        # ============================================================
+        # 🛑 TITLE GUARD: The Final Safety Net
+        # If SKU search failed (API glitch), check by NAME before creating.
+        # ============================================================
+        try:
+            # Search Shopify for any product with this title
+            duplicates_by_name = shopify.Product.find(title=p['name'], status='any')
+            
+            # Look for an EXACT match (ignoring case)
+            name_match = next((x for x in duplicates_by_name if x.title.strip().lower() == p['name'].strip().lower()), None)
+            
+            if name_match:
+                print(f"🛑 TITLE GUARD: SKU search missed, but found '{p['name']}' (ID: {name_match.id}). Linking instead of creating.")
+                sp = name_match
+                # We found it, so we switch mode from "Create" to "Update"
+                action_log = "updated"
+        except Exception as e:
+            print(f"Title Guard Warning: {e}")
+
+        # ============================================================
+        # IF STILL NOT FOUND -> TRULY NEW -> CREATE IT
+        # ============================================================
+        if not sp:
+            sp = shopify.Product(); sp.title = p['name']; sp.vendor = vendor_name
+            sp.status = 'active' if cfg['auto_publish'] else 'draft'
+            sp.published_scope = 'global'
+            
+            # Category from Memory
+            if p.get('public_categ_ids'):
+                cat_id = p['public_categ_ids'][0]
+                if cat_id in categ_map: sp.product_type = categ_map[cat_id]
+            
+            if action_log != "archived": action_log = "created"
 
     if sp.status == 'archived': sp.status = 'active'
 
