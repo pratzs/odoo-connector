@@ -16,19 +16,19 @@ import ssl
 import gc
 import smtplib
 from urllib.parse import urlparse, parse_qs
-
 from flask import Flask, request, jsonify, render_template, session, url_for, render_template_string, redirect
+from contextlib import redirect_stdout
+import io
+from diagnose import run_diagnosis
 from datetime import datetime, timedelta
 from functools import wraps
 from sqlalchemy import text
 from email.message import EmailMessage
 from rq import Retry
-
 # --- CUSTOM MODULES ---
 from models import db, ProductMap, SyncLog, AppSetting, CustomerMap, ProcessedOrder, Shop
 from odoo_client import OdooClient
 # from security_utils import require_shopify_session 
-
 # --- UTILS (Merged & Clean) ---
 from utils import (
     conn, 
@@ -42,7 +42,6 @@ from utils import (
     setup_shopify_session, 
     automate_webhook_registration
 )
-
 # --- SERVICES ---
 from services.orders import process_order_data
 from services.products import (
@@ -2369,53 +2368,26 @@ def api_get_unmapped_products():
         return jsonify({'error': str(e)}), 500
         
 
-@app.route('/api/diagnose/<sku>', methods=['GET'])
+@app.route('/api/diagnose/run', methods=['POST'])
 @require_shopify_session
-def api_diagnose_product(sku):
+def api_run_deep_diagnose():
     shop_url = request.args.get('shop')
-    import io, time
-    from contextlib import redirect_stdout
+    data = request.json
+    sku = data.get('sku')
+    email = data.get('email')
+
+    if not sku and not email:
+        return jsonify({"success": False, "report": "Please provide a SKU or Email."})
+
     f = io.StringIO()
-    
-    with redirect_stdout(f):
-        print(f"🕵️‍♂️ SIMULATED SYNC TRACE FOR SKU: '{sku}'")
-        print(f"--------------------------------------------------")
+    try:
+        with redirect_stdout(f):
+            print(f"🚀 Launching Deep Scan for {shop_url}...\n")
+            run_diagnosis(shop_url, target_sku=sku, target_email=email)
+        return jsonify({"success": True, "report": f.getvalue()})
+    except Exception as e:
+        return jsonify({"success": False, "report": f"CRITICAL SYSTEM ERROR: {str(e)}"})
 
-        # 1. BUILD LOCAL CACHE (The same way the sync now does)
-        print(f"👉 STEP 1: Building Local Shopify Cache...")
-        shopify_sku_map = {}
-        try:
-            # We fetch all active products to see if A0001 is visible to the API
-            page = shopify.Product.find(limit=250, status='active')
-            while page:
-                for sp in page:
-                    for v in sp.variants:
-                        if v.sku:
-                            shopify_sku_map[str(v.sku).strip()] = sp
-                if page.has_next_page():
-                    page = page.next_page()
-                    time.sleep(0.2)
-                else:
-                    break
-            print(f"✅ Local Cache Built: {len(shopify_sku_map)} SKUs loaded.")
-        except Exception as e:
-            print(f"❌ Cache Build Failed: {e}")
-
-        # 2. LOOKUP SKU IN CACHE
-        print(f"\n👉 STEP 2: Searching Cache for '{sku}'...")
-        match = shopify_sku_map.get(str(sku).strip())
-        
-        if match:
-            print(f"🎯 MATCH FOUND!")
-            print(f"   Product Title: '{match.title}'")
-            print(f"   Product ID: {match.id}")
-            print(f"   CONCLUSION: The new 'Local Cache' strategy will successfully LINK this product.")
-        else:
-            print(f"❌ NOT FOUND IN CACHE.")
-            print(f"   Current SKUs in Cache (First 10): {list(shopify_sku_map.keys())[:10]}")
-            print(f"   CONCLUSION: Even with a full scan, Shopify is not sending this product to the API.")
-
-    return f.getvalue().replace('\n', '<br>')
 
 @app.route('/api/jobs/<status>', methods=['GET'])
 @require_shopify_session
