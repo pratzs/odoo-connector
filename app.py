@@ -1990,24 +1990,30 @@ def sync_images_only_manual(shop_url):
 def emergency_purge_junk_products(shop_url):
     """
     EMERGENCY TOOL: Destroys ACTIVE products in Shopify not found in Odoo.
-    UPDATED: Now ignores 'Archived' and 'Draft' products to protect history.
+    FIXED: Now correctly fetches Company ID from Shop table.
     """
     with app.app_context():
+        # 1. Connect
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): 
-            log_event('Cleanup', 'Error', "Connection failed. Aborting.")
+            log_event('Cleanup', 'Error', "Connection failed. Aborting.", shop_url=shop_url)
             return
 
-        company_id = get_config('odoo_company_id', shop_url=shop_url)
+        # 2. FIX: Fetch Company ID correctly from Shop Table
+        shop_record = Shop.query.filter_by(shop_url=shop_url).first()
+        company_id = shop_record.odoo_company_id if shop_record else None
+
         if not company_id:
-            log_event('Cleanup', 'Error', "No Company ID set. Aborting.")
+            log_event('Cleanup', 'Error', "No Company ID set. Please save settings first.", shop_url=shop_url)
             return
 
-        log_event('Cleanup', 'Info', f"Fetching valid SKUs for Company {company_id}...")
+        log_event('Cleanup', 'Info', f"Fetching valid SKUs for Company {company_id}...", shop_url=shop_url)
         
+        # 3. Get Valid Odoo SKUs
         domain = [
             ['type', 'in', ['product', 'consu']],
-            ['company_id', '=', int(company_id)]
+            ['company_id', '=', int(company_id)],
+            ['active', '=', True] # Only keep Active products
         ]
         
         try:
@@ -2017,43 +2023,49 @@ def emergency_purge_junk_products(shop_url):
                 {'fields': ['default_code']}
             )
         except Exception as e:
-            log_event('Cleanup', 'Error', f"Odoo Error: {e}")
+            log_event('Cleanup', 'Error', f"Odoo Error: {e}", shop_url=shop_url)
             return
 
         valid_skus = set()
         for p in valid_products:
             if p.get('default_code'):
                 valid_skus.add(p['default_code'])
+                # Also whitelist the UNIT version if you use packs
                 valid_skus.add(f"{p['default_code']}-UNIT")
 
         if len(valid_skus) < 5:
-            log_event('Cleanup', 'Error', "Safety Stop: Too few products found. Aborting.")
+            log_event('Cleanup', 'Error', "Safety Stop: Too few products found in Odoo. Aborting to prevent accidental wipe.", shop_url=shop_url)
             return
 
-        log_event('Cleanup', 'Info', f"Found {len(valid_skus)} valid SKUs. Scanning Active Shopify Products...")
+        log_event('Cleanup', 'Info', f"Found {len(valid_skus)} valid SKUs. Scanning Active Shopify Products...", shop_url=shop_url)
 
-        # FIX: Added status='active' to protect Archived/Draft items
+        # 4. Scan & Destroy
+        # We only look at ACTIVE products. We ignore Archived.
         page = shopify.Product.find(limit=250, status='active')
         deleted_count = 0
         
         while page:
             for sp in page:
+                # Get SKU from first variant
                 sku = sp.variants[0].sku if sp.variants else None
                 
-                # If SKU is missing or NOT in our valid list, delete it
+                # Logic: If SKU is missing OR it is NOT in our valid Odoo list -> Delete it
                 if not sku or sku not in valid_skus:
                     try:
                         sp.destroy()
                         deleted_count += 1
-                        if deleted_count % 50 == 0:
-                            log_event('Cleanup', 'Warning', f"Purged {deleted_count} active junk products...")
+                        if deleted_count % 10 == 0:
+                            print(f"Purged junk: {sp.title} ({sku})")
                     except Exception as e:
                         print(f"Failed to delete {sp.id}: {e}")
             
-            if page.has_next_page(): page = page.next_page()
-            else: break
+            if page.has_next_page():
+                page = page.next_page()
+            else:
+                break
         
-        log_event('Cleanup', 'Success', f"Purge Complete. Deleted {deleted_count} active junk products.")
+        log_event('Cleanup', 'Success', f"Purge Complete. Deleted {deleted_count} active junk products.", shop_url=shop_url)
+        
 
 def check_for_corrupted_categories(shop_url):
     with app.app_context():
