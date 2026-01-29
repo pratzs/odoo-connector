@@ -29,6 +29,12 @@ def sync_odoo_cancellations(shop_url):
             log_event('Cancel Sync', 'Error', f"Odoo Search Failed: {e}", shop_url=shop_url)
             return
 
+        # --- FIX START: Log if nothing found so the user isn't left guessing ---
+        if not cancelled_orders:
+            log_event('Cancel Sync', 'Info', "Job Complete: No new cancellations found in Odoo.", shop_url=shop_url)
+            return
+        # --- FIX END -----------------------------------------------------------
+
         sync_count = 0
         for o_order in cancelled_orders:
             ref = o_order.get('client_order_ref', '')
@@ -47,6 +53,7 @@ def sync_odoo_cancellations(shop_url):
                     log_event('Cancel Sync', 'Success', f"Cancelled Shopify Order {shopify_name}", shop_url=shop_url)
             
             except Exception as e:
+                # Ignore 422 errors (usually means "Already Cancelled")
                 if "422" not in str(e):
                     log_event('Cancel Sync', 'Error', f"Failed to cancel {shopify_name}: {e}", shop_url=shop_url)
 
