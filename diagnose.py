@@ -99,7 +99,6 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
                     print(f"      🖼️ IMAGE: No image in Odoo.")
 
                 # --- LIVE INVENTORY CHECK ---
-                # Using the fast read_group method
                 try:
                     stock_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
                         'stock.quant', 'read_group', 
@@ -131,17 +130,29 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
                     print(f"\n   ⚖️ COMPARISON (Odoo vs Shopify):")
                     
                     if odoo_prod:
-                        # Price
+                        # --- FIX: UNWRAP COMPLEX F-STRINGS ---
+                        
+                        # Price Check
                         p_match = float(v.price) == float(odoo_prod['list_price'])
-                        print(f"      - Price: {'✅ Match' if p_match else f'❌ MISMATCH ({odoo_prod['list_price']} vs {v.price})'}")
+                        if p_match:
+                            print(f"      - Price: ✅ Match")
+                        else:
+                            print(f"      - Price: ❌ MISMATCH ({odoo_prod['list_price']} vs {v.price})")
                         
-                        # Stock
+                        # Stock Check
                         s_match = int(v.inventory_quantity) == int(odoo_stock)
-                        print(f"      - Stock: {'✅ Match' if s_match else f'❌ MISMATCH ({odoo_stock} vs {v.inventory_quantity})'}")
+                        if s_match:
+                            print(f"      - Stock: ✅ Match")
+                        else:
+                            print(f"      - Stock: ❌ MISMATCH ({odoo_stock} vs {v.inventory_quantity})")
                         
-                        # Barcode
+                        # Barcode Check
                         b_match = str(v.barcode or '') == str(odoo_prod['barcode'] or '')
-                        print(f"      - Barcode: {'✅ Match' if b_match else f'❌ MISMATCH ({odoo_prod['barcode']} vs {v.barcode})'}")
+                        if b_match:
+                            print(f"      - Barcode: ✅ Match")
+                        else:
+                            print(f"      - Barcode: ❌ MISMATCH ({odoo_prod['barcode']} vs {v.barcode})")
+                            
                 else:
                     print("      ❌ NOT FOUND IN SHOPIFY.")
             except Exception as e:
