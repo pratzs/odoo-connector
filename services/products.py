@@ -229,15 +229,16 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     if main_ratio > 1.0 or has_secondary:
         is_pack = True
 
-    # 3. Determine Names
-    main_uom_name = "Outer"
-    if p.get('uom_id'):
-        u_id = p['uom_id'][0]
-        if u_id in uom_map:
-            main_uom_name = uom_map[u_id]['name']
-            # If the Odoo UOM name is just "Units" but ratio is 24, force a descriptive name
-            if main_ratio > 1 and "per pack" not in main_uom_name.lower():
-                main_uom_name = f"{int(main_ratio)} per pack"
+    # 3. Main UOM Name
+                main_uom_name = "Outer"
+                if p.get('uom_id') and p['uom_id'][0] in uom_map:
+                    # Get name, ensure it is a string (handle Odoo False)
+                    raw_name = uom_map[p['uom_id'][0]]['name']
+                    main_uom_name = str(raw_name) if raw_name else "Outer"
+                    
+                    # Safe check using str()
+                    if main_ratio > 1 and "per pack" not in main_uom_name.lower():
+                        main_uom_name = f"{int(main_ratio)} per pack"
 
     desired_variants = []
     raw_price = float(p.get('list_price', 0.0))
