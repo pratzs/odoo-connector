@@ -201,18 +201,17 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
         log_event('Product Sync', 'Info', f"✅ {batch_name}: New: {stats['created']}, Updated: {stats['updated']}", shop_url=shop_url)
 
 # =====================================================
-# 3. SINGLE PRODUCT LOGIC (FIXED SEARCH & RESCUE)
+# 3. SINGLE PRODUCT LOGIC (FIXED SIGNATURE & LOGIC)
 # =====================================================
-def process_product_data(p, odoo, shop_url, cfg, uom_map):
+def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db_map_dict, shopify_product_cache):
     from app import db
     
     if not p.get('active'): return "skipped"
     sku = str(p.get('default_code') or '').strip()
     if not sku: return "skipped"
 
-    # 1. CHECK DB MAP
-    # (Since map is empty/rebuilding, this returns None mostly)
-    pm = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
+    # 1. CHECK DB MAP (Use Memory Cache for Speed)
+    pm = db_map_dict.get(sku)
     
     # Ownership Guard
     if pm and pm.odoo_product_id != p['id']:
@@ -257,21 +256,29 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
     sp = None
     action_log = "updated"
 
-    # A. Check Map (Trust database first)
-    if pm:
-        try:
-            v = shopify.Variant.find(pm.shopify_variant_id)
-            sp = shopify.Product.find(v.product_id)
-        except:
-            # Map is stale/dead. Delete it.
-            db.session.delete(pm); db.session.commit(); pm = None
+    # A. Check Bulk Cache (Fastest)
+    if sku in shopify_product_cache:
+        sp = shopify_product_cache[sku]
 
-    # B. Check SKU (Triple-Check for Safety)
+    # B. If not in cache, check Map, then Triple-Check API
     if not sp:
-        existing_variant = safe_find_variant_by_sku(sku)
-        if existing_variant:
-            try: sp = shopify.Product.find(existing_variant.product_id)
-            except: sp = None
+        # Check Map
+        if pm and pm.shopify_variant_id and pm.shopify_variant_id != '0':
+            try:
+                v = shopify.Variant.find(pm.shopify_variant_id)
+                sp = shopify.Product.find(v.product_id)
+            except:
+                # Map is dead. Delete it.
+                # Note: We can't easily delete from DB here without session attach, 
+                # but we can ignore it and let the update rebuild it.
+                pm = None
+
+        # Check SKU (Triple-Check for Safety)
+        if not sp:
+            existing_variant = safe_find_variant_by_sku(sku)
+            if existing_variant:
+                try: sp = shopify.Product.find(existing_variant.product_id)
+                except: sp = None
 
     # C. RESCUE GUARD (Search by Name)
     # 🛑 We run this ALWAYS to find and link existing products.
@@ -310,8 +317,12 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
         sp = shopify.Product(); sp.title = p['name']; sp.vendor = vendor_name
         sp.status = 'active' if cfg['auto_publish'] else 'draft'
         sp.published_scope = 'global'
-        cat_name = odoo.get_public_category_name(p.get('public_categ_ids', []))
-        if cat_name: sp.product_type = cat_name
+        
+        # Category from Memory
+        if p.get('public_categ_ids'):
+            cat_id = p['public_categ_ids'][0]
+            if cat_id in categ_map: sp.product_type = categ_map[cat_id]
+            
         if action_log != "archived": action_log = "created"
 
     if sp.status == 'archived': sp.status = 'active'
@@ -320,8 +331,8 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
     if cfg['title']: sp.title = p['name']
     if cfg['vendor']: sp.vendor = vendor_name
     if cfg['desc']: sp.body_html = p.get('description_sale') or ''
-    if cfg['tags']:
-        t_names = odoo.get_tag_names(p.get('product_tag_ids', []))
+    if cfg['tags'] and p.get('product_tag_ids'):
+        t_names = [tag_map[tid] for tid in p['product_tag_ids'] if tid in tag_map]
         if t_names: sp.tags = ",".join(t_names)
 
     # Clean Options
@@ -377,8 +388,8 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
             img_raw = p['image_1920']
             if isinstance(img_raw, bytes): img_raw = img_raw.decode('utf-8')
             new_hash = hashlib.md5(img_raw.encode('utf-8')).hexdigest()
-            pm_check = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
-            current_hash = pm_check.image_hash if pm_check else ""
+            # Check cached map first
+            current_hash = pm.image_hash if pm else ""
             
             if new_hash != current_hash or not sp.images:
                 if sp.images:
@@ -387,12 +398,16 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
                         except: pass
                 img = shopify.Image(prefix_options={'product_id': sp.id})
                 img.attachment = img_raw; img.save()
-                if pm_check:
-                    pm_check.image_hash = new_hash; db.session.commit()
+                
+                # We need to query DB to update hash specifically
+                pm_upd = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
+                if pm_upd:
+                    pm_upd.image_hash = new_hash; db.session.commit()
         except: pass
 
     # Save Map
     try:
+        # We query fresh to ensure we have the session attached
         pm_final = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
         if not pm_final:
             pm_final = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=valid_vid, shop_url=shop_url)
