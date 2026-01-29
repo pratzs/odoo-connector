@@ -1,6 +1,7 @@
 import argparse
 import sys
 import hashlib
+import json
 import shopify
 # NOTE: We do NOT import app at the top to avoid circular import crashes.
 from utils import get_odoo_connection, setup_shopify_session
@@ -9,15 +10,10 @@ from models import ProductMap, CustomerMap, SyncLog
 # ==========================================
 # 🎯 DIAGNOSE TOOL (MULTI-TENANT & DEEP SCAN)
 # ==========================================
-# Usage Examples: 
-#   python diagnose.py --shop=client.myshopify.com --sku=A123
-#   python diagnose.py --shop=client.myshopify.com --email=customer@example.com
-# ==========================================
 
 def run_diagnosis(shop_url, target_sku=None, target_email=None):
     print(f"\n🕵️‍♂️ --- STARTING DIAGNOSIS FOR TENANT: {shop_url} ---")
     
-    # We import app inside the function or rely on the caller to provide context
     from app import app
     
     with app.app_context():
@@ -39,7 +35,8 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
             
             # 1. CHECK DATABASE MAPPING
             pm = ProductMap.query.filter_by(sku=target_sku, shop_url=shop_url).first()
-            mapped_shopify_id = str(pm.shopify_variant_id) if pm else None
+            # Shopify IDs in DB are just numbers, but GraphQL returns "gid://shopify/ProductVariant/..."
+            mapped_shopify_id_numeric = str(pm.shopify_variant_id) if pm else None
             mapped_odoo_id = pm.odoo_product_id if pm else None
             
             if pm:
@@ -69,7 +66,6 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
             else:
                 if len(odoo_results) > 1:
                     print(f"      ⚠️ WARNING: {len(odoo_results)} ACTIVE PRODUCTS FOUND IN ODOO!")
-                    # Try to match by ID if mapped, otherwise pick first
                     odoo_prod = next((p for p in odoo_results if p['id'] == mapped_odoo_id), odoo_results[0])
                 else:
                     odoo_prod = odoo_results[0]
@@ -89,38 +85,65 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
                 except Exception as e:
                     print(f"      ⚠️ Stock Fetch Error: {e}")
 
-            # 3. CHECK SHOPIFY DATA (Handle Duplicates)
-            print(f"\n   👉 SHOPIFY DATA:")
+            # 3. CHECK SHOPIFY DATA (Using GraphQL for Precision)
+            print(f"\n   👉 SHOPIFY DATA (GraphQL Search):")
             target_shopify_variant = None
             
             try:
-                # Find ALL variants with this SKU
-                variants = shopify.Variant.find(params={'sku': target_sku})
+                # Query matches SKU exactly and pulls first 50 EXACT matches
+                gql_query = """
+                {
+                  productVariants(first: 50, query: "sku:%s") {
+                    edges {
+                      node {
+                        id
+                        sku
+                        price
+                        inventoryQuantity
+                        barcode
+                        product {
+                          title
+                        }
+                      }
+                    }
+                  }
+                }
+                """ % target_sku
                 
-                if not variants:
+                client = shopify.GraphQL()
+                result = client.execute(gql_query)
+                data = json.loads(result)
+                
+                edges = data.get('data', {}).get('productVariants', {}).get('edges', [])
+                
+                if not edges:
                      print("      ❌ NOT FOUND IN SHOPIFY.")
                 else:
-                    if len(variants) > 1:
-                        print(f"      ⚠️ DUPLICATE SKU DETECTED: Found {len(variants)} products in Shopify with SKU '{target_sku}':")
+                    if len(edges) > 1:
+                        print(f"      ⚠️ DUPLICATE SKU DETECTED: Found {len(edges)} variants in Shopify with SKU '{target_sku}':")
                     
-                    for v in variants:
-                        p = shopify.Product.find(v.product_id)
-                        is_mapped = (str(v.id) == mapped_shopify_id)
+                    for edge in edges:
+                        node = edge['node']
+                        # GraphQL ID looks like "gid://shopify/ProductVariant/123456"
+                        # We extract just the number to compare
+                        v_id_numeric = node['id'].split('/')[-1]
+                        
+                        is_mapped = (v_id_numeric == mapped_shopify_id_numeric)
                         marker = "👈 (CORRECT / MAPPED)" if is_mapped else "❌ (DUPLICATE / WRONG)"
                         
-                        print(f"      🔹 Product: {p.title}")
-                        print(f"         Variant ID: {v.id} {marker}")
-                        print(f"         Price: {v.price} | Stock: {v.inventory_quantity}")
+                        print(f"      🔹 Product: {node['product']['title']}")
+                        print(f"         Variant ID: {v_id_numeric} {marker}")
+                        print(f"         Price: {node['price']} | Stock: {node['inventoryQuantity']}")
                         
                         if is_mapped:
-                            target_shopify_variant = v
+                            target_shopify_variant = node
                     
-                    # If we didn't find the mapped one in the list, but list exists, default to first (or none)
-                    if not target_shopify_variant and len(variants) == 1:
-                        target_shopify_variant = variants[0]
+                    # If mapped variant not found in list (weird), try just taking the first one if only 1 exists
+                    if not target_shopify_variant and len(edges) == 1:
+                        target_shopify_variant = edges[0]['node']
 
             except Exception as e:
-                print(f"      ⚠️ Shopify Error: {e}")
+                print(f"      ⚠️ Shopify GraphQL Error: {e}")
 
             # 4. FINAL COMPARISON (Only if we found the RIGHT one)
             if odoo_prod and target_shopify_variant:
@@ -128,16 +151,27 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
                 v = target_shopify_variant
                 
                 # Price Check
-                if float(v.price) == float(odoo_prod['list_price']):
+                if float(v['price']) == float(odoo_prod['list_price']):
                     print(f"      - Price: ✅ Match")
                 else:
-                    print(f"      - Price: ❌ MISMATCH ({odoo_prod['list_price']} vs {v.price})")
+                    print(f"      - Price: ❌ MISMATCH ({odoo_prod['list_price']} vs {v['price']})")
                 
                 # Stock Check
-                if int(v.inventory_quantity) == int(odoo_stock):
+                if int(v['inventoryQuantity']) == int(odoo_stock):
                     print(f"      - Stock: ✅ Match")
                 else:
-                    print(f"      - Stock: ❌ MISMATCH ({odoo_stock} vs {v.inventory_quantity})")
+                    print(f"      - Stock: ❌ MISMATCH ({odoo_stock} vs {v['inventoryQuantity']})")
+                
+                # Barcode Check
+                # v['barcode'] can be None in GraphQL
+                sp_barcode = v.get('barcode') or ''
+                od_barcode = odoo_prod.get('barcode') or ''
+                
+                if str(sp_barcode) == str(od_barcode):
+                    print(f"      - Barcode: ✅ Match")
+                else:
+                    print(f"      - Barcode: ❌ MISMATCH ({od_barcode} vs {sp_barcode})")
+
             else:
                 print(f"\n   ⚖️ COMPARISON: Skipping (Could not match Odoo Product to specific Shopify Variant)")
 
@@ -153,44 +187,36 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
             else:
                 print("      (No recent logs found for this SKU)")
 
-    # PART B (Customer) remains the same...
+    # PART B (Customer) - Keep as is
     if target_email:
         print(f"\n\n👥 --- DIAGNOSING CUSTOMER: {target_email} ---")
         
-        # 1. CHECK DB MAP
         cm = CustomerMap.query.filter_by(email=target_email, shop_url=shop_url).first()
         if cm:
             print(f"   ✅ DB MAPPING: Found! (Shopify ID: {cm.shopify_customer_id} | Odoo ID: {cm.odoo_partner_id})")
         else:
             print("   ❌ DB MAPPING: NOT FOUND.")
 
-        # 2. CHECK ODOO
         try:
             partners = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                 'res.partner', 'search_read', [[['email', '=', target_email]]], {'fields': ['name', 'id', 'parent_id']})
-            
             if partners:
                 p = partners[0]
                 print(f"   ✅ FOUND IN ODOO: {p['name']} (ID: {p['id']})")
-                if p.get('parent_id'):
-                    print(f"      - Parent Company: {p['parent_id'][1]}")
             else:
                 print("   ❌ NOT FOUND IN ODOO.")
         except Exception as e:
-            print(f"   ⚠️ Odoo Customer Search Error: {e}")
+            print(f"   ⚠️ Odoo Error: {e}")
 
-        # 3. CHECK SHOPIFY
         try:
             customers = shopify.Customer.search(query=f"email:{target_email}")
             if customers:
                 c = customers[0]
                 print(f"   ✅ FOUND IN SHOPIFY: {c.first_name} {c.last_name} (ID: {c.id})")
-                print(f"      - Orders Count: {c.orders_count}")
-                print(f"      - State: {c.state}")
             else:
                 print("   ❌ NOT FOUND IN SHOPIFY.")
         except Exception as e:
-            print(f"   ⚠️ Shopify Customer Search Error: {e}")
+            print(f"   ⚠️ Shopify Error: {e}")
 
     print("\n🕵️‍♂️ --- DIAGNOSIS COMPLETE ---\n")
 
