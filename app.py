@@ -2326,6 +2326,21 @@ def api_job_action(action, job_id):
         
     return jsonify({'success': False, 'message': 'Invalid Action'})
 
+@app.route('/api/jobs/clear_failed', methods=['POST'])
+@require_shopify_session
+def clear_failed_jobs():
+    from utils import q_default
+    from rq.registry import FailedJobRegistry
+    
+    registry = FailedJobRegistry(queue=q_default)
+    count = len(registry)
+    
+    # Delete all failed jobs
+    for job_id in registry.get_job_ids():
+        registry.remove(job_id, delete_job=True)
+        
+    return jsonify({'success': True, 'message': f'Cleared {count} failed jobs.'})
+
 # Start scheduler thread
 # t = threading.Thread(target=run_schedule, daemon=True)
 # t.start()
