@@ -190,7 +190,7 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
         log_event('Product Sync', 'Info', f"✅ {batch_name}: New: {stats['created']}, Updated: {stats['updated']}", shop_url=shop_url)
 
 # =====================================================
-# 3. SINGLE PRODUCT LOGIC (FORCED SEARCH & RESCUE)
+# 3. SINGLE PRODUCT LOGIC (DEFENSIVE & STRICT)
 # =====================================================
 def process_product_data(p, odoo, shop_url, cfg, uom_map):
     from app import db
@@ -199,10 +199,9 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
     sku = str(p.get('default_code') or '').strip()
     if not sku: return "skipped"
 
-    # 1. CHECK DB MAP (From Memory)
+    # 1. CHECK DB MAP
     pm = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
     
-    # Ownership Guard
     if pm and pm.odoo_product_id != p['id']:
         print(f"⚠️ BLOCKING: SKU {sku} already claimed by Odoo {pm.odoo_product_id}. Skipping.")
         return "skipped"
@@ -241,7 +240,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
         desired_variants.append({'option1': 'Unit', 'price': str(round(raw_price / ratio, 2) if ratio > 0 else 0.0), 'sku': f"{sku}-UNIT", 'barcode': '', 'cost': str(round(raw_cost / ratio, 2) if ratio > 0 else 0.0)})
 
     # ========================================================
-    # 2. FIND SHOPIFY PRODUCT (TRIPLE CHECK + FORCED RESCUE)
+    # 2. FIND SHOPIFY PRODUCT
     # ========================================================
     sp = None
     action_log = "updated"
@@ -261,38 +260,29 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
             try: sp = shopify.Product.find(existing_variant.product_id)
             except: sp = None
 
-    # C. RESCUE GUARD: Run this ALWAYS (Fixes the "0 Updated" issue)
+    # C. RESCUE GUARD (Search by Name)
     if not sp:
         try:
-            # Search by First Word Only
             first_word = p['name'].split()[0]
             first_word = "".join(ch for ch in first_word if ch.isalnum())
-            
-            # 🛑 CRITICAL: We search even if auto_create is OFF, to find existing links.
             candidates = shopify.Product.find(title=first_word, status='any', limit=50)
+            
             best_match = None
             highest_ratio = 0.0
 
             for c in candidates:
-                # CHECK 1: Is our SKU hiding inside? (100% Match)
                 if any(str(v.sku).strip() == sku for v in c.variants):
                     print(f"🛑 RESCUE: Found SKU {sku} inside '{c.title}'. Linking.")
-                    sp = c
-                    break
+                    sp = c; break
 
-                # CHECK 2: Fuzzy Title Match (>90%)
                 ratio = SequenceMatcher(None, c.title.lower(), p['name'].lower()).ratio()
-                if ratio > 0.90:
-                    if ratio > highest_ratio:
-                        highest_ratio = ratio
-                        best_match = c
+                if ratio > 0.90 and ratio > highest_ratio:
+                    highest_ratio = ratio; best_match = c
             
             if not sp and best_match:
                 print(f"🛑 FUZZY MATCH: Found '{best_match.title}' ({int(highest_ratio*100)}%). Linking.")
                 sp = best_match
-
-        except Exception as e:
-            print(f"Rescue Error: {e}")
+        except: pass
 
     # ========================================================
     # 3. EXECUTE
@@ -344,18 +334,27 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
         if cfg['barcode'] and des['barcode']: match.barcode = des['barcode']
         match.inventory_management = 'shopify'
         final_vars.append(match)
+    
     sp.variants = final_vars
-    sp.save()
+    try:
+        sp.save()
+    except Exception as e:
+        print(f"Variant Save Error {sku}: {e}")
+        return "error"
 
-    # Cost Sync
-    if sp.variants and cfg['cost']:
-        for v in sp.variants:
-            d = next((x for x in desired_variants if x['sku'] == v.sku), None)
-            if d and v.inventory_item_id:
-                try:
-                    ii = shopify.InventoryItem.find(v.inventory_item_id)
-                    ii.cost = d['cost']; ii.save()
-                except: pass
+    # ========================================================
+    # 4. MAP UPDATE (STRICT VALIDATION)
+    # ========================================================
+    # 🛑 CRITICAL FIX: Do NOT write to DB if sp.variants is empty.
+    # This prevents the '0' ID Zombie Bug.
+    if not sp.variants:
+        print(f"❌ INVALID PRODUCT: {sku} processed but has NO variants. Skipping Map Update.")
+        return "error"
+
+    valid_vid = str(sp.variants[0].id)
+    if valid_vid == '0' or not valid_vid:
+        print(f"❌ INVALID ID: {sku} has variant ID '0'. Skipping Map Update.")
+        return "error"
 
     # Image Sync
     if cfg['images'] and p.get('image_1920'):
@@ -377,16 +376,13 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map):
                     pm_check.image_hash = new_hash; db.session.commit()
         except: pass
 
-    # --- MAP UPDATE ---
     try:
         pm_final = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
         if not pm_final:
-            vid = sp.variants[0].id if sp.variants else '0'
-            pm_final = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=str(vid), shop_url=shop_url)
+            pm_final = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=valid_vid, shop_url=shop_url)
             db.session.add(pm_final)
-        
-        if sp.variants:
-            pm_final.shopify_variant_id = str(sp.variants[0].id)
+        else:
+            pm_final.shopify_variant_id = valid_vid
             
         pm_final.last_synced_at = datetime.utcnow()
         db.session.commit()
