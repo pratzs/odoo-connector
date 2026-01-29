@@ -283,24 +283,33 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
                 try: sp = shopify.Product.find(existing_variant.product_id)
                 except: sp = None
 
-    # C. RESCUE GUARD (Search by Name)
+   # C. RESCUE GUARD (The "A0001" Fix)
     if not sp:
         try:
-            # Search by first TWO words for better accuracy (e.g., "ATHENA WAFER")
-            words = p['name'].split()
-            search_query = " ".join(words[:2]) if len(words) > 1 else words[0]
-            # Remove symbols like + or ' that break Shopify search
-            clean_query = "".join(ch if ch.isalnum() or ch == ' ' else '' for ch in search_query)
-            
-            print(f"🕵️ Rescue Search: '{clean_query}'")
-            candidates = shopify.Product.find(title=clean_query, status='any', limit=50)
+            # --- ATTEMPT 1: Search by SKU in Title ---
+            # Since your Shopify titles end with " - SKU", searching the SKU as a title query is very strong.
+            print(f"🕵️ Rescue Attempt 1 (SKU-in-Title): '{sku}'")
+            candidates = shopify.Product.find(title=sku, status='any')
             
             for c in candidates:
-                # Manual SKU Scan (The only source of truth)
                 if any(str(v.sku).strip() == sku for v in c.variants):
-                    print(f"🛑 RESCUE SUCCESS: Found SKU {sku} inside '{c.title}'. Linking.")
+                    print(f"🛑 RESCUE SUCCESS (SKU Search): Found SKU {sku} inside '{c.title}'. Linking.")
                     sp = c
                     break
+
+            # --- ATTEMPT 2: Broad Name Search (If Attempt 1 failed) ---
+            if not sp:
+                first_word = p['name'].split()[0]
+                clean_word = "".join(ch for ch in first_word if ch.isalnum())
+                print(f"🕵️ Rescue Attempt 2 (Broad Name): '{clean_word}'")
+                
+                # Fetch more results (limit 250) to ensure we find the right Athena product
+                candidates = shopify.Product.find(title=clean_word, status='any', limit=250)
+                for c in candidates:
+                    if any(str(v.sku).strip() == sku for v in c.variants):
+                        print(f"🛑 RESCUE SUCCESS (Name Search): Found SKU {sku} inside '{c.title}'. Linking.")
+                        sp = c
+                        break
         except Exception as e:
             print(f"Rescue Error: {e}")
 
