@@ -15,22 +15,25 @@ from utils import get_odoo_connection, log_event, setup_shopify_session, get_con
 def safe_find_variant_by_sku(sku, retries=3):
     """
     TRIPLE-CHECK: Robustly finds a variant by SKU.
-    Waits and retries if Shopify blinks (prevents API glitches).
+    Now includes STRICT filtering to ignore "fuzzy" Shopify garbage.
     """
     clean_sku = str(sku).strip()
     for attempt in range(retries):
         try:
-            # Search Shopify
+            # 1. Ask Shopify for the SKU
             variants = shopify.Variant.find(sku=clean_sku)
-            # Filter for exact match
-            exact_matches = [v for v in variants if v.sku == clean_sku]
-            if exact_matches: 
-                return exact_matches[0]
             
-            # If empty, wait a moment and try again
+            # 2. STRICT VALIDATION: Shopify often returns 50 random items 
+            # if it can't find the exact SKU. We must filter them manually.
+            exact_matches = [v for v in variants if str(v.sku).strip() == clean_sku]
+            
+            if exact_matches: 
+                return exact_matches[0] # Found the real one!
+            
+            # If we got 50 items but none match, Shopify is glitching. 
+            # We wait and try once more.
             time.sleep(1) 
-        except Exception as e:
-            # If API error, wait longer
+        except:
             time.sleep(2)
             
     return None
@@ -281,33 +284,25 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
                 except: sp = None
 
     # C. RESCUE GUARD (Search by Name)
-    # 🛑 We run this ALWAYS to find and link existing products.
     if not sp:
         try:
-            first_word = p['name'].split()[0]
-            first_word = "".join(ch for ch in first_word if ch.isalnum())
+            # Search by first TWO words for better accuracy (e.g., "ATHENA WAFER")
+            words = p['name'].split()
+            search_query = " ".join(words[:2]) if len(words) > 1 else words[0]
+            # Remove symbols like + or ' that break Shopify search
+            clean_query = "".join(ch if ch.isalnum() or ch == ' ' else '' for ch in search_query)
             
-            candidates = shopify.Product.find(title=first_word, status='any', limit=50)
-            best_match = None
-            highest_ratio = 0.0
-
+            print(f"🕵️ Rescue Search: '{clean_query}'")
+            candidates = shopify.Product.find(title=clean_query, status='any', limit=50)
+            
             for c in candidates:
-                # 1. Manual SKU Check (Bypasses API search glitches)
+                # Manual SKU Scan (The only source of truth)
                 if any(str(v.sku).strip() == sku for v in c.variants):
-                    print(f"🛑 RESCUE: Found SKU {sku} inside '{c.title}'. Linking.")
-                    sp = c; break
-
-                # 2. Fuzzy Title Match
-                ratio = SequenceMatcher(None, c.title.lower(), p['name'].lower()).ratio()
-                if ratio > 0.90:
-                    if ratio > highest_ratio:
-                        highest_ratio = ratio; best_match = c
-            
-            if not sp and best_match:
-                print(f"🛑 FUZZY MATCH: Found '{best_match.title}' ({int(highest_ratio*100)}%). Linking.")
-                sp = best_match
+                    print(f"🛑 RESCUE SUCCESS: Found SKU {sku} inside '{c.title}'. Linking.")
+                    sp = c
+                    break
         except Exception as e:
-            print(f"Rescue Search Error: {e}")
+            print(f"Rescue Error: {e}")
 
     # ========================================================
     # 3. EXECUTE (Create or Update)
