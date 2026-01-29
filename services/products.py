@@ -184,7 +184,7 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
         log_event('Product Sync', 'Info', f"✅ {batch_name}: New: {stats['created']}, Updated: {stats['updated']}", shop_url=shop_url)
 
 # =====================================================
-# 3. SINGLE PRODUCT LOGIC (FIXED SIGNATURE & LOGIC)
+# 3. SINGLE PRODUCT LOGIC (Updated for Specific Secondary UOMs)
 # =====================================================
 def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db_map_dict, shopify_product_cache):
     from app import db
@@ -193,10 +193,8 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     sku = str(p.get('default_code') or '').strip()
     if not sku: return "skipped"
 
-    # 1. CHECK DB MAP (Use Memory Cache for Speed)
+    # 1. CHECK DB MAP
     pm = db_map_dict.get(sku)
-    
-    # Ownership Guard
     if pm and pm.odoo_product_id != p['id']:
         print(f"⚠️ BLOCKING: SKU {sku} already claimed by Odoo {pm.odoo_product_id}. Skipping.")
         return "skipped"
@@ -204,23 +202,42 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     product_name = p.get('name', 'Unknown')
     vendor_name = product_name.split(' ')[0] if product_name else "Worthy"
 
-    # --- Variant / Pack Logic ---
-    is_pack = False; ratio = 1.0; main_uom_name = 'Outer'
-    if p.get('sh_is_secondary_unit') is True:
-        qty_pack = p.get('qty_per_pack', 0.0)
-        if qty_pack and float(qty_pack) > 1.0:
-            is_pack = True; ratio = float(qty_pack); main_uom_name = f"{int(ratio)} per pack"
-        elif p.get('sh_secondary_uom'):
-            sec_id = p['sh_secondary_uom'][0]
-            if sec_id in uom_map:
-                ratio = uom_map[sec_id]['ratio']
-                if ratio > 1.0: is_pack = True
+    # --- UPDATED: Variant / Pack Logic ---
+    is_pack = False
     
+    # 1. Determine Main Ratio (The "Qty per Pack" on the main product)
+    # If list_price is for 24 units, main_ratio is 24.
+    main_ratio = float(p.get('qty_per_pack', 1.0))
+    if main_ratio < 1.0: main_ratio = 1.0
+    
+    # 2. Determine Secondary Ratio (The "Picking UOM" or "Secondary UOM")
+    sec_ratio = 1.0
+    sec_name = "Unit"
+    has_secondary = False
+
+    # Check if a specific Secondary UOM is selected in Odoo (e.g., CTNX6)
+    if p.get('sh_is_secondary_unit') and p.get('sh_secondary_uom'):
+        sec_uom_data = p['sh_secondary_uom'] # Returns [id, "Name"]
+        sec_uom_id = sec_uom_data[0]
+        
+        if sec_uom_id in uom_map:
+            sec_ratio = uom_map[sec_uom_id]['ratio']
+            sec_name = uom_map[sec_uom_id]['name']
+            has_secondary = True
+    
+    # Logic: It is a pack if Main Ratio > 1 OR we explicitly have a secondary unit
+    if main_ratio > 1.0 or has_secondary:
+        is_pack = True
+
+    # 3. Determine Names
+    main_uom_name = "Outer"
     if p.get('uom_id'):
         u_id = p['uom_id'][0]
-        if u_id in uom_map and (not main_uom_name or "per pack" not in main_uom_name):
-             main_uom_name = uom_map[u_id]['name']
-    if not main_uom_name: main_uom_name = "Outer"
+        if u_id in uom_map:
+            main_uom_name = uom_map[u_id]['name']
+            # If the Odoo UOM name is just "Units" but ratio is 24, force a descriptive name
+            if main_ratio > 1 and "per pack" not in main_uom_name.lower():
+                main_uom_name = f"{int(main_ratio)} per pack"
 
     desired_variants = []
     raw_price = float(p.get('list_price', 0.0))
@@ -228,10 +245,39 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     barcode = p.get('barcode', '')
 
     if not is_pack:
+        # Simple Product (1 Variant)
         desired_variants.append({'option1': 'Default Title', 'price': str(raw_price), 'sku': sku, 'barcode': barcode, 'cost': str(raw_cost)})
     else:
-        desired_variants.append({'option1': main_uom_name, 'price': str(raw_price), 'sku': sku, 'barcode': barcode, 'cost': str(raw_cost)})
-        desired_variants.append({'option1': 'Unit', 'price': str(round(raw_price / ratio, 2) if ratio > 0 else 0.0), 'sku': f"{sku}-UNIT", 'barcode': '', 'cost': str(round(raw_cost / ratio, 2) if ratio > 0 else 0.0)})
+        # Pack Product (2 Variants)
+        
+        # A. Main Variant (The Parent)
+        desired_variants.append({
+            'option1': main_uom_name, 
+            'price': str(raw_price), 
+            'sku': sku, 
+            'barcode': barcode, 
+            'cost': str(raw_cost)
+        })
+        
+        # B. Secondary Variant (The Breakdown)
+        # Price Calc: (Total Price / Main Qty) * Secondary Qty
+        # Ex: ($73.73 / 24) * 6 = $18.43
+        unit_price_base = raw_price / main_ratio
+        unit_cost_base = raw_cost / main_ratio
+        
+        sec_price = round(unit_price_base * sec_ratio, 2)
+        sec_cost = round(unit_cost_base * sec_ratio, 2)
+        
+        # SKU Suffix: OBBA24C-CTNX6 (or -UNIT if ratio is 1)
+        suffix = f"-{sec_name.replace(' ', '')}" if sec_ratio > 1 else "-UNIT"
+        
+        desired_variants.append({
+            'option1': sec_name, 
+            'price': str(sec_price), 
+            'sku': f"{sku}{suffix}", 
+            'barcode': '', # Usually secondary units don't share the outer barcode
+            'cost': str(sec_cost)
+        })
 
     # ========================================================
     # 2. FIND SHOPIFY PRODUCT
@@ -239,59 +285,36 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     sp = None
     action_log = "updated"
 
-    # A. Check Bulk Cache (Fastest)
     if sku in shopify_product_cache:
         sp = shopify_product_cache[sku]
 
-    # B. If not in cache, check Map, then Triple-Check API
     if not sp:
-        # Check Map
         if pm and pm.shopify_variant_id and pm.shopify_variant_id != '0':
             try:
                 v = shopify.Variant.find(pm.shopify_variant_id)
                 sp = shopify.Product.find(v.product_id)
-            except:
-                # Map is dead. Delete it.
-                # Note: We can't easily delete from DB here without session attach, 
-                # but we can ignore it and let the update rebuild it.
-                pm = None
+            except: pm = None
 
-        # Check SKU (Triple-Check for Safety)
         if not sp:
             existing_variant = safe_find_variant_by_sku(sku)
             if existing_variant:
                 try: sp = shopify.Product.find(existing_variant.product_id)
                 except: sp = None
 
-   # C. RESCUE GUARD (The "A0001" Fix)
+    # RESCUE GUARD
     if not sp:
         try:
-            # --- ATTEMPT 1: Search by SKU in Title ---
-            # Since your Shopify titles end with " - SKU", searching the SKU as a title query is very strong.
-            print(f"🕵️ Rescue Attempt 1 (SKU-in-Title): '{sku}'")
             candidates = shopify.Product.find(title=sku, status='any')
-            
             for c in candidates:
                 if any(str(v.sku).strip() == sku for v in c.variants):
-                    print(f"🛑 RESCUE SUCCESS (SKU Search): Found SKU {sku} inside '{c.title}'. Linking.")
-                    sp = c
-                    break
-
-            # --- ATTEMPT 2: Broad Name Search (If Attempt 1 failed) ---
+                    sp = c; break
             if not sp:
-                first_word = p['name'].split()[0]
-                clean_word = "".join(ch for ch in first_word if ch.isalnum())
-                print(f"🕵️ Rescue Attempt 2 (Broad Name): '{clean_word}'")
-                
-                # Fetch more results (limit 250) to ensure we find the right Athena product
+                clean_word = "".join(ch for ch in p['name'].split()[0] if ch.isalnum())
                 candidates = shopify.Product.find(title=clean_word, status='any', limit=250)
                 for c in candidates:
                     if any(str(v.sku).strip() == sku for v in c.variants):
-                        print(f"🛑 RESCUE SUCCESS (Name Search): Found SKU {sku} inside '{c.title}'. Linking.")
-                        sp = c
-                        break
-        except Exception as e:
-            print(f"Rescue Error: {e}")
+                        sp = c; break
+        except: pass
 
     # ========================================================
     # 3. EXECUTE (Create or Update)
@@ -300,9 +323,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
         if not cfg['auto_create']: return "skipped"
         sp = shopify.Product(); sp.title = p['name']; sp.vendor = vendor_name
         sp.status = 'active' if cfg['auto_publish'] else 'draft'
-        sp.published_scope = 'global'
         
-        # Category from Memory
         if p.get('public_categ_ids'):
             cat_id = p['public_categ_ids'][0]
             if cat_id in categ_map: sp.product_type = categ_map[cat_id]
@@ -311,7 +332,6 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
 
     if sp.status == 'archived': sp.status = 'active'
 
-    # Update Fields
     if cfg['title']: sp.title = p['name']
     if cfg['vendor']: sp.vendor = vendor_name
     if cfg['desc']: sp.body_html = p.get('description_sale') or ''
@@ -334,17 +354,28 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     # --- Variant Sync ---
     existing = getattr(sp, 'variants', [])
     final_vars = []
+    
     for des in desired_variants:
         match = next((v for v in existing if v.sku == des['sku']), None)
+        
+        # Logic to reuse the Default Variant if we are switching structures
         if not match and des['option1'] == 'Default Title' and len(existing) == 1:
              match = existing[0]
-        if not match: match = shopify.Variant({'product_id': sp.id})
         
-        match.option1 = des['option1']; match.sku = des['sku']
+        if not match: 
+            match = shopify.Variant({'product_id': sp.id})
+        
+        match.option1 = des['option1']
+        match.sku = des['sku']
+        
         if cfg['price']: 
             match.price = des['price']
             match.compare_at_price = des['price']
-        if cfg['barcode'] and des['barcode']: match.barcode = des['barcode']
+        
+        # Only sync barcode for the MAIN unit, usually secondary units in Odoo don't share the same barcode
+        if cfg['barcode'] and des['barcode']: 
+            match.barcode = des['barcode']
+            
         match.inventory_management = 'shopify'
         final_vars.append(match)
     
@@ -355,16 +386,12 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
         return "error"
 
     # ========================================================
-    # 4. MAP UPDATE (STRICT)
+    # 4. MAP UPDATE
     # ========================================================
-    if not sp.variants:
-        print(f"❌ INVALID PRODUCT: {sku} has NO variants. Skipping Map.")
-        return "error"
+    if not sp.variants: return "error"
         
     valid_vid = str(sp.variants[0].id)
-    if valid_vid == '0' or not valid_vid:
-        print(f"❌ INVALID ID: {sku} has variant ID '0'. Skipping Map.")
-        return "error"
+    if valid_vid == '0' or not valid_vid: return "error"
 
     # Image Sync
     if cfg['images'] and p.get('image_1920'):
@@ -372,7 +399,6 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
             img_raw = p['image_1920']
             if isinstance(img_raw, bytes): img_raw = img_raw.decode('utf-8')
             new_hash = hashlib.md5(img_raw.encode('utf-8')).hexdigest()
-            # Check cached map first
             current_hash = pm.image_hash if pm else ""
             
             if new_hash != current_hash or not sp.images:
@@ -383,15 +409,12 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
                 img = shopify.Image(prefix_options={'product_id': sp.id})
                 img.attachment = img_raw; img.save()
                 
-                # We need to query DB to update hash specifically
                 pm_upd = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
                 if pm_upd:
                     pm_upd.image_hash = new_hash; db.session.commit()
         except: pass
 
-    # Save Map
     try:
-        # We query fresh to ensure we have the session attached
         pm_final = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
         if not pm_final:
             pm_final = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=valid_vid, shop_url=shop_url)
