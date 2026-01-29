@@ -12,31 +12,12 @@ from utils import get_odoo_connection, log_event, setup_shopify_session, get_con
 # =====================================================
 # 0. HELPER FUNCTIONS (MUST BE AT TOP)
 # =====================================================
-def safe_find_variant_by_sku(sku, retries=3):
+def find_variant_in_cache(sku, shopify_product_cache):
     """
-    TRIPLE-CHECK: Robustly finds a variant by SKU.
-    Now includes STRICT filtering to ignore "fuzzy" Shopify garbage.
+    STRICT LOCAL LOOKUP: Finds SKU in our pre-fetched cache.
     """
     clean_sku = str(sku).strip()
-    for attempt in range(retries):
-        try:
-            # 1. Ask Shopify for the SKU
-            variants = shopify.Variant.find(sku=clean_sku)
-            
-            # 2. STRICT VALIDATION: Shopify often returns 50 random items 
-            # if it can't find the exact SKU. We must filter them manually.
-            exact_matches = [v for v in variants if str(v.sku).strip() == clean_sku]
-            
-            if exact_matches: 
-                return exact_matches[0] # Found the real one!
-            
-            # If we got 50 items but none match, Shopify is glitching. 
-            # We wait and try once more.
-            time.sleep(1) 
-        except:
-            time.sleep(2)
-            
-    return None
+    return shopify_product_cache.get(clean_sku)
 
 
 
@@ -150,40 +131,38 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
             maps = ProductMap.query.filter(ProductMap.shop_url == shop_url, ProductMap.sku.in_(batch_skus)).all()
             db_map_dict = {m.sku: m for m in maps}
 
-        # 2. Bulk Shopify Fetch
+# --- B. PREFETCH SHOPIFY DATA (TOTAL SCAN STRATEGY) ---
+        batch_skus = [str(p.get('default_code')).strip() for p in products if p.get('default_code')]
+        
+        # 1. Bulk DB Lookup
+        db_map_dict = {} 
+        if batch_skus:
+            maps = ProductMap.query.filter(ProductMap.shop_url == shop_url, ProductMap.sku.in_(batch_skus)).all()
+            db_map_dict = {m.sku: m for m in maps}
+
+        # 2. Total Store SKU Map (Bypasses Broken Shopify Search)
+        # We build a dictionary of { "SKU": ShopifyProductObject }
         shopify_product_cache = {} 
-        variant_ids_to_fetch = []
-        for pm in db_map_dict.values():
-            if pm.shopify_variant_id and pm.shopify_variant_id != '0':
-                variant_ids_to_fetch.append(pm.shopify_variant_id)
-
-        if variant_ids_to_fetch:
-            try:
-                # Chunk IDs into 50s for Shopify API limit safety
-                v_chunks = [variant_ids_to_fetch[i:i + 50] for i in range(0, len(variant_ids_to_fetch), 50)]
-                product_ids_to_fetch = set()
+        try:
+            # We fetch all active products to ensure we see A0001, etc.
+            page = shopify.Product.find(limit=250, status='active')
+            while page:
+                for sp in page:
+                    for v in sp.variants:
+                        if v.sku:
+                            # Store by stripped SKU for exact matching
+                            shopify_product_cache[str(v.sku).strip()] = sp
                 
-                for v_chunk in v_chunks:
-                    variants = shopify.Variant.find(ids=",".join(v_chunk))
-                    for v in variants:
-                        product_ids_to_fetch.add(str(v.product_id))
-                    
-                    # ✅ SAFETY BRAKE: Sleep 0.5s between Shopify calls
-                    time.sleep(0.5) 
-
-                if product_ids_to_fetch:
-                    p_chunks = [list(product_ids_to_fetch)[i:i + 50] for i in range(0, len(product_ids_to_fetch), 50)]
-                    for p_chunk in p_chunks:
-                        s_products = shopify.Product.find(ids=",".join(p_chunk))
-                        for sp in s_products:
-                            for v in sp.variants:
-                                if v.sku: shopify_product_cache[v.sku] = sp
-                        
-                        # ✅ SAFETY BRAKE: Sleep 0.5s between Shopify calls
-                        time.sleep(0.5)
-
-            except Exception as e:
-                print(f"Batch Shopify Fetch Error: {e}")
+                if page.has_next_page():
+                    page = page.next_page()
+                    time.sleep(0.5) # Safety brake
+                else:
+                    break
+            
+            print(f"✅ Local Cache Built: Loaded {len(shopify_product_cache)} SKUs from Shopify.")
+        except Exception as e:
+            print(f"❌ Failed to build Shopify cache: {e}")
+            
 
         # --- C. PROCESS LOOP ---
         stats = {'created': 0, 'updated': 0, 'archived': 0, 'skipped': 0}
