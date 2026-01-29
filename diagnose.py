@@ -42,6 +42,8 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
             
             # 1. CHECK DATABASE MAPPING
             pm = ProductMap.query.filter_by(sku=target_sku, shop_url=shop_url).first()
+            mapped_odoo_id = pm.odoo_product_id if pm else None
+
             if pm:
                 print(f"   ✅ DB MAPPING: Found! (Shopify Variant ID: {pm.shopify_variant_id} | Odoo ID: {pm.odoo_product_id})")
                 print(f"      - Last Synced: {pm.last_synced_at}")
@@ -49,27 +51,44 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
             else:
                 print("   ❌ DB MAPPING: NOT FOUND. (This product is unlinked)")
 
-            # 2. CHECK ODOO DATA (Pack Logic + Barcode)
-            print(f"\n   👉 ODOO DATA:")
-            domain = [['default_code', '=', target_sku], '|', ['active', '=', True], ['active', '=', False]]
+            # 2. CHECK ODOO DATA (Active Only)
+            print(f"\n   👉 ODOO DATA (Active Only):")
+            
+            # --- CHANGE: STRICTLY ACTIVE PRODUCTS ONLY ---
+            domain = [['default_code', '=', target_sku], ['active', '=', True]]
             
             # Fields for Pack Logic and Validation
             fields = ['name', 'active', 'sale_ok', 'barcode', 'list_price', 
                       'uom_id', 'sh_is_secondary_unit', 'qty_per_pack', 'image_1920']
             
             try:
-                odoo_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+                odoo_results = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
                     'product.product', 'search_read', [domain], {'fields': fields})
             except Exception as e:
                 print(f"      ⚠️ Odoo Search Error: {e}")
-                odoo_ids = []
+                odoo_results = []
             
             odoo_prod = None
             odoo_stock = 0
             
-            if odoo_ids:
-                odoo_prod = odoo_ids[0]
-                print(f"      ✅ Found in Odoo (ID: {odoo_prod['id']})")
+            if not odoo_results:
+                 print("      ❌ NOT FOUND IN ODOO (No Active Product with this Internal Reference).")
+            else:
+                # --- DUPLICATE CHECK (Active Duplicates are still a problem) ---
+                if len(odoo_results) > 1:
+                    print(f"      ⚠️ CRITICAL WARNING: {len(odoo_results)} ACTIVE PRODUCTS FOUND WITH SKU '{target_sku}'!")
+                    for p in odoo_results:
+                        marker = "👈 (Mapped in DB)" if p['id'] == mapped_odoo_id else ""
+                        print(f"         - [ID: {p['id']}] {p['name']} {marker}")
+                    
+                    # Try to pick the "correct" one (matches DB map)
+                    odoo_prod = next((p for p in odoo_results if p['id'] == mapped_odoo_id), odoo_results[0])
+                    print(f"      ℹ️  Using ID {odoo_prod['id']} for comparison below.")
+                else:
+                    odoo_prod = odoo_results[0]
+                    print(f"      ✅ Found 1 Active Product (ID: {odoo_prod['id']})")
+
+                # Print Details
                 print(f"      - Name: {odoo_prod['name']}")
                 print(f"      - Active: {odoo_prod['active']}")
                 print(f"      - Price: {odoo_prod['list_price']}")
@@ -109,8 +128,6 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
                 except Exception as e:
                     print(f"      ⚠️ Stock Fetch Error: {e}")
 
-            else:
-                print("      ❌ NOT FOUND IN ODOO.")
 
             # 3. CHECK SHOPIFY DATA
             print(f"\n   👉 SHOPIFY DATA:")
@@ -130,8 +147,6 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
                     print(f"\n   ⚖️ COMPARISON (Odoo vs Shopify):")
                     
                     if odoo_prod:
-                        # --- FIX: UNWRAP COMPLEX F-STRINGS ---
-                        
                         # Price Check
                         p_match = float(v.price) == float(odoo_prod['list_price'])
                         if p_match:
@@ -216,9 +231,7 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
     print("\n🕵️‍♂️ --- DIAGNOSIS COMPLETE ---\n")
 
 if __name__ == "__main__":
-    # If running from command line, we can import app here to get context
     from app import app
-    
     parser = argparse.ArgumentParser(description="Multi-Tenant Odoo Connector Diagnostic Tool")
     
     # Required Argument: Shop URL
@@ -235,5 +248,4 @@ if __name__ == "__main__":
         print("❌ Error: You must provide at least one target to diagnose (--sku or --email).")
         sys.exit(1)
 
-    # We don't need with app.app_context() here because run_diagnosis handles it internally now
     run_diagnosis(args.shop, args.sku, args.email)
