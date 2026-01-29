@@ -520,6 +520,7 @@ def fix_variant_mess_task(shop_url, company_id):
         
         log_event('Cleanup', 'Info', f"Starting Strict Variant Repair for Company {company_id}...", shop_url=shop_url)
         
+        # 2. Fetch UOM Map (For Ratios)
         uom_map = {}
         try:
             uoms = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'search_read', [], {'fields': ['id', 'name', 'factor_inv']})
@@ -528,6 +529,7 @@ def fix_variant_mess_task(shop_url, company_id):
         except Exception as e:
             print(f"UOM Fetch Warning: {e}")
 
+        # 3. Fetch Odoo Data
         try:
             domain = [['sale_ok', '=', True], ['type', 'in', ['product', 'consu']], 
                       ['company_id', '=', int(company_id)], ['active', '=', True]]
@@ -544,6 +546,7 @@ def fix_variant_mess_task(shop_url, company_id):
             log_event('Cleanup', 'Error', f"Odoo Data Fetch Failed: {e}", shop_url=shop_url)
             return
 
+        # 4. Scan Shopify Products
         page = shopify.Product.find(limit=50, status='active')
         processed = 0
         repaired = 0
@@ -559,7 +562,7 @@ def fix_variant_mess_task(shop_url, company_id):
                 p = odoo_map[ref_sku]
                 processed += 1
                 
-                # --- UPDATED STRICT PACK LOGIC ---
+                # --- UPDATED LOGIC ---
                 is_pack = False
                 main_ratio = float(p.get('qty_per_pack', 1.0))
                 if main_ratio < 1.0: main_ratio = 1.0
@@ -567,21 +570,29 @@ def fix_variant_mess_task(shop_url, company_id):
                 sec_ratio = 1.0
                 sec_name = "Unit"
                 
-                # Only strictly require checkbox to enable pack mode
+                # CHECKBOX CHECK
                 if p.get('sh_is_secondary_unit'):
                     if p.get('sh_secondary_uom'):
-                        sec_data = p['sh_secondary_uom']
-                        if sec_data and sec_data[0] in uom_map:
+                        sec_data = p['sh_secondary_uom'] # Expected: [ID, "CTNX6"]
+                        
+                        # A. Get Name Directly from Product Data (Reliable)
+                        if len(sec_data) > 1 and sec_data[1]:
+                            sec_name = str(sec_data[1])
+                        
+                        # B. Get Ratio from Map (Required for math)
+                        if sec_data[0] in uom_map:
                             sec_ratio = uom_map[sec_data[0]]['ratio']
-                            sec_name = uom_map[sec_data[0]]['name']
                     
+                    # Only split if math requires it
                     if main_ratio > 1.0 or sec_ratio != 1.0:
                         is_pack = True
 
+                # Prices
                 pack_price = float(p.get('list_price', 0.0))
                 pack_cost = float(p.get('standard_price', 0.0))
                 raw_stock = int(p.get('qty_available', 0))
                 
+                # Main UOM Name
                 main_uom_name = "Outer"
                 if p.get('uom_id') and p['uom_id'][0] in uom_map:
                     raw_name = uom_map[p['uom_id'][0]]['name']
@@ -590,11 +601,13 @@ def fix_variant_mess_task(shop_url, company_id):
                     if main_ratio > 1 and "per pack" not in main_uom_name.lower():
                         main_uom_name = f"{int(main_ratio)} per pack"
 
+                # Define Desired Variants
                 desired_variants = []
                 
                 if is_pack:
                     sp.options = [{'name': 'Pack Size'}]
                     
+                    # 1. The Pack
                     pack_stock = math.floor(raw_stock / main_ratio) if main_ratio > 0 else 0
                     desired_variants.append({
                         'sku': ref_sku,
@@ -604,11 +617,15 @@ def fix_variant_mess_task(shop_url, company_id):
                         'stock': pack_stock
                     })
                     
+                    # 2. The Secondary (CTNX6)
+                    # Price = (PackPrice / 24) * 6
                     unit_price = round((pack_price / main_ratio) * sec_ratio, 2)
                     unit_cost = round((pack_cost / main_ratio) * sec_ratio, 2)
                     unit_stock = math.floor(raw_stock / sec_ratio) if sec_ratio > 0 else 0
                     
-                    suffix = f"-{sec_name.replace(' ', '')}" if sec_ratio > 1 else "-UNIT"
+                    # SKU: OBBA24C-CTNX6
+                    safe_suffix = sec_name.replace(' ', '')
+                    suffix = f"-{safe_suffix}" if safe_suffix.upper() != "UNIT" else "-UNIT"
                     
                     desired_variants.append({
                         'sku': f"{ref_sku}{suffix}",
@@ -618,6 +635,7 @@ def fix_variant_mess_task(shop_url, company_id):
                         'stock': unit_stock
                     })
                 else:
+                    # Simple Product
                     if sp.options and sp.options[0].name != 'Title':
                         sp.options = [{'name': 'Title', 'values': ['Default Title']}]
                     
@@ -629,6 +647,7 @@ def fix_variant_mess_task(shop_url, company_id):
                         'stock': raw_stock
                     })
 
+                # --- EXECUTE UPDATE ---
                 current_variants = sp.variants
                 final_list = []
                 dirty = False
@@ -636,9 +655,13 @@ def fix_variant_mess_task(shop_url, company_id):
                 for target in desired_variants:
                     match = next((v for v in current_variants if v.sku == target['sku']), None)
                     
+                    # Intelligent Matching
                     if not match and len(current_variants) == 1 and len(desired_variants) == 1:
                         match = current_variants[0]
+                    
+                    # If updating "Unit" -> "CTNX6", match by the SKU prefix if secondary
                     if not match and target['option1'] == sec_name and len(current_variants) > 1:
+                         # Find the variant that is NOT the main pack (different price/sku)
                          match = next((v for v in current_variants if v.sku != ref_sku), None)
 
                     if not match:
@@ -646,6 +669,7 @@ def fix_variant_mess_task(shop_url, company_id):
                         match.inventory_management = 'shopify'
                         dirty = True
 
+                    # Safe Update
                     if getattr(match, 'option1', '') != target['option1']: 
                         match.option1 = target['option1']
                         dirty = True
@@ -666,6 +690,7 @@ def fix_variant_mess_task(shop_url, company_id):
                     try:
                         if sp.save():
                             repaired += 1
+                            # Stock Update
                             location_id = get_config('shopify_location_id', None, shop_url=shop_url)
                             if location_id:
                                 for v in sp.variants:
