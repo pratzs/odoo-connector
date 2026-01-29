@@ -1114,9 +1114,21 @@ def trigger_fix_variants():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
     
-    # SLOW LANE
-    q_default.enqueue(fix_variant_mess_task, shop_url, job_timeout=900)
-    return jsonify({"message": "Variant Cleanup Queued."})
+    # --- FIX: Fetch Company ID from Database ---
+    from models import ShopSettings
+    from maintenance import run_fix_variants # Ensure this matches the function name in maintenance.py
+    from utils import q_default
+    
+    settings = ShopSettings.query.filter_by(shop_url=shop_url).first()
+    company_id = settings.odoo_company_id if settings else None
+    
+    if not company_id:
+        return jsonify({"error": "No Odoo Company selected in Settings. Please save settings first."}), 400
+    
+    # --- Pass company_id to the job ---
+    q_default.enqueue(run_fix_variants, shop_url, company_id, job_timeout=3600)
+    
+    return jsonify({"message": "Strict Variant Repair Queued."})
 
 
 @app.route('/maintenance/register_webhooks', methods=['GET'])
