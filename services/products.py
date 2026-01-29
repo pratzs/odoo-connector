@@ -3,6 +3,7 @@ import json
 import gc
 import time
 import hashlib
+import math
 from difflib import SequenceMatcher
 from datetime import datetime
 from models import Shop, ProductMap, AppSetting, db
@@ -575,3 +576,180 @@ def repair_single_product_image(shop_url, sku):
 
         except Exception as e:
             print(f"❌ Error repairing image for {sku}: {e}")
+
+
+# =====================================================
+# 6. STRICT VARIANT REPAIR (The "Fix Mess" Tool)
+# =====================================================
+def fix_variant_mess_task(shop_url, company_id):
+    """
+    Scans Shopify Products.
+    If SKU matches Odoo:
+    1. Enforces strict Variant list (Pack vs Unit).
+    2. Updates Prices.
+    3. Updates Stock Levels (Floor calculation for Packs).
+    4. Deletes any variant not defined in the logic.
+    """
+    from app import app
+    with app.app_context():
+        # 1. Setup
+        odoo = get_odoo_connection(shop_url)
+        if not odoo or not setup_shopify_session(shop_url): 
+            log_event('Cleanup', 'Error', "Startup Failed: No Odoo/Shopify Connection", shop_url=shop_url)
+            return
+        
+        log_event('Cleanup', 'Info', f"Starting Strict Variant Repair for Company {company_id}...", shop_url=shop_url)
+        
+        # 2. Fetch Odoo Data (Active Products Only)
+        try:
+            domain = [['sale_ok', '=', True], ['type', 'in', ['product', 'consu']], 
+                      ['company_id', '=', int(company_id)], ['active', '=', True]]
+            
+            # Added 'qty_available' to fetch stock
+            fields = ['default_code', 'name', 'list_price', 'standard_price', 
+                      'sh_is_secondary_unit', 'qty_per_pack', 'qty_available']
+            
+            odoo_products = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'product.product', 'search_read', [domain], {'fields': fields})
+            
+            # Map by SKU for fast lookup
+            odoo_map = {str(p.get('default_code')).strip(): p for p in odoo_products if p.get('default_code')}
+            
+        except Exception as e:
+            log_event('Cleanup', 'Error', f"Odoo Data Fetch Failed: {e}", shop_url=shop_url)
+            return
+
+        # 3. Scan Shopify Products
+        page = shopify.Product.find(limit=50, status='active')
+        processed = 0
+        repaired = 0
+        
+        while page:
+            for sp in page:
+                # Identify Parent SKU from first variant
+                if not sp.variants: continue
+                ref_sku = str(sp.variants[0].sku).replace("-UNIT", "").strip()
+                
+                if not ref_sku or ref_sku not in odoo_map:
+                    continue # Skip if not found in Odoo
+
+                p = odoo_map[ref_sku]
+                processed += 1
+                
+                # --- LOGIC: PACK vs UNIT ---
+                is_pack = False
+                qty_pack = float(p.get('qty_per_pack', 0.0))
+                if p.get('sh_is_secondary_unit') is True and qty_pack > 1.0:
+                    is_pack = True
+
+                # Prices
+                pack_price = float(p.get('list_price', 0.0))
+                pack_cost = float(p.get('standard_price', 0.0))
+                unit_price = round(pack_price / qty_pack, 2) if is_pack else 0.0
+                unit_cost = round(pack_cost / qty_pack, 2) if is_pack else 0.0
+
+                # Stock (Qty on Hand)
+                raw_stock = int(p.get('qty_available', 0))
+                pack_stock = math.floor(raw_stock / qty_pack) if is_pack else 0
+                
+                # Define Desired Structure
+                desired_variants = []
+                
+                if is_pack:
+                    sp.options = [{'name': 'Pack Size'}] # Enforce Option Name
+                    
+                    # 1. The Pack (Outer)
+                    desired_variants.append({
+                        'sku': ref_sku,
+                        'option1': f"{int(qty_pack)} per pack",
+                        'price': str(pack_price),
+                        'cost': str(pack_cost),
+                        'stock': pack_stock
+                    })
+                    
+                    # 2. The Unit (Single)
+                    desired_variants.append({
+                        'sku': f"{ref_sku}-UNIT",
+                        'option1': "Unit",
+                        'price': str(unit_price),
+                        'cost': str(unit_cost),
+                        'stock': raw_stock # Unit stock is raw stock
+                    })
+                else:
+                    # Simple Product
+                    if sp.options and sp.options[0].name != 'Title':
+                        sp.options = [{'name': 'Title', 'values': ['Default Title']}]
+                    
+                    desired_variants.append({
+                        'sku': ref_sku,
+                        'option1': "Default Title",
+                        'price': str(pack_price),
+                        'cost': str(pack_cost),
+                        'stock': raw_stock
+                    })
+
+                # --- EXECUTE UPDATE ---
+                current_variants = sp.variants
+                final_list = []
+                dirty = False
+
+                for target in desired_variants:
+                    # Find existing or create new
+                    match = next((v for v in current_variants if v.sku == target['sku']), None)
+                    
+                    # Fallback for switching from Pack -> Single (Default Title match)
+                    if not match and target['option1'] == 'Default Title' and current_variants:
+                        match = current_variants[0]
+
+                    if not match:
+                        match = shopify.Variant({'product_id': sp.id})
+                        match.inventory_management = 'shopify'
+                        dirty = True
+
+                    # Update core fields
+                    if match.option1 != target['option1']: match.option1 = target['option1']; dirty = True
+                    if match.price != target['price']: match.price = target['price']; dirty = True
+                    if match.sku != target['sku']: match.sku = target['sku']; dirty = True
+                    
+                    final_list.append(match)
+
+                # Detect Deletions (If Shopify has more than Desired)
+                if len(current_variants) > len(final_list):
+                    dirty = True
+
+                if dirty:
+                    sp.variants = final_list
+                    try:
+                        if sp.save():
+                            repaired += 1
+                            # POST-SAVE: Update Stock & Cost (Requires InventoryItem ID)
+                            location_id = get_config('shopify_location_id', None, shop_url=shop_url)
+                            if location_id:
+                                for v in sp.variants:
+                                    target = next((t for t in desired_variants if t['sku'] == v.sku), None)
+                                    if target:
+                                        # Update Cost
+                                        if v.inventory_item_id:
+                                            try:
+                                                ii = shopify.InventoryItem.find(v.inventory_item_id)
+                                                ii.cost = target['cost']
+                                                ii.save()
+                                            except: pass
+                                        
+                                        # Update Stock
+                                        try:
+                                            shopify.InventoryLevel.set(
+                                                location_id=location_id,
+                                                inventory_item_id=v.inventory_item_id,
+                                                available=target['stock']
+                                            )
+                                        except: pass
+                    except Exception as e:
+                        print(f"Failed to fix {ref_sku}: {e}")
+
+            if page.has_next_page():
+                page = page.next_page()
+            else:
+                break
+
+        log_event('Cleanup', 'Success', f"Done. Scanned {processed}, Repaired {repaired}.", shop_url=shop_url)
