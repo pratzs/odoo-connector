@@ -11,29 +11,19 @@ from utils import get_odoo_connection, log_event, setup_shopify_session, get_con
 
 def safe_find_variant_by_sku(sku, retries=3):
     """
-    TRIPLE-CHECK: robustly finds a variant by SKU.
-    If Shopify blinks/throttles, it waits and tries again.
+    TRIPLE-CHECK: Robustly finds a variant by SKU.
+    Waits and retries if Shopify blinks.
     """
     clean_sku = str(sku).strip()
     for attempt in range(retries):
         try:
-            # Search for the variant by SKU
             variants = shopify.Variant.find(sku=clean_sku)
-            
-            # Filter results to ensure EXACT match (Shopify fuzzy search can be weird)
             exact_matches = [v for v in variants if v.sku == clean_sku]
-            
-            if exact_matches:
-                return exact_matches[0] # Found it!
-            
-            # If not found, wait slightly longer before assuming it doesn't exist
-            time.sleep(1)
-            
-        except Exception as e:
-            print(f"Search Warning (Attempt {attempt+1}): {e}")
-            time.sleep(2) # Wait longer on error
-            
-    return None # Truly not found after 3 tries
+            if exact_matches: return exact_matches[0]
+            time.sleep(1) # Wait 1s before retry
+        except:
+            time.sleep(2)
+    return None
 
 
 # =====================================================
@@ -200,9 +190,9 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
         log_event('Product Sync', 'Info', f"✅ {batch_name}: New: {stats['created']}, Updated: {stats['updated']}", shop_url=shop_url)
 
 # =====================================================
-# 3. SINGLE PRODUCT LOGIC (STRICT SKU LINKING)
+# 3. SINGLE PRODUCT LOGIC (ROBUST SEARCH & RESCUE)
 # =====================================================
-def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db_map_dict, shopify_product_cache):
+def process_product_data(p, odoo, shop_url, cfg, uom_map):
     from app import db
     
     if not p.get('active'): return "skipped"
@@ -210,10 +200,10 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     if not sku: return "skipped"
 
     # 1. CHECK DB MAP (From Memory)
-    # Since you deleted the table, this will be empty at first. That is fine.
-    pm = db_map_dict.get(sku)
+    # Since you deleted the table, this will be empty.
+    pm = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
     
-    # Ownership Guard: Ensure we don't overwrite a map belonging to a different Odoo ID
+    # Ownership Guard
     if pm and pm.odoo_product_id != p['id']:
         print(f"⚠️ BLOCKING: SKU {sku} already claimed by Odoo {pm.odoo_product_id}. Skipping.")
         return "skipped"
@@ -252,95 +242,81 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
         desired_variants.append({'option1': 'Unit', 'price': str(round(raw_price / ratio, 2) if ratio > 0 else 0.0), 'sku': f"{sku}-UNIT", 'barcode': '', 'cost': str(round(raw_cost / ratio, 2) if ratio > 0 else 0.0)})
 
     # ========================================================
-    # 2. FIND SHOPIFY PRODUCT (STRICT SKU MATCH)
+    # 2. FIND SHOPIFY PRODUCT (TRIPLE CHECK + RESCUE)
     # ========================================================
-    sp = shopify_product_cache.get(sku)
+    sp = None
     action_log = "updated"
-    
-    # If not in cache, use the TRIPLE-CHECK helper (Fixes API Blinking)
+
+    # A. If we have a map, trust it first
+    if pm:
+        try:
+            v = shopify.Variant.find(pm.shopify_variant_id)
+            sp = shopify.Product.find(v.product_id)
+        except:
+            # Map is dead (stale). Delete it and fall through to Search.
+            db.session.delete(pm); db.session.commit(); pm = None
+
+    # B. If no map (or map died), Search Shopify
     if not sp:
-        # This function (defined at top of file) retries 3 times if Shopify errors
+        # 1. Try SKU Search (3 Attempts)
         existing_variant = safe_find_variant_by_sku(sku)
         
         if existing_variant:
-            # Found it by SKU!
-            try:
-                # Get the parent product so we can update it
-                sp = shopify.Product.find(existing_variant.product_id)
-            except:
-                sp = None
+            try: sp = shopify.Product.find(existing_variant.product_id)
+            except: sp = None
 
-    # --- Create / Rescue Logic ---
+    # C. RESCUE GUARD: If SKU Search failed, search by NAME (The "Athena" Fix)
+    if not sp:
+        if cfg['auto_create']: # Only search if we are about to create
+            try:
+                # Search by First Word Only (Fixes "+Magnesium" bugs)
+                first_word = p['name'].split()[0]
+                first_word = "".join(ch for ch in first_word if ch.isalnum())
+                
+                candidates = shopify.Product.find(title=first_word, status='any', limit=50)
+                best_match = None
+                highest_ratio = 0.0
+
+                for c in candidates:
+                    # CHECK 1: Is our SKU hiding inside this product?
+                    if any(str(v.sku).strip() == sku for v in c.variants):
+                        print(f"🛑 RESCUE: Found SKU {sku} inside '{c.title}'. Linking.")
+                        sp = c
+                        break
+
+                    # CHECK 2: Fuzzy Title Match (>90%)
+                    ratio = SequenceMatcher(None, c.title.lower(), p['name'].lower()).ratio()
+                    if ratio > 0.90:
+                        if ratio > highest_ratio:
+                            highest_ratio = ratio
+                            best_match = c
+                
+                if not sp and best_match:
+                    print(f"🛑 FUZZY MATCH: Found '{best_match.title}' ({int(highest_ratio*100)}%). Linking.")
+                    sp = best_match
+            except Exception as e:
+                print(f"Rescue Error: {e}")
+
+    # ========================================================
+    # 3. EXECUTE (CREATE or UPDATE)
+    # ========================================================
     if not sp:
         if not cfg['auto_create']: return "skipped"
-
-        # ============================================================
-        # 🛑 SEARCH & RESCUE GUARD (The "Athena" Fix)
-        # If SKU search failed (API Glitch), search by NAME before creating.
-        # ============================================================
-        try:
-            # 1. Broad Search: Get everything starting with the first word
-            # e.g. "ATHENA..." -> Gets all 10 Athena products
-            first_word = p['name'].split()[0]
-            first_word = "".join(ch for ch in first_word if ch.isalnum()) # Clean special chars
-            
-            # Fetch candidates (limit to 50 to be safe)
-            candidates = shopify.Product.find(title=first_word, status='any', limit=50)
-            
-            best_match = None
-            highest_ratio = 0.0
-            
-            for c in candidates:
-                # CHECK A: The "Manual" SKU Scan inside the candidate
-                # If we find our SKU hiding inside this product, it is a 100% Match.
-                # This bypasses the broken "Search by SKU" API completely.
-                if any(str(v.sku).strip() == sku for v in c.variants):
-                    print(f"🛑 RESCUE: Found SKU {sku} inside '{c.title}'. Linking.")
-                    sp = c
-                    break
-
-                # CHECK B: Fuzzy Title Match (Last Resort)
-                # If SKU is missing/mismatched, check if title is >90% identical.
-                ratio = SequenceMatcher(None, c.title.lower(), p['name'].lower()).ratio()
-                
-                if ratio > 0.90: 
-                    if ratio > highest_ratio:
-                        highest_ratio = ratio
-                        best_match = c
-            
-            # If we didn't find a direct SKU match, but found a high-confidence Title match
-            if not sp and best_match:
-                print(f"🛑 FUZZY MATCH: Found '{best_match.title}' ({int(highest_ratio*100)}%). Linking.")
-                sp = best_match
-                action_log = "updated"
-
-        except Exception as e:
-            print(f"Guard Warning: {e}")
-
-        # ============================================================
-        # IF STILL NOT FOUND -> TRULY NEW -> CREATE IT
-        # ============================================================
-        if not sp:
-            sp = shopify.Product(); sp.title = p['name']; sp.vendor = vendor_name
-            sp.status = 'active' if cfg['auto_publish'] else 'draft'
-            sp.published_scope = 'global'
-            
-            # Category from Memory
-            if p.get('public_categ_ids'):
-                cat_id = p['public_categ_ids'][0]
-                if cat_id in categ_map: sp.product_type = categ_map[cat_id]
-            
-            if action_log != "archived": action_log = "created"
+        sp = shopify.Product(); sp.title = p['name']; sp.vendor = vendor_name
+        sp.status = 'active' if cfg['auto_publish'] else 'draft'
+        sp.published_scope = 'global'
+        cat_name = odoo.get_public_category_name(p.get('public_categ_ids', []))
+        if cat_name: sp.product_type = cat_name
+        if action_log != "archived": action_log = "created"
 
     if sp.status == 'archived': sp.status = 'active'
 
-    # Updates (Title, Vendor, Desc, Tags...)
+    # Updates
     if cfg['title']: sp.title = p['name']
     if cfg['vendor']: sp.vendor = vendor_name
     if cfg['desc']: sp.body_html = p.get('description_sale') or ''
-    
-    if cfg['tags'] and p.get('product_tag_ids'):
-        t_names = [tag_map[tid] for tid in p['product_tag_ids'] if tid in tag_map]
+    if cfg['tags']:
+        t_names = odoo.get_tag_names(p.get('product_tag_ids', []))
         if t_names: sp.tags = ",".join(t_names)
 
     # Clean Options
@@ -350,8 +326,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     elif hasattr(sp, 'options') and sp.options and sp.options[0].name != 'Title':
         sp.options = [{'name': 'Title', 'values': ['Default Title']}]
 
-    try:
-        sp.save()
+    try: sp.save()
     except Exception as e:
         print(f"Save Error {sku}: {e}")
         return "error"
@@ -361,7 +336,6 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     final_vars = []
     for des in desired_variants:
         match = next((v for v in existing if v.sku == des['sku']), None)
-        # Logic for Single-Variant Products (Default Title)
         if not match and des['option1'] == 'Default Title' and len(existing) == 1:
              match = existing[0]
         if not match: match = shopify.Variant({'product_id': sp.id})
@@ -386,15 +360,14 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
                     ii.cost = d['cost']; ii.save()
                 except: pass
 
-    # Image Sync (Memory Hash Check)
+    # Image Sync
     if cfg['images'] and p.get('image_1920'):
         try:
             img_raw = p['image_1920']
             if isinstance(img_raw, bytes): img_raw = img_raw.decode('utf-8')
             new_hash = hashlib.md5(img_raw.encode('utf-8')).hexdigest()
-            
-            # Check Hash from Memory Map (if available) or DB
-            current_hash = pm.image_hash if pm else ""
+            pm_check = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
+            current_hash = pm_check.image_hash if pm_check else ""
             
             if new_hash != current_hash or not sp.images:
                 if sp.images:
@@ -403,24 +376,19 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
                         except: pass
                 img = shopify.Image(prefix_options={'product_id': sp.id})
                 img.attachment = img_raw; img.save()
-                
-                # Update DB
-                pm_update = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
-                if pm_update:
-                    pm_update.image_hash = new_hash
-                    db.session.commit()
+                if pm_check:
+                    pm_check.image_hash = new_hash; db.session.commit()
         except: pass
 
-    # --- MAP UPDATE (Rebuild the Map) ---
+    # --- MAP UPDATE (REBUILD) ---
     try:
-        # Since we wiped the table, we MUST re-save the map here.
+        # Re-fetch map to be safe
         pm_final = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
         if not pm_final:
             vid = sp.variants[0].id if sp.variants else '0'
             pm_final = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=str(vid), shop_url=shop_url)
             db.session.add(pm_final)
         
-        # Always update the variant ID just in case it changed
         if sp.variants:
             pm_final.shopify_variant_id = str(sp.variants[0].id)
             
