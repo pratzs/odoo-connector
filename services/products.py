@@ -182,7 +182,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     vendor_name = product_name.split(' ')[0] if product_name else "Worthy"
 
     # --- UPDATED: Strict Variant Logic ---
-    # Only treat as pack if 'sh_is_secondary_unit' is strictly True
+    # --- UPDATED: Strict Variant Logic ---
     is_pack = False
     
     main_ratio = float(p.get('qty_per_pack', 1.0))
@@ -191,22 +191,34 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     sec_ratio = 1.0
     sec_name = "Unit"
     
-    # 💥 KEY FIX: If Odoo checkbox is unchecked, force is_pack = False
+    # 1. Check if Secondary Unit is active
     if p.get('sh_is_secondary_unit'):
         if p.get('sh_secondary_uom'):
             sec_data = p['sh_secondary_uom'] # [id, "Name"]
-            if sec_data and sec_data[0] in uom_map:
-                sec_ratio = uom_map[sec_data[0]]['ratio']
+            
+            # A. Get Name (Try Odoo data first, then map)
+            if len(sec_data) > 1 and sec_data[1]:
+                sec_name = str(sec_data[1])
+            elif sec_data[0] in uom_map:
                 sec_name = uom_map[sec_data[0]]['name']
+
+            # B. Get Ratio (from Map)
+            if sec_data[0] in uom_map:
+                sec_ratio = uom_map[sec_data[0]]['ratio']
         
-        # Only become a pack if ratios imply a split
+        # 2. Determine if it is a pack
         if main_ratio > 1.0 or sec_ratio != 1.0:
             is_pack = True
+            
+            # 3. FORCE FORMATTING: "CTNX6" -> "6 per pack"
+            if sec_ratio > 1.0:
+                sec_name = f"{int(sec_ratio)} per pack"
 
     # 3. Main UOM Name
     main_uom_name = "Outer"
     if p.get('uom_id') and p['uom_id'][0] in uom_map:
         raw_name = uom_map[p['uom_id'][0]]['name']
+        # FIX: Ensure it's a string to prevent .lower() crash
         main_uom_name = str(raw_name) if raw_name else "Outer"
         
         if main_ratio > 1 and "per pack" not in main_uom_name.lower():
@@ -562,7 +574,8 @@ def fix_variant_mess_task(shop_url, company_id):
                 p = odoo_map[ref_sku]
                 processed += 1
                 
-                # --- UPDATED LOGIC ---
+
+               # --- UPDATED: Strict Variant Logic ---
                 is_pack = False
                 main_ratio = float(p.get('qty_per_pack', 1.0))
                 if main_ratio < 1.0: main_ratio = 1.0
@@ -570,22 +583,29 @@ def fix_variant_mess_task(shop_url, company_id):
                 sec_ratio = 1.0
                 sec_name = "Unit"
                 
-                # CHECKBOX CHECK
+                # 1. Check if Secondary Unit is active
                 if p.get('sh_is_secondary_unit'):
                     if p.get('sh_secondary_uom'):
-                        sec_data = p['sh_secondary_uom'] # Expected: [ID, "CTNX6"]
+                        sec_data = p['sh_secondary_uom']
                         
-                        # A. Get Name Directly from Product Data (Reliable)
+                        # A. Get Name
                         if len(sec_data) > 1 and sec_data[1]:
                             sec_name = str(sec_data[1])
-                        
-                        # B. Get Ratio from Map (Required for math)
+                        elif sec_data[0] in uom_map:
+                            sec_name = uom_map[sec_data[0]]['name']
+
+                        # B. Get Ratio
                         if sec_data[0] in uom_map:
                             sec_ratio = uom_map[sec_data[0]]['ratio']
                     
-                    # Only split if math requires it
+                    # 2. Determine Pack Status
                     if main_ratio > 1.0 or sec_ratio != 1.0:
                         is_pack = True
+                        
+                        # 3. FORCE FORMATTING: "CTNX6" -> "6 per pack"
+                        if sec_ratio > 1.0:
+                            sec_name = f"{int(sec_ratio)} per pack"
+    
 
                 # Prices
                 pack_price = float(p.get('list_price', 0.0))
