@@ -8,6 +8,34 @@ from datetime import datetime
 from models import Shop, ProductMap, AppSetting, db
 from utils import get_odoo_connection, log_event, setup_shopify_session, get_config, q_default
 
+
+def safe_find_variant_by_sku(sku, retries=3):
+    """
+    TRIPLE-CHECK: robustly finds a variant by SKU.
+    If Shopify blinks/throttles, it waits and tries again.
+    """
+    clean_sku = str(sku).strip()
+    for attempt in range(retries):
+        try:
+            # Search for the variant by SKU
+            variants = shopify.Variant.find(sku=clean_sku)
+            
+            # Filter results to ensure EXACT match (Shopify fuzzy search can be weird)
+            exact_matches = [v for v in variants if v.sku == clean_sku]
+            
+            if exact_matches:
+                return exact_matches[0] # Found it!
+            
+            # If not found, wait slightly longer before assuming it doesn't exist
+            time.sleep(1)
+            
+        except Exception as e:
+            print(f"Search Warning (Attempt {attempt+1}): {e}")
+            time.sleep(2) # Wait longer on error
+            
+    return None # Truly not found after 3 tries
+
+
 # =====================================================
 # 1. THE DISPATCHER
 # =====================================================
@@ -228,24 +256,21 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     sp = shopify_product_cache.get(sku)
     action_log = "updated"
     
-    # If not in cache, fallback to slow search (Standard safety logic)
     if not sp:
-        try:
-            found_variants = shopify.Variant.find(params={'sku': sku})
-            for v in found_variants:
-                collision = ProductMap.query.filter_by(shopify_variant_id=str(v.id), shop_url=shop_url).first()
-                if collision and collision.odoo_product_id != p['id']:
-                    continue
-                
-                parent = shopify.Product.find(v.product_id)
-                sim = SequenceMatcher(None, str(parent.title).lower(), str(product_name).lower()).ratio()
-                if sim < 0.3:
-                    new_sku = f"OLD_{sku}"; parent.status = 'archived'
-                    v.sku = new_sku; v.save(); parent.save()
-                    action_log = "archived"; continue 
-
-                sp = parent; break
-        except: pass
+        # This will try 3 times, waiting between tries if Shopify errors out
+        existing_variant = safe_find_variant_by_sku(sku)
+        
+        if existing_variant:
+            # Check for collisions (ensure we aren't stealing another product's map)
+            collision = ProductMap.query.filter_by(shopify_variant_id=str(existing_variant.id), shop_url=shop_url).first()
+            
+            # Only proceed if it's not mapped to a different Odoo ID
+            if not collision or collision.odoo_product_id == p['id']:
+                try:
+                    # We found the variant, now get the parent product to update it
+                    sp = shopify.Product.find(existing_variant.product_id)
+                except:
+                    sp = None
 
     # --- Create Logic ---
     if not sp:
