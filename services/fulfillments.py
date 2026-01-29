@@ -33,6 +33,12 @@ def sync_odoo_fulfillments(shop_url):
             log_event('Fulfillment', 'Error', f"Odoo Search Failed: {e}", shop_url=shop_url)
             return
 
+        # --- FIX START: Log if nothing found so the user isn't left guessing ---
+        if not pickings:
+            log_event('Fulfillment', 'Info', "Job Complete: No new fulfilled orders found.", shop_url=shop_url)
+            return
+        # --- FIX END -----------------------------------------------------------
+
         synced_count = 0
         for pick in pickings:
             order_name = pick['origin'].replace('ONLINE_', '').strip()
