@@ -50,7 +50,8 @@ from services.products import (
     process_product_data, 
     archive_shopify_duplicates, 
     cleanup_shopify_products,
-    find_shopify_product_by_sku
+    find_shopify_product_by_sku,
+    emergency_purge_junk_products
 )
 from services.customers import sync_customers_master
 from services.refunds import process_refund_data
@@ -2356,8 +2357,6 @@ def api_get_unmapped_products():
             })
 
     except Exception as e:
-        print(f"CRITICAL DIAGNOSTIC ERROR: {str(e)}")
-        return jsonify({'error': str(e)}), 500
         print(f"CRITICAL DIAGNOSTIC ERROR: {str(e)}")
         return jsonify({'error': str(e)}), 500
         
