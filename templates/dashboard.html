@@ -250,14 +250,50 @@
             <button onclick="triggerAction('/sync/cancellations')" class="btn btn-secondary text-start">Sync Cancellations</button>
         </div>
     </div>
-            <div class="card p-3 mt-3">
-        <div class="section-header">🔍 Diagnose Product</div>
-        <div class="input-group">
-            <input type="text" id="diagSku" class="form-control" placeholder="Enter SKU (e.g. C0547)">
-            <button class="btn btn-dark" onclick="runDiagnosis()">Check Status</button>
-        </div>
-        <div id="diagResult" class="mt-2 p-2 border bg-light d-none" style="white-space: pre-wrap; font-family: monospace; font-size: 12px;"></div>
+         <div class="card shadow-sm mb-4">
+    <div class="card-header bg-white py-3">
+        <h5 class="mb-0">🕵️‍♂️ Deep Data Diagnosis</h5>
     </div>
+    <div class="card-body">
+        <div class="alert alert-light border mb-3">
+            <small class="text-muted"><i class="bi bi-info-circle"></i> This tool runs a live comparison between your Database, Odoo, and Shopify to identify sync mismatches (Price, Stock, Barcodes, Packs).</small>
+        </div>
+
+        <div class="row g-3">
+            <div class="col-md-5">
+                <label class="form-label fw-bold">Check Product (SKU)</label>
+                <div class="input-group">
+                    <span class="input-group-text"><i class="bi bi-box-seam"></i></span>
+                    <input type="text" id="diagSku" class="form-control" placeholder="e.g. A001">
+                </div>
+            </div>
+
+            <div class="col-md-5">
+                <label class="form-label fw-bold">Check Customer (Email)</label>
+                <div class="input-group">
+                    <span class="input-group-text"><i class="bi bi-person"></i></span>
+                    <input type="text" id="diagEmail" class="form-control" placeholder="client@example.com">
+                </div>
+            </div>
+
+            <div class="col-md-2 d-flex align-items-end">
+                <button onclick="runDeepDiagnose()" id="btnDiagnose" class="btn btn-primary w-100">
+                    <i class="bi bi-search"></i> Run Scan
+                </button>
+            </div>
+        </div>
+
+        <div id="diagResultContainer" class="mt-4 d-none">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <label class="form-label fw-bold m-0">Diagnostic Report</label>
+                <button onclick="clearDiagnose()" class="btn btn-sm btn-outline-secondary">Clear</button>
+            </div>
+            <div class="bg-dark text-light p-3 rounded shadow-inner" style="font-family: 'Consolas', 'Monaco', monospace; max-height: 500px; overflow-y: auto; white-space: pre-wrap; font-size: 0.9rem;">
+                <div id="diagOutput">Initializing...</div>
+            </div>
+        </div>
+    </div>
+</div>
 </div>
         <div class="col-md-8">
             <div class="card h-100 overflow-hidden border-0 shadow-sm">
@@ -1194,28 +1230,6 @@ function updateSyncStatus() {
 updateSyncStatus();
 setInterval(updateSyncStatus, 15000);
 
-        // DIAGNOSTIC SCRIPT
-function runDiagnosis() {
-    const sku = document.getElementById('diagSku').value;
-    if(!sku) { showToast("Enter a SKU"); return; }
-    
-    const resBox = document.getElementById('diagResult');
-    resBox.classList.remove('d-none');
-    resBox.innerText = "Scanning Odoo & Shopify... please wait.";
-
-    // We need to create a new route in app.py for this, or use a simple fetch if you have it.
-    // Since diagnose.py is a script, let's expose it via a route in app.py first.
-    // For now, this is a placeholder until we add the route below.
-    fetch(`/api/diagnose/${sku}?shop=${CURRENT_SHOP_URL}`)
-        .then(r => r.text())
-        .then(text => {
-            resBox.innerHTML = text; 
-        })
-        .catch(err => {
-            resBox.innerText = "Error: " + err;
-        });
-}
-
 function openJobModal(status) {
     // 1. Set Title
     const titles = {
@@ -1307,6 +1321,68 @@ function doJobAction(action, jobId, btn) {
             }
         });
 }
+
+
+function runDeepDiagnose() {
+    const sku = document.getElementById('diagSku').value.trim();
+    const email = document.getElementById('diagEmail').value.trim();
+    const output = document.getElementById('diagOutput');
+    const container = document.getElementById('diagResultContainer');
+    const btn = document.getElementById('btnDiagnose');
+
+    if (!sku && !email) {
+        alert("Please enter a SKU or Email to scan.");
+        return;
+    }
+
+    // 1. UI Loading State
+    container.classList.remove('d-none');
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span> Scanning...`;
+    output.innerHTML = `<span class="text-warning">⏳ CONNECTING TO ODOO & SHOPIFY... PLEASE WAIT...</span>`;
+
+    // 2. Send Request
+    fetch(`/api/diagnose/run?shop=${CURRENT_SHOP_URL}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sku: sku, email: email })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.success) {
+            // 3. Format Output (Add colors to standard text)
+            let report = data.report
+                // Colorize Keys
+                .replace(/✅/g, '<span class="text-success fw-bold">✅</span>')
+                .replace(/❌/g, '<span class="text-danger fw-bold">❌</span>')
+                .replace(/⚠️/g, '<span class="text-warning fw-bold">⚠️</span>')
+                .replace(/🕵️‍♂️/g, '<span class="text-info fw-bold">🕵️‍♂️</span>')
+                // Highlight Headers
+                .replace(/(--- .* ---)/g, '<span class="text-info">$1</span>')
+                // Highlight Mismatches
+                .replace(/(MISMATCH)/g, '<span class="bg-danger text-white px-1">MISMATCH</span>');
+
+            output.innerHTML = report;
+        } else {
+            output.innerHTML = `<span class="text-danger fw-bold">SYSTEM ERROR:</span>\n${data.report}`;
+        }
+    })
+    .catch(err => {
+        output.innerHTML = `<span class="text-danger">Request Failed: ${err}</span>`;
+    })
+    .finally(() => {
+        // 4. Reset Button
+        btn.disabled = false;
+        btn.innerHTML = `<i class="bi bi-search"></i> Run Scan`;
+    });
+}
+
+function clearDiagnose() {
+    document.getElementById('diagResultContainer').classList.add('d-none');
+    document.getElementById('diagSku').value = '';
+    document.getElementById('diagEmail').value = '';
+}
+        
     </script>
 </body>
 </html>
