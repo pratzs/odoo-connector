@@ -2364,45 +2364,49 @@ def api_get_unmapped_products():
 @require_shopify_session
 def api_diagnose_product(sku):
     shop_url = request.args.get('shop')
-    import io
+    import io, time
     from contextlib import redirect_stdout
     f = io.StringIO()
     
     with redirect_stdout(f):
-        print(f"🕵️‍♂️ STARTING DEEP TRACE FOR SKU: '{sku}'")
-        odoo = get_odoo_connection(shop_url)
-        if not odoo: return "Odoo Connection Failed"
+        print(f"🕵️‍♂️ SIMULATED SYNC TRACE FOR SKU: '{sku}'")
+        print(f"--------------------------------------------------")
 
-        p_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search', [[['default_code', '=', sku]]])
-        p_name = "Unknown"
-        if p_ids:
-            p_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'read', [p_ids], {'fields': ['name']})
-            p_name = p_data[0]['name']
-            print(f"✅ Odoo Found: {p_name}")
+        # 1. BUILD LOCAL CACHE (The same way the sync now does)
+        print(f"👉 STEP 1: Building Local Shopify Cache...")
+        shopify_sku_map = {}
+        try:
+            # We fetch all active products to see if A0001 is visible to the API
+            page = shopify.Product.find(limit=250, status='active')
+            while page:
+                for sp in page:
+                    for v in sp.variants:
+                        if v.sku:
+                            shopify_sku_map[str(v.sku).strip()] = sp
+                if page.has_next_page():
+                    page = page.next_page()
+                    time.sleep(0.2)
+                else:
+                    break
+            print(f"✅ Local Cache Built: {len(shopify_sku_map)} SKUs loaded.")
+        except Exception as e:
+            print(f"❌ Cache Build Failed: {e}")
 
-        print(f"\n👉 STEP 1: SKU Title Search ('{sku}')")
-        res1 = shopify.Product.find(title=sku, status='any')
-        found = False
-        for c in res1:
-            if any(str(v.sku).strip() == sku for v in c.variants):
-                print(f"✅ MATCH FOUND IN TITLE SEARCH: '{c.title}' (ID: {c.id})")
-                found = True; break
+        # 2. LOOKUP SKU IN CACHE
+        print(f"\n👉 STEP 2: Searching Cache for '{sku}'...")
+        match = shopify_sku_map.get(str(sku).strip())
         
-        if not found:
-            print(f"❌ Attempt 1 Failed. Trying Attempt 2 (Name Search)...")
-            first_word = p_name.split()[0]
-            clean_word = "".join(ch for ch in first_word if ch.isalnum())
-            res2 = shopify.Product.find(title=clean_word, status='any', limit=250)
-            for c in res2:
-                if any(str(v.sku).strip() == sku for v in c.variants):
-                    print(f"✅ MATCH FOUND IN NAME SEARCH: '{c.title}' (ID: {c.id})")
-                    found = True; break
-        
-        if not found:
-            print(f"❌ ALL RESCUE ATTEMPTS FAILED. System will create a duplicate.")
+        if match:
+            print(f"🎯 MATCH FOUND!")
+            print(f"   Product Title: '{match.title}'")
+            print(f"   Product ID: {match.id}")
+            print(f"   CONCLUSION: The new 'Local Cache' strategy will successfully LINK this product.")
+        else:
+            print(f"❌ NOT FOUND IN CACHE.")
+            print(f"   Current SKUs in Cache (First 10): {list(shopify_sku_map.keys())[:10]}")
+            print(f"   CONCLUSION: Even with a full scan, Shopify is not sending this product to the API.")
 
     return f.getvalue().replace('\n', '<br>')
-
 
 @app.route('/api/jobs/<status>', methods=['GET'])
 @require_shopify_session
