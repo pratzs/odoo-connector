@@ -607,11 +607,9 @@ def repair_single_product_image(shop_url, sku):
 def fix_variant_mess_task(shop_url, company_id):
     """
     Scans Shopify Products.
-    If SKU matches Odoo:
-    1. Enforces strict Variant list (Pack vs Unit).
-    2. Updates Prices.
-    3. Updates Stock Levels (Floor calculation for Packs).
-    4. Deletes any variant not defined in the logic.
+    1. Fetches UOM names (e.g. CTNX6) from Odoo.
+    2. Enforces strict Variant list.
+    3. Updates Names, Prices, and Stock.
     """
     from app import app
     with app.app_context():
@@ -623,80 +621,116 @@ def fix_variant_mess_task(shop_url, company_id):
         
         log_event('Cleanup', 'Info', f"Starting Strict Variant Repair for Company {company_id}...", shop_url=shop_url)
         
-        # 2. Fetch Odoo Data (Active Products Only)
+        # 2. Fetch UOM Map (CRITICAL FOR NAMING)
+        uom_map = {}
+        try:
+            uoms = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'search_read', [], {'fields': ['id', 'name', 'factor_inv']})
+            for u in uoms:
+                uom_map[u['id']] = {'name': u['name'], 'ratio': float(u.get('factor_inv', 1.0))}
+        except Exception as e:
+            print(f"UOM Fetch Warning: {e}")
+
+        # 3. Fetch Odoo Data (Active Products Only)
         try:
             domain = [['sale_ok', '=', True], ['type', 'in', ['product', 'consu']], 
                       ['company_id', '=', int(company_id)], ['active', '=', True]]
             
-            # Added 'qty_available' to fetch stock
             fields = ['default_code', 'name', 'list_price', 'standard_price', 
-                      'sh_is_secondary_unit', 'qty_per_pack', 'qty_available']
+                      'sh_is_secondary_unit', 'sh_secondary_uom', 'qty_per_pack', 'qty_available', 'uom_id']
             
             odoo_products = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                 'product.product', 'search_read', [domain], {'fields': fields})
             
-            # Map by SKU for fast lookup
             odoo_map = {str(p.get('default_code')).strip(): p for p in odoo_products if p.get('default_code')}
             
         except Exception as e:
             log_event('Cleanup', 'Error', f"Odoo Data Fetch Failed: {e}", shop_url=shop_url)
             return
 
-        # 3. Scan Shopify Products
+        # 4. Scan Shopify Products
         page = shopify.Product.find(limit=50, status='active')
         processed = 0
         repaired = 0
         
         while page:
             for sp in page:
-                # Identify Parent SKU from first variant
                 if not sp.variants: continue
-                ref_sku = str(sp.variants[0].sku).replace("-UNIT", "").strip()
+                # Identify Parent SKU
+                ref_sku = str(sp.variants[0].sku).split('-')[0].strip()
                 
                 if not ref_sku or ref_sku not in odoo_map:
-                    continue # Skip if not found in Odoo
+                    continue 
 
                 p = odoo_map[ref_sku]
                 processed += 1
                 
-                # --- LOGIC: PACK vs UNIT ---
+                # --- LOGIC: PACK vs UNIT (Using UOM Map) ---
                 is_pack = False
-                qty_pack = float(p.get('qty_per_pack', 0.0))
-                if p.get('sh_is_secondary_unit') is True and qty_pack > 1.0:
+                
+                # 1. Main Ratio
+                main_ratio = float(p.get('qty_per_pack', 1.0))
+                if main_ratio < 1.0: main_ratio = 1.0
+                
+                # 2. Secondary Ratio & Name
+                sec_ratio = 1.0
+                sec_name = "Unit"
+                has_secondary = False
+
+                if p.get('sh_is_secondary_unit') and p.get('sh_secondary_uom'):
+                    sec_data = p['sh_secondary_uom'] # [id, Name]
+                    if sec_data and sec_data[0] in uom_map:
+                        sec_ratio = uom_map[sec_data[0]]['ratio']
+                        sec_name = uom_map[sec_data[0]]['name'] # e.g., CTNX6
+                        has_secondary = True
+                
+                if main_ratio > 1.0 or has_secondary:
                     is_pack = True
 
                 # Prices
                 pack_price = float(p.get('list_price', 0.0))
                 pack_cost = float(p.get('standard_price', 0.0))
-                unit_price = round(pack_price / qty_pack, 2) if is_pack else 0.0
-                unit_cost = round(pack_cost / qty_pack, 2) if is_pack else 0.0
-
+                
                 # Stock (Qty on Hand)
                 raw_stock = int(p.get('qty_available', 0))
-                pack_stock = math.floor(raw_stock / qty_pack) if is_pack else 0
                 
-                # Define Desired Structure
+                # 3. Main UOM Name
+                main_uom_name = "Outer"
+                if p.get('uom_id') and p['uom_id'][0] in uom_map:
+                    main_uom_name = uom_map[p['uom_id'][0]]['name']
+                    if main_ratio > 1 and "per pack" not in main_uom_name.lower():
+                        main_uom_name = f"{int(main_ratio)} per pack"
+
+                # Define Desired Variants
                 desired_variants = []
                 
                 if is_pack:
-                    sp.options = [{'name': 'Pack Size'}] # Enforce Option Name
+                    sp.options = [{'name': 'Pack Size'}]
                     
-                    # 1. The Pack (Outer)
+                    # A. The Pack
+                    pack_stock = math.floor(raw_stock / main_ratio) if main_ratio > 0 else 0
                     desired_variants.append({
                         'sku': ref_sku,
-                        'option1': f"{int(qty_pack)} per pack",
+                        'option1': main_uom_name,
                         'price': str(pack_price),
                         'cost': str(pack_cost),
                         'stock': pack_stock
                     })
                     
-                    # 2. The Unit (Single)
+                    # B. The Secondary (CTNX6 or Unit)
+                    # Calc: (Total Price / Main Qty) * Secondary Qty
+                    unit_price = round((pack_price / main_ratio) * sec_ratio, 2)
+                    unit_cost = round((pack_cost / main_ratio) * sec_ratio, 2)
+                    unit_stock = math.floor(raw_stock / sec_ratio) if sec_ratio > 0 else 0
+                    
+                    # Suffix logic
+                    suffix = f"-{sec_name.replace(' ', '')}" if sec_ratio > 1 else "-UNIT"
+                    
                     desired_variants.append({
-                        'sku': f"{ref_sku}-UNIT",
-                        'option1': "Unit",
+                        'sku': f"{ref_sku}{suffix}",
+                        'option1': sec_name,
                         'price': str(unit_price),
                         'cost': str(unit_cost),
-                        'stock': raw_stock # Unit stock is raw stock
+                        'stock': unit_stock
                     })
                 else:
                     # Simple Product
@@ -717,38 +751,36 @@ def fix_variant_mess_task(shop_url, company_id):
                 dirty = False
 
                 for target in desired_variants:
-                    # Find existing or create new
+                    # Fuzzy match existing variant
                     match = next((v for v in current_variants if v.sku == target['sku']), None)
                     
-                    # Fallback for switching from Pack -> Single (Default Title match)
-                    if not match and target['option1'] == 'Default Title' and current_variants:
+                    # Fallback match (e.g. if switching "Default Title" -> "Pack")
+                    if not match and len(current_variants) == 1 and len(desired_variants) == 1:
                         match = current_variants[0]
+                    # Fallback match 2 (if switching "Unit" -> "CTNX6" but SKU matches base)
+                    if not match and target['option1'] == sec_name and len(current_variants) > 1:
+                         # Try finding the variant that ISN'T the main pack
+                         match = next((v for v in current_variants if v.sku != ref_sku), None)
 
                     if not match:
                         match = shopify.Variant({'product_id': sp.id})
                         match.inventory_management = 'shopify'
                         dirty = True
 
-                   # Update core fields (Using getattr to prevent AttributeError on new objects)
-                    current_opt1 = getattr(match, 'option1', None)
-                    current_price = getattr(match, 'price', None)
-                    current_sku = getattr(match, 'sku', None)
-
-                    if current_opt1 != target['option1']: 
+                    # Update fields (Safe getattr)
+                    if getattr(match, 'option1', '') != target['option1']: 
                         match.option1 = target['option1']
                         dirty = True
-                    
-                    if str(current_price) != str(target['price']): 
+                    if str(getattr(match, 'price', '')) != target['price']: 
                         match.price = target['price']
                         dirty = True
-                    
-                    if current_sku != target['sku']: 
+                    if getattr(match, 'sku', '') != target['sku']: 
                         match.sku = target['sku']
                         dirty = True
                     
                     final_list.append(match)
 
-                # Detect Deletions (If Shopify has more than Desired)
+                # Detect Deletions
                 if len(current_variants) > len(final_list):
                     dirty = True
 
@@ -757,22 +789,19 @@ def fix_variant_mess_task(shop_url, company_id):
                     try:
                         if sp.save():
                             repaired += 1
-                            # POST-SAVE: Update Stock & Cost (Requires InventoryItem ID)
+                            # Update Stock & Cost
                             location_id = get_config('shopify_location_id', None, shop_url=shop_url)
                             if location_id:
                                 for v in sp.variants:
-                                    target = next((t for t in desired_variants if t['sku'] == v.sku), None)
-                                    if target:
-                                        # Update Cost
-                                        if v.inventory_item_id:
-                                            try:
-                                                ii = shopify.InventoryItem.find(v.inventory_item_id)
-                                                ii.cost = target['cost']
-                                                ii.save()
-                                            except: pass
-                                        
-                                        # Update Stock
+                                    target = next((t for t in desired_variants if t['option1'] == v.option1), None)
+                                    if target and v.inventory_item_id:
                                         try:
+                                            # Cost
+                                            ii = shopify.InventoryItem.find(v.inventory_item_id)
+                                            ii.cost = target['cost']
+                                            ii.save()
+                                            
+                                            # Stock
                                             shopify.InventoryLevel.set(
                                                 location_id=location_id,
                                                 inventory_item_id=v.inventory_item_id,
