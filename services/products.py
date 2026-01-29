@@ -697,7 +697,11 @@ def fix_variant_mess_task(shop_url, company_id):
                 # 3. Main UOM Name
                 main_uom_name = "Outer"
                 if p.get('uom_id') and p['uom_id'][0] in uom_map:
-                    main_uom_name = uom_map[p['uom_id'][0]]['name']
+                    # Get name, ensure it is a string (handle Odoo False)
+                    raw_name = uom_map[p['uom_id'][0]]['name']
+                    main_uom_name = str(raw_name) if raw_name else "Outer"
+                    
+                    # Safe check using str()
                     if main_ratio > 1 and "per pack" not in main_uom_name.lower():
                         main_uom_name = f"{int(main_ratio)} per pack"
 
