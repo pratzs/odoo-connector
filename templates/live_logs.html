@@ -159,10 +159,21 @@
             return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
         }
 
+        let lastDataJSON = '';
+        
         async function fetchLogs() {
             try {
                 const res = await fetch(fetchUrl);
                 const data = await res.json();
+
+                // --- 1. SMART CHECK: Did anything actually change? ---
+                // We turn the data into a string to compare it easily
+                const currentDataJSON = JSON.stringify(data);
+                if (currentDataJSON === lastDataJSON) {
+                    return; 
+                }
+                lastDataJSON = currentDataJSON; 
+                // ----------------------------------------------------
 
                 if (isFirstLoad) {
                     loadingState.classList.add('d-none');
@@ -179,10 +190,12 @@
                 emptyState.classList.add('d-none');
                 emptyState.classList.remove('d-flex');
                 
+                // Only now do we rebuild the list
                 logList.innerHTML = ''; 
                 data.forEach(log => {
                     logList.appendChild(createLogItem(log));
                 });
+
             } catch (err) { console.error("Log poll failed", err); }
         }
 
