@@ -32,7 +32,7 @@ def sync_products_master(shop_url):
         company_id = shop.odoo_company_id
         if not company_id: return
 
-        # ✅ CRITICAL: Only sync active products to prevent "ghost" duplicates
+        # Only sync active products
         domain = [
             ['sale_ok', '=', True], 
             ['type', 'in', ['product', 'consu']], 
@@ -90,7 +90,7 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
             print(f"Odoo Batch Read Error: {e}")
             return
 
-        # Bulk fetch Categories & Tags
+        # Bulk fetch Categories, Tags & UOMs
         all_categ_ids = set()
         all_tag_ids = set()
         for p in products:
@@ -118,7 +118,7 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
                 uom_map[u['id']] = {'name': u['name'], 'ratio': float(u.get('factor_inv', 1.0))}
         except: pass
 
-        # --- B. PREFETCH SHOPIFY DATA (TOTAL SCAN STRATEGY) ---
+        # --- B. PREFETCH SHOPIFY DATA ---
         batch_skus = [str(p.get('default_code')).strip() for p in products if p.get('default_code')]
         
         # 1. Bulk DB Lookup
@@ -136,13 +136,11 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
                     for v in sp.variants:
                         if v.sku:
                             shopify_product_cache[str(v.sku).strip()] = sp
-                
                 if page.has_next_page():
                     page = page.next_page()
                     time.sleep(0.5) 
                 else:
                     break
-            
             print(f"✅ Local Cache Built: Loaded {len(shopify_product_cache)} SKUs from Shopify.")
         except Exception as e:
             print(f"❌ Failed to build Shopify cache: {e}")
@@ -154,7 +152,6 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
         for p in products:
             try:
                 res = process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db_map_dict, shopify_product_cache)
-                
                 if 'archived' in res: stats['archived'] += 1
                 elif 'created' in res: stats['created'] += 1
                 elif 'updated' in res: stats['updated'] += 1
@@ -184,38 +181,36 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     product_name = p.get('name', 'Unknown')
     vendor_name = product_name.split(' ')[0] if product_name else "Worthy"
 
-    # --- Variant / Pack Logic ---
+    # --- UPDATED: Strict Variant Logic ---
+    # Only treat as pack if 'sh_is_secondary_unit' is strictly True
     is_pack = False
     
-    # 1. Main Ratio
     main_ratio = float(p.get('qty_per_pack', 1.0))
     if main_ratio < 1.0: main_ratio = 1.0
     
-    # 2. Secondary Ratio & Name
     sec_ratio = 1.0
     sec_name = "Unit"
-    has_secondary = False
-
-    if p.get('sh_is_secondary_unit') and p.get('sh_secondary_uom'):
-        sec_data = p['sh_secondary_uom'] # [id, Name]
-        if sec_data and sec_data[0] in uom_map:
-            sec_ratio = uom_map[sec_data[0]]['ratio']
-            sec_name = uom_map[sec_data[0]]['name'] 
-            has_secondary = True
     
-    if main_ratio > 1.0 or has_secondary:
-        is_pack = True
+    # 💥 KEY FIX: If Odoo checkbox is unchecked, force is_pack = False
+    if p.get('sh_is_secondary_unit'):
+        if p.get('sh_secondary_uom'):
+            sec_data = p['sh_secondary_uom'] # [id, "Name"]
+            if sec_data and sec_data[0] in uom_map:
+                sec_ratio = uom_map[sec_data[0]]['ratio']
+                sec_name = uom_map[sec_data[0]]['name']
+        
+        # Only become a pack if ratios imply a split
+        if main_ratio > 1.0 or sec_ratio != 1.0:
+            is_pack = True
 
     # 3. Main UOM Name
     main_uom_name = "Outer"
-    if p.get('uom_id'):
-        u_id = p['uom_id'][0]
-        if u_id in uom_map:
-            raw_name = uom_map[u_id]['name']
-            main_uom_name = str(raw_name) if raw_name else "Outer"
-            
-            if main_ratio > 1 and "per pack" not in main_uom_name.lower():
-                main_uom_name = f"{int(main_ratio)} per pack"
+    if p.get('uom_id') and p['uom_id'][0] in uom_map:
+        raw_name = uom_map[p['uom_id'][0]]['name']
+        main_uom_name = str(raw_name) if raw_name else "Outer"
+        
+        if main_ratio > 1 and "per pack" not in main_uom_name.lower():
+            main_uom_name = f"{int(main_ratio)} per pack"
 
     desired_variants = []
     raw_price = float(p.get('list_price', 0.0))
@@ -223,9 +218,11 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     barcode = p.get('barcode', '')
 
     if not is_pack:
+        # Simple Product (1 Variant)
         desired_variants.append({'option1': 'Default Title', 'price': str(raw_price), 'sku': sku, 'barcode': barcode, 'cost': str(raw_cost)})
     else:
-        # A. Main Variant (Pack)
+        # Pack Product (2 Variants)
+        # A. Main Variant (The Parent)
         desired_variants.append({
             'option1': main_uom_name, 
             'price': str(raw_price), 
@@ -234,7 +231,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
             'cost': str(raw_cost)
         })
         
-        # B. Secondary Variant
+        # B. Secondary Variant (The Breakdown)
         unit_price = round((raw_price / main_ratio) * sec_ratio, 2)
         unit_cost = round((raw_cost / main_ratio) * sec_ratio, 2)
         
@@ -244,7 +241,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
             'option1': sec_name, 
             'price': str(unit_price), 
             'sku': f"{sku}{suffix}", 
-            'barcode': '',
+            'barcode': '', 
             'cost': str(unit_cost)
         })
 
@@ -270,7 +267,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
                 try: sp = shopify.Product.find(existing_variant.product_id)
                 except: sp = None
 
-    # C. RESCUE GUARD
+    # RESCUE GUARD
     if not sp:
         try:
             candidates = shopify.Product.find(title=sku, status='any')
@@ -284,8 +281,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
                 for c in candidates:
                     if any(str(v.sku).strip() == sku for v in c.variants):
                         sp = c; break
-        except Exception as e:
-            print(f"Rescue Error: {e}")
+        except: pass
 
     # ========================================================
     # 3. EXECUTE (Create or Update)
@@ -294,7 +290,6 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
         if not cfg['auto_create']: return "skipped"
         sp = shopify.Product(); sp.title = p['name']; sp.vendor = vendor_name
         sp.status = 'active' if cfg['auto_publish'] else 'draft'
-        sp.published_scope = 'global'
         
         if p.get('public_categ_ids'):
             cat_id = p['public_categ_ids'][0]
@@ -564,23 +559,24 @@ def fix_variant_mess_task(shop_url, company_id):
                 p = odoo_map[ref_sku]
                 processed += 1
                 
+                # --- UPDATED STRICT PACK LOGIC ---
                 is_pack = False
                 main_ratio = float(p.get('qty_per_pack', 1.0))
                 if main_ratio < 1.0: main_ratio = 1.0
                 
                 sec_ratio = 1.0
                 sec_name = "Unit"
-                has_secondary = False
-
-                if p.get('sh_is_secondary_unit') and p.get('sh_secondary_uom'):
-                    sec_data = p['sh_secondary_uom']
-                    if sec_data and sec_data[0] in uom_map:
-                        sec_ratio = uom_map[sec_data[0]]['ratio']
-                        sec_name = uom_map[sec_data[0]]['name']
-                        has_secondary = True
                 
-                if main_ratio > 1.0 or has_secondary:
-                    is_pack = True
+                # Only strictly require checkbox to enable pack mode
+                if p.get('sh_is_secondary_unit'):
+                    if p.get('sh_secondary_uom'):
+                        sec_data = p['sh_secondary_uom']
+                        if sec_data and sec_data[0] in uom_map:
+                            sec_ratio = uom_map[sec_data[0]]['ratio']
+                            sec_name = uom_map[sec_data[0]]['name']
+                    
+                    if main_ratio > 1.0 or sec_ratio != 1.0:
+                        is_pack = True
 
                 pack_price = float(p.get('list_price', 0.0))
                 pack_cost = float(p.get('standard_price', 0.0))
