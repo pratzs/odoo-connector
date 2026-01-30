@@ -2341,6 +2341,76 @@ def clear_failed_jobs():
         
     return jsonify({'success': True, 'message': f'Cleared {count} failed jobs.'})
 
+# ==========================================
+#  SUPPORT EMAIL ENDPOINT (Namecheap)
+# ==========================================
+@app.route('/api/support/send', methods=['POST'])
+def send_support_email():
+    try:
+        # 1. Security & Data Check
+        shop_url = request.args.get('shop')
+        data = request.json
+        user_email = data.get('email')
+        ticket_subject = data.get('subject')
+        message_body = data.get('message')
+
+        if not shop_url or not user_email or not message_body:
+            return jsonify({'success': False, 'error': 'Missing required fields'}), 400
+
+        # 2. Email Configuration (Namecheap cPanel)
+        # ---------------------------------------------------------
+        SMTP_SERVER = "premium74.web-hosting.com"
+        SMTP_PORT = 465  # SSL Port
+        
+        SENDER_EMAIL = "support@worthyproducts.co.nz"
+        SENDER_PASSWORD = "Jayshrikrishna1!" 
+        
+        RECIPIENT_EMAIL = "hello@tripsterdevelopers.com"
+        # ---------------------------------------------------------
+
+        # 3. Format the Email Content
+        full_subject = f"[{shop_url}] Support: {ticket_subject}"
+        
+        email_content = f"""
+        New Support Request
+        -------------------
+        Shop: {shop_url}
+        User Email: {user_email}
+        Subject: {ticket_subject}
+        
+        Message:
+        {message_body}
+        
+        -------------------
+        Sent via Odoo Connector App
+        """
+
+        # 4. Construct the Message Object
+        msg = EmailMessage()
+        msg.set_content(email_content)
+        msg['Subject'] = full_subject
+        msg['From'] = SENDER_EMAIL
+        msg['To'] = RECIPIENT_EMAIL
+        
+        # If the user provided a valid email, set it as Reply-To
+        # so you can just hit "Reply" in your inbox.
+        msg['Reply-To'] = user_email
+
+        # 5. Send via Namecheap SMTP (SSL)
+        print(f"📨 Attempting to send email to {RECIPIENT_EMAIL}...")
+        
+        with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as smtp:
+            smtp.login(SENDER_EMAIL, SENDER_PASSWORD)
+            smtp.send_message(msg)
+
+        print(f"✅ Email sent successfully!")
+        return jsonify({'success': True, 'message': 'Support request sent.'})
+
+    except Exception as e:
+        print(f"❌ SMTP Error: {e}")
+        # Return success=False so the frontend shows the red X toast
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 # Start scheduler thread
 # t = threading.Thread(target=run_schedule, daemon=True)
 # t.start()
