@@ -2,6 +2,8 @@ import os
 import json
 import redis
 import shopify
+import smtplib
+from email.message import EmailMessage
 from datetime import datetime
 from flask import request
 from rq import Queue
@@ -224,3 +226,43 @@ def get_odoo_connection(shop_url):
         else:
             log_event('System', 'Error', f"Connection failed: {e}", shop_url=shop_url)
         return None
+
+
+def send_inventory_alert(shop_url, email_address, discrepancies):
+    """
+    Sends an automated email when Odoo and Shopify stock do not match.
+    """
+    if not discrepancies:
+        return
+
+    # --- CONFIGURATION (Matches your app.py) ---
+    SMTP_SERVER = "premium74.web-hosting.com"
+    SMTP_PORT = 465
+    SENDER_EMAIL = "hello@tripsterdevelopers.com"
+    SENDER_PASSWORD = "Jayshrikrishna1!"
+    # -------------------------------------------
+
+    # Build the email content
+    content = f"⚠️ Inventory Discrepancies Found for {shop_url}\n"
+    content += f"The following products have mismatched stock levels:\n\n"
+    
+    for item in discrepancies:
+        content += f"• SKU: {item['sku']} | Odoo: {item['odoo']} | Shopify: {item['shopify']} (Diff: {item['diff']})\n"
+
+    content += "\nPlease check Odoo Inventory Moves to resolve this."
+
+    # Create Message
+    msg = EmailMessage()
+    msg.set_content(content)
+    msg['Subject'] = f"[{shop_url}] Inventory Alert Report"
+    msg['From'] = SENDER_EMAIL
+    msg['To'] = email_address
+
+    # Send Email
+    try:
+        with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as smtp:
+            smtp.login(SENDER_EMAIL, SENDER_PASSWORD)
+            smtp.send_message(msg)
+        print(f"✅ Inventory Alert sent to {email_address}")
+    except Exception as e:
+        print(f"❌ Failed to send inventory alert: {e}")
