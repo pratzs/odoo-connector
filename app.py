@@ -201,28 +201,6 @@ def verify_shopify(data, hmac_header):
     if not hmac_header: return False
     digest = hmac.new(secret.encode('utf-8'), data, hashlib.sha256).digest()
     return hmac.compare_digest(base64.b64encode(digest).decode(), hmac_header)
-
-
-
-def send_inventory_alert(shop_url, email_address, discrepancies):
-    """Sends a summary email of all flagged inventory differences."""
-    msg = EmailMessage()
-    msg['Subject'] = f"⚠️ Inventory Alert: {shop_url}"
-    msg['From'] = os.getenv('EMAIL_USER')
-    msg['To'] = email_address
-
-    content = f"Inventory Sync for {shop_url} found items exceeding your threshold:\n\n"
-    for item in discrepancies:
-        content += f"SKU: {item['sku']} | Odoo: {item['odoo']} | Shopify: {item['shopify']} | Difference: {item['diff']}\n"
-    
-    msg.set_content(content)
-
-    try:
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-            smtp.login(os.getenv('EMAIL_USER'), os.getenv('EMAIL_PASS'))
-            smtp.send_message(msg)
-    except Exception as e:
-        print(f"Failed to send alert email: {e}")
         
 
 def sync_categories_only(shop_url):
