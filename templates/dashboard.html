@@ -368,10 +368,10 @@
                         </div>
                         <div class="alert alert-secondary mt-1 mb-0 p-2 border-0" style="font-size: 12px; background-color: #f1f2f3;">
                             <i class="bi bi-info-circle-fill me-1"></i> <strong>Setup Required:</strong><br>
-                            To use this, create a Metafield definition in <em>Shopify Admin > Settings > Custom Data > Products</em>:<br>
+                            To use this, create a Metafield definition in <em>Shopify Admin > Settings > Metafields/Metaobjects > Products</em>:<br>
                             <ul class="mb-0 ps-3 mt-1">
                                 <li>Namespace and key: <code style="color: #d82c0d;">custom.original_retail_price</code></li>
-                                <li>Type: <strong>Decimal</strong> (Number)</li>
+                                <li>Type: <strong>Money</strong> (Number)</li>
                             </ul>
                         </div>
                     </div>
@@ -476,8 +476,9 @@
                         </div>
                         <div class="mb-3 border p-2 rounded bg-light mt-2">
                             <label class="form-label-sm fw-bold">🏢 Group Companies List</label>
+                            <small>Only applies to Shopify Plus B2B Companies</small>
                             <input type="text" class="form-control form-control-sm" id="groupCompaniesList" 
-                                   placeholder="e.g. CSB Group, Z Energy" value="{{ config.group_companies_list }}">
+                                   placeholder="e.g. XYZ Group, Z Energy" value="{{ config.group_companies_list }}">
                         </div>
                     </div>
                 </div>
@@ -513,7 +514,7 @@
                         <div class="d-flex justify-content-between align-items-center">
                             <div>
                                 <strong>🛠 Fix Variant Mess</strong><br>
-                                <small class="text-muted">Scans products. Fixes Pack/Unit logic.</small>
+                                <small class="text-muted">Scans products. Fixes Pack/Unit logic.(Only applies if you are using Odoo Secondary UOM Feature)</small>
                             </div>
                             <i class="bi bi-chevron-right text-muted"></i>
                         </div>
@@ -588,7 +589,7 @@
                     <div class="d-flex justify-content-between align-items-center">
                         <div>
                             <strong>🏷️ Force Name Repair</strong><br>
-                            <small class="text-muted">Applies your Group Whitelist rules to all customers immediately.</small>
+                            <small class="text-muted">Applies your Group Whitelist rules to all customers immediately.(Only for Shopify Plus B2B Companies)</small>
                         </div>
                         <i class="bi bi-play-circle text-muted"></i>
                     </div>
@@ -596,21 +597,15 @@
                     
                     <div class="row g-2">
                          <div class="col-6">
-                            <button onclick="triggerAction('/sync/products/master', 'POST')" class="btn btn-secondary w-100 py-3">
-                                Full Master Sync
-                            </button>
+                            <button onclick="triggerAction('/sync/categories/run_initial_import')" class="btn btn-secondary w-100 py-3">
+                            Run Initial Category Sync (Shopify to Odoo) First Instance
+                        </button>
                          </div>
                          <div class="col-6">
                             <button onclick="triggerAction('/test/simulate_order', 'POST')" class="btn btn-secondary w-100 py-3">
                                 Simulate Order Test
                             </button>
                          </div>
-                    </div>
-                    
-                    <div class="text-center mt-2">
-                        <button onclick="triggerAction('/sync/categories/run_initial_import')" class="btn btn-link text-muted text-decoration-none small">
-                            Run Initial Category Sync
-                        </button>
                     </div>
                 </div>
             </div>
