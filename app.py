@@ -2362,7 +2362,7 @@ def send_support_email():
         SMTP_SERVER = "premium74.web-hosting.com"
         SMTP_PORT = 465  # SSL Port
         
-        SENDER_EMAIL = "support@worthyproducts.co.nz"
+        SENDER_EMAIL = "hello@tripsterdevelopers.com"
         SENDER_PASSWORD = "Jayshrikrishna1!" 
         
         RECIPIENT_EMAIL = "hello@tripsterdevelopers.com"
