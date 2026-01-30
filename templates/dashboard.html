@@ -120,7 +120,7 @@
   <ui-title-bar title="Dashboard">
         <button variant="primary" onclick="saveSettings()">Save Configuration</button>
         
-        <button onclick="window.open('mailto:hello@tripsterdevelopers.com?subject= Odoo Connector App Support Request', '_self')">Contact Support</button>
+        <button onclick="openSupportModal()">Contact Support</button>
     </ui-title-bar>
     
     <div id="tab-overview" class="tab-content-area active">
@@ -718,6 +718,42 @@
             </div>
             <div class="modal-footer bg-light">
                 <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+    <div class="modal fade" id="supportModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Contact Support</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="supportForm">
+                    <div class="mb-3">
+                        <label class="form-label-sm">Your Email</label>
+                        <input type="email" class="form-control" id="supportEmail" value="{{ config.alert_email }}" placeholder="you@yourstore.com">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label-sm">Subject</label>
+                        <select class="form-select" id="supportSubject">
+                            <option value="Help Request">I need help with setup</option>
+                            <option value="Bug Report">I found a bug</option>
+                            <option value="Feature Request">I have a feature request</option>
+                            <option value="Urgent">Urgent Issue</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label-sm">Message</label>
+                        <textarea class="form-control" id="supportMessage" rows="5" placeholder="Describe your issue..."></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="sendSupportEmail()">Send Message</button>
             </div>
         </div>
     </div>
@@ -1409,6 +1445,58 @@ function clearDiagnose() {
     document.getElementById('diagResultContainer').classList.add('d-none');
     document.getElementById('diagSku').value = '';
     document.getElementById('diagEmail').value = '';
+}
+
+
+        // --- SUPPORT MODAL FUNCTIONS ---
+function openSupportModal() {
+    const modal = new bootstrap.Modal(document.getElementById('supportModal'));
+    modal.show();
+}
+
+function sendSupportEmail() {
+    const email = document.getElementById('supportEmail').value;
+    const subject = document.getElementById('supportSubject').value;
+    const message = document.getElementById('supportMessage').value;
+    const btn = document.querySelector('#supportModal .btn-primary');
+
+    if (!email || !message) {
+        showToast("❌ Please fill in your email and message.");
+        return;
+    }
+
+    // Visual Loading State
+    const originalText = btn.innerText;
+    btn.innerText = "Sending...";
+    btn.disabled = true;
+
+    // Send to your backend
+    fetch(`/api/support/send?shop=${CURRENT_SHOP_URL}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, subject, message })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.success) {
+            showToast("✅ Support request sent!");
+            // Close modal
+            const modalEl = document.getElementById('supportModal');
+            const modalInstance = bootstrap.Modal.getInstance(modalEl);
+            modalInstance.hide();
+            // Clear form
+            document.getElementById('supportMessage').value = '';
+        } else {
+            showToast("❌ Error: " + (data.error || "Failed to send"));
+        }
+    })
+    .catch(err => {
+        showToast("❌ Network Error");
+    })
+    .finally(() => {
+        btn.innerText = originalText;
+        btn.disabled = false;
+    });
 }
         
     </script>
