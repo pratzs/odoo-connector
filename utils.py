@@ -239,7 +239,7 @@ def send_inventory_alert(shop_url, email_address, discrepancies):
     SMTP_SERVER = "premium74.web-hosting.com"
     SMTP_PORT = 465
     SENDER_EMAIL = "hello@tripsterdevelopers.com"
-    SENDER_PASSWORD = "Jayshrikrishna1!"
+    SENDER_PASSWORD = os.getenv('SMTP_PASSWORD')
     # -------------------------------------------
 
     # Build the email content
