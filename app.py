@@ -2341,7 +2341,7 @@ def send_support_email():
         SMTP_PORT = 465  # SSL Port
         
         SENDER_EMAIL = "hello@tripsterdevelopers.com"
-        SENDER_PASSWORD = "Jayshrikrishna1!" 
+        SENDER_PASSWORD = os.getenv('SMTP_PASSWORD') 
         
         RECIPIENT_EMAIL = "hello@tripsterdevelopers.com"
         # ---------------------------------------------------------
