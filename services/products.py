@@ -56,7 +56,7 @@ def sync_products_master(shop_url):
 
 
 # =====================================================
-# 2. THE WORKER (OPTIMIZED WITH BULK FETCHING)
+# 2. THE WORKER (OPTIMIZED)
 # =====================================================
 def sync_product_batch_task(shop_url, batch_ids, batch_name):
     from app import app
@@ -121,41 +121,42 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
         # --- B. PREFETCH SHOPIFY DATA ---
         batch_skus = [str(p.get('default_code')).strip() for p in products if p.get('default_code')]
         
-        # 1. Bulk DB Lookup
+        # 1. Bulk DB Lookup (Keep this, it's efficient)
         db_map_dict = {} 
         if batch_skus:
             maps = ProductMap.query.filter(ProductMap.shop_url == shop_url, ProductMap.sku.in_(batch_skus)).all()
             db_map_dict = {m.sku: m for m in maps}
-
-        # 2. Total Store SKU Map (Bypasses Broken Shopify Search)
-        shopify_product_cache = {} 
-        try:
-            page = shopify.Product.find(limit=250, status='active')
-            while page:
-                for sp in page:
-                    for v in sp.variants:
-                        if v.sku:
-                            shopify_product_cache[str(v.sku).strip()] = sp
-                if page.has_next_page():
-                    page = page.next_page()
-                    time.sleep(0.5) 
-                else:
-                    break
-            print(f"✅ Local Cache Built: Loaded {len(shopify_product_cache)} SKUs from Shopify.")
-        except Exception as e:
-            print(f"❌ Failed to build Shopify cache: {e}")
             
-
         # --- C. PROCESS LOOP ---
         stats = {'created': 0, 'updated': 0, 'archived': 0, 'skipped': 0}
 
         for p in products:
             try:
-                res = process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db_map_dict, shopify_product_cache)
+                # --- OPTIMIZATION: TARGETED LOOKUP ---
+                # Instead of a massive cache, we find JUST this product.
+                sku = str(p.get('default_code')).strip()
+                single_item_cache = {}
+
+                if sku:
+                    # 1. Try to find ID via our helper (uses GraphQL or Search)
+                    shopify_id = find_shopify_product_by_sku(sku, shop_url=shop_url)
+                    
+                    if shopify_id:
+                        try:
+                            # 2. Fetch the specific product object
+                            sp_product = shopify.Product.find(shopify_id)
+                            single_item_cache[sku] = sp_product
+                        except:
+                            pass
+
+                # Pass the single-item cache to your existing processor
+                res = process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db_map_dict, single_item_cache)
+                
                 if 'archived' in res: stats['archived'] += 1
                 elif 'created' in res: stats['created'] += 1
                 elif 'updated' in res: stats['updated'] += 1
                 else: stats['skipped'] += 1
+
             except Exception as e:
                 print(f"Error syncing {p.get('default_code')}: {e}")
 
