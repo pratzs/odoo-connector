@@ -141,7 +141,7 @@ def setup_shopify_session(shop_url=None):
         
         # 2. Use the version from app.py or fallback to stable
         # Note: Ensure SHOPIFY_API_VERSION is imported or defined
-        api_version = os.getenv('SHOPIFY_API_VERSION', '2025-01')
+        api_version = os.getenv('SHOPIFY_API_VERSION', '2025-10')
         
         session = shopify.Session(shop.shop_url, api_version, shop.access_token)
         shopify.ShopifyResource.activate_session(session)
