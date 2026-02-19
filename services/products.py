@@ -359,14 +359,27 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     # 2. Explicitly handle Metafields (The bulletproof REST API way)
     try:
         meta_targets = []
-        if cfg.get('meta_original_price'):
-            meta_targets.append({'key': 'original_retail_price', 'value': str(p.get('list_price', 0.0)), 'type': 'number_decimal'})
         
+        # Original Retail Price (Strictly formatted to 2 decimal places for Shopify validation)
+        if cfg.get('meta_original_price'):
+            safe_price = "{:.2f}".format(float(p.get('list_price') or 0.0))
+            meta_targets.append({
+                'key': 'original_retail_price', 
+                'value': safe_price, 
+                'type': 'number_decimal'
+            })
+        
+        # Vendor Product Code
         if cfg.get('meta_vendor_code') and p.get('vendor_code'):
-            meta_targets.append({'key': 'vendor_product_code', 'value': str(p.get('vendor_code')), 'type': 'single_line_text_field'})
+            meta_targets.append({
+                'key': 'vendor_product_code', 
+                'value': str(p.get('vendor_code')), 
+                'type': 'single_line_text_field'
+            })
 
         if meta_targets:
             existing_meta = sp.metafields() # Fetch existing metafields for this product
+            
             for target in meta_targets:
                 match = next((m for m in existing_meta if m.namespace == 'custom' and m.key == target['key']), None)
                 
@@ -377,8 +390,14 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
                         match.save()
                 else:
                     # Create new metafield
-                    new_meta = shopify.Metafield({'namespace': 'custom', 'key': target['key'], 'value': target['value'], 'type': target['type']})
+                    new_meta = shopify.Metafield({
+                        'namespace': 'custom', 
+                        'key': target['key'], 
+                        'value': target['value'], 
+                        'type': target['type']
+                    })
                     sp.add_metafield(new_meta)
+                    
     except Exception as e:
         print(f"Metafield Save Error {sku}: {e}")
 
