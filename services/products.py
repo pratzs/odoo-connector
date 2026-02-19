@@ -75,6 +75,8 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
             'barcode': get_config('prod_sync_barcode', True, shop_url=shop_url),
             'auto_create': get_config('prod_auto_create', False, shop_url=shop_url),
             'auto_publish': get_config('prod_auto_publish', False, shop_url=shop_url),
+            'meta_original_price': get_config('prod_sync_meta_original_price', False, shop_url=shop_url),
+            'meta_vendor_code': get_config('prod_sync_meta_vendor_code', False, shop_url=shop_url),
             'currency': shopify.Shop.current().currency
         }
 
@@ -82,7 +84,7 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
         fields = ['default_code', 'name', 'list_price', 'standard_price', 'active', 
                   'uom_id', 'sh_is_secondary_unit', 'sh_secondary_uom', 
                   'public_categ_ids', 'product_tag_ids', 'description_sale', 
-                  'image_1920', 'barcode', 'qty_per_pack']
+                  'image_1920', 'barcode', 'qty_per_pack', 'product_tmpl_id']
         
         try:
             products = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'read', [batch_ids], {'fields': fields})
@@ -117,6 +119,26 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
             for u in uoms:
                 uom_map[u['id']] = {'name': u['name'], 'ratio': float(u.get('factor_inv', 1.0))}
         except: pass
+
+        # --- NEW: PREFETCH VENDOR CODES ---
+        vendor_code_map = {}
+        if cfg.get('meta_vendor_code'):
+            tmpl_ids = [p['product_tmpl_id'][0] for p in products if p.get('product_tmpl_id')]
+            if tmpl_ids:
+                try:
+                    supplier_info = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.supplierinfo', 'search_read',
+                        [[['product_tmpl_id', 'in', tmpl_ids]]], {'fields': ['product_tmpl_id', 'product_code']})
+                    for info in supplier_info:
+                        if info.get('product_code') and info.get('product_tmpl_id'):
+                            # Map the Template ID to the Vendor Code
+                            vendor_code_map[info['product_tmpl_id'][0]] = info['product_code']
+                except Exception as e:
+                    print(f"Vendor Code Fetch Error: {e}")
+                    
+        # Inject the vendor code into the product dictionary so process_product_data can see it
+        for p in products:
+            if p.get('product_tmpl_id'):
+                p['vendor_code'] = vendor_code_map.get(p['product_tmpl_id'][0], '')
 
         # --- B. PREFETCH SHOPIFY DATA ---
         batch_skus = [str(p.get('default_code')).strip() for p in products if p.get('default_code')]
@@ -326,6 +348,31 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
             sp.options = [{'name': 'Pack Size'}]
     elif hasattr(sp, 'options') and sp.options and sp.options[0].name != 'Title':
         sp.options = [{'name': 'Title', 'values': ['Default Title']}]
+
+    # --- NEW: ATTACH METAFIELDS BEFORE SAVE ---
+    metafields = []
+    
+    # 1. Original Retail Price Metafield
+    if cfg.get('meta_original_price'):
+        metafields.append({
+            'namespace': 'custom',
+            'key': 'original_retail_price',
+            'value': str(p.get('list_price', 0.0)),
+            'type': 'number_decimal'
+        })
+        
+    # 2. Vendor Product Code Metafield
+    if cfg.get('meta_vendor_code') and p.get('vendor_code'):
+        metafields.append({
+            'namespace': 'custom',
+            'key': 'vendor_product_code',
+            'value': str(p.get('vendor_code')),
+            'type': 'single_line_text_field'
+        })
+        
+    if metafields:
+        # Converting dictionary array to Shopify Metafield objects
+        sp.metafields = [shopify.Metafield(m) for m in metafields]
 
     try: sp.save()
     except Exception as e:
