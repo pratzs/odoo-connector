@@ -32,12 +32,13 @@ def sync_products_master(shop_url):
         company_id = shop.odoo_company_id
         if not company_id: return
 
-        # Only sync active products
         domain = [
             ['sale_ok', '=', True], 
             ['type', 'in', ['product', 'consu']], 
+            ['active', '=', True], 
+            '|', 
             ['company_id', '=', int(company_id)],
-            ['active', '=', True] 
+            ['company_id', '=', False]
         ]
         
         try:
@@ -614,9 +615,16 @@ def fix_variant_mess_task(shop_url, company_id):
 
         # 3. Fetch Odoo Data
         try:
-            domain = [['sale_ok', '=', True], ['type', 'in', ['product', 'consu']], 
-                      ['company_id', '=', int(company_id)], ['active', '=', True]]
+            domain = [
+                ['sale_ok', '=', True], 
+                ['type', 'in', ['product', 'consu']], 
+                ['active', '=', True],
+                '|', 
+                ['company_id', '=', int(company_id)], 
+                ['company_id', '=', False]
+            ]
             
+            # --- THIS LINE IS NOW FIXED ---
             fields = ['default_code', 'name', 'list_price', 'standard_price', 
                       'sh_is_secondary_unit', 'sh_secondary_uom', 'qty_per_pack', 'qty_available', 'uom_id']
             
@@ -628,7 +636,6 @@ def fix_variant_mess_task(shop_url, company_id):
         except Exception as e:
             log_event('Cleanup', 'Error', f"Odoo Data Fetch Failed: {e}", shop_url=shop_url)
             return
-
         # 4. Scan Shopify Products
         page = shopify.Product.find(limit=50, status='active')
         processed = 0
