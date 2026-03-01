@@ -5,7 +5,7 @@ import time
 import hashlib
 import math
 from difflib import SequenceMatcher
-from datetime import datetime
+from datetime import datetime, timedelta
 from models import Shop, ProductMap, AppSetting, db
 from utils import get_odoo_connection, log_event, setup_shopify_session, get_config, q_default
 
@@ -828,3 +828,75 @@ def fix_variant_mess_task(shop_url, company_id):
                 break
 
         log_event('Cleanup', 'Success', f"Done. Scanned {processed}, Repaired {repaired}.", shop_url=shop_url)
+
+
+# =====================================================
+# 7. MISSING PRODUCTS CATCH-UP (30-DAY SCAN)
+# =====================================================
+def sync_missing_new_products(shop_url):
+    from app import app
+    with app.app_context():
+        shop = Shop.query.filter_by(shop_url=shop_url).first()
+        if not shop: return
+        
+        odoo = get_odoo_connection(shop_url)
+        if not odoo: return
+
+        company_id = shop.odoo_company_id
+        if not company_id: return
+
+        # Look back 30 days
+        cutoff = datetime.utcnow() - timedelta(days=30)
+        cutoff_str = cutoff.strftime('%Y-%m-%d %H:%M:%S')
+
+        domain = [
+            ['sale_ok', '=', True], 
+            ['type', 'in', ['product', 'consu']], 
+            ['active', '=', True], 
+            ['write_date', '>=', cutoff_str],
+            '|', 
+            ['company_id', '=', int(company_id)],
+            ['company_id', '=', False]
+        ]
+        
+        try:
+            # We use search_read to get the SKUs so we can cross-reference our database
+            odoo_products = odoo.models.execute_kw(
+                odoo.db, odoo.uid, odoo.password, 
+                'product.product', 'search_read', 
+                [domain], {'fields': ['id', 'default_code']}
+            )
+        except Exception as e:
+            log_event('Missing Sync', 'Error', f"Search Failed: {e}", shop_url=shop_url)
+            return
+
+        if not odoo_products:
+            log_event('Missing Sync', 'Info', "No Odoo products found in the last 30 days.", shop_url=shop_url)
+            return
+
+        # 1. Extract valid SKUs from Odoo
+        odoo_skus = [str(p['default_code']).strip() for p in odoo_products if p.get('default_code')]
+        
+        # 2. Find which of these SKUs are ALREADY mapped in our local database
+        mapped_records = ProductMap.query.filter(ProductMap.shop_url == shop_url, ProductMap.sku.in_(odoo_skus)).all()
+        mapped_skus = {m.sku for m in mapped_records}
+
+        # 3. Isolate ONLY the missing product IDs
+        missing_product_ids = [
+            p['id'] for p in odoo_products 
+            if p.get('default_code') and str(p['default_code']).strip() not in mapped_skus
+        ]
+
+        if not missing_product_ids:
+            log_event('Missing Sync', 'Success', "All recent Odoo products are already in Shopify!", shop_url=shop_url)
+            return
+
+        # 4. Queue the missing products
+        BATCH_SIZE = 50
+        chunks = [missing_product_ids[i:i + BATCH_SIZE] for i in range(0, len(missing_product_ids), BATCH_SIZE)]
+
+        for index, batch_ids in enumerate(chunks):
+            # We reuse your existing worker task, which is already optimized
+            q_default.enqueue(sync_product_batch_task, shop_url, batch_ids, f"Catch-Up Batch {index+1}/{len(chunks)}", job_timeout=3600)
+
+        log_event('Missing Sync', 'Success', f"Queued {len(chunks)} batches for {len(missing_product_ids)} completely missing products.", shop_url=shop_url)
