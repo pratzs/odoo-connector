@@ -451,31 +451,24 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
         log_event('Product Sync', 'Error', f"Variant Save Code Error {sku}: {e}", shop_url=shop_url)
         return "error"
 
-# ========================================================
-    # 4. MAP UPDATE
-    # ========================================================
+# Final Map Update - Ensure we use the ID from the saved Shopify object
     try:
         pm_final = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
-        
         if not pm_final:
-            pm_final = ProductMap(
-                sku=sku, 
-                odoo_product_id=p['id'], 
-                shop_url=shop_url
-            )
+            pm_final = ProductMap(sku=sku, odoo_product_id=p['id'], shop_url=shop_url)
             db.session.add(pm_final)
-
-        # Ensure we capture the Shopify IDs
+        
         pm_final.shopify_product_id = str(sp.id)
         if sp.variants:
             pm_final.shopify_variant_id = str(sp.variants[0].id)
             
         pm_final.last_synced_at = datetime.utcnow()
         db.session.commit()
-        print(f"✅ Database mapped for SKU: {sku}")
     except Exception as e:
         db.session.rollback()
-        print(f"Mapping Update Error for {sku}: {e}")
+        print(f"Final mapping error for {sku}: {e}")
+
+    return action_log
         
 
     # Image Sync
