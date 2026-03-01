@@ -282,36 +282,28 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
             'cost': str(unit_cost)
         })
 
-   # ========================================================
-    # 2. FIND SHOPIFY PRODUCT (STRICT VERSION)
-    # ========================================================
+   # --- 2. FIND SHOPIFY PRODUCT (STRICT) ---
     sp = None
-    action_log = "updated"
-
-    # A. Check the targeted cache first (Fastest)
-    if sku in shopify_product_cache:
-        sp = shopify_product_cache[sku]
-
-    # B. If not in cache, check Database Mapping (Reliable)
-    if not sp and pm and pm.shopify_product_id:
+    
+    # Priority 1: Direct ID from DB (The most reliable link)
+    if pm and pm.shopify_product_id:
         try:
             sp = shopify.Product.find(pm.shopify_product_id)
         except:
             sp = None
 
-    # C. FINAL STRICT SEARCH (Prevent Overwriting Random Products)
+    # Priority 2: Strict SKU Search (If DB link is missing)
     if not sp:
-        # Search Shopify specifically for this SKU
-        # We use a limit of 10 to check for any variant matches
+        # We search specifically for the SKU string
+        # Note: Shopify API title search can be fuzzy, so we MUST verify
         candidates = shopify.Product.find(title=sku, status='any')
-        for c in candidates:
-            for v in c.variants:
-                if str(v.sku).strip() == sku:
-                    sp = c
-                    break
-            if sp: break
+        for candidate in candidates:
+            # Check every variant in the candidate for an EXACT SKU match
+            if any(str(v.sku).strip() == sku for v in candidate.variants):
+                sp = candidate
+                break
 
-    # If sp is still None here, the code will safely move to the CREATE logic
+    # If sp is still None, we are 100% sure it's a new product
     
  # --- FIXED RESCUE GUARD ---
     if not sp:
