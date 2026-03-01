@@ -327,21 +327,25 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     # ========================================================
     # 3. EXECUTE (Create or Update)
     # ========================================================
+    action_log = "updated" # Default state
+
     if not sp:
         if not cfg['auto_create']: 
-            # THIS NOW SHOWS IN YOUR LIVE LOGS
-            log_event('Product Sync', 'Warning', f"Skipped '{sku}' - Auto-Create is turned OFF in Settings.", shop_url=shop_url)
+            log_event('Product Sync', 'Warning', f"Skipped '{sku}' - Auto-Create is OFF.", shop_url=shop_url)
             return "skipped"
         
-        log_event('Product Sync', 'Info', f"Attempting to create NEW product in Shopify: {sku}", shop_url=shop_url)
-        sp = shopify.Product(); sp.title = p['name']; sp.vendor = vendor_name
+        log_event('Product Sync', 'Info', f"Creating NEW product in Shopify: {sku}", shop_url=shop_url)
+        sp = shopify.Product()
+        sp.title = p['name']
+        sp.vendor = vendor_name
         sp.status = 'active' if cfg['auto_publish'] else 'draft'
         
         if p.get('public_categ_ids'):
             cat_id = p['public_categ_ids'][0]
-            if cat_id in categ_map: sp.product_type = categ_map[cat_id]
-            
-        if action_log != "archived": action_log = "created"
+            if cat_id in categ_map: 
+                sp.product_type = categ_map[cat_id]
+        
+        action_log = "created"
 
     if sp.status == 'archived': sp.status = 'active'
 
@@ -448,10 +452,9 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
         return "error"
 
 # ========================================================
-    # 4. MAP UPDATE (SAVES PRODUCT ID NOW)
+    # 4. MAP UPDATE
     # ========================================================
     try:
-        # Get or Create the mapping record
         pm_final = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
         
         if not pm_final:
@@ -462,12 +465,14 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
             )
             db.session.add(pm_final)
 
-        # Update ALL critical IDs to lock this product in
-        pm_final.shopify_product_id = str(sp.id) # <--- ADD THIS LINE
-        pm_final.shopify_variant_id = str(sp.variants[0].id)
+        # Ensure we capture the Shopify IDs
+        pm_final.shopify_product_id = str(sp.id)
+        if sp.variants:
+            pm_final.shopify_variant_id = str(sp.variants[0].id)
+            
         pm_final.last_synced_at = datetime.utcnow()
-        
         db.session.commit()
+        print(f"✅ Database mapped for SKU: {sku}")
     except Exception as e:
         db.session.rollback()
         print(f"Mapping Update Error for {sku}: {e}")
