@@ -324,7 +324,12 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     # 3. EXECUTE (Create or Update)
     # ========================================================
     if not sp:
-        if not cfg['auto_create']: return "skipped"
+        if not cfg['auto_create']: 
+            # THIS NOW SHOWS IN YOUR LIVE LOGS
+            log_event('Product Sync', 'Warning', f"Skipped '{sku}' - Auto-Create is turned OFF in Settings.", shop_url=shop_url)
+            return "skipped"
+        
+        log_event('Product Sync', 'Info', f"Attempting to create NEW product in Shopify: {sku}", shop_url=shop_url)
         sp = shopify.Product(); sp.title = p['name']; sp.vendor = vendor_name
         sp.status = 'active' if cfg['auto_publish'] else 'draft'
         
@@ -429,18 +434,27 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
         final_vars.append(match)
     
     sp.variants = final_vars
-    try: sp.save()
+    try: 
+        sp.save()
+        if sp.errors:
+            log_event('Product Sync', 'Error', f"Shopify rejected variants for '{sku}': {sp.errors.full_messages()}", shop_url=shop_url)
+            return "error"
     except Exception as e:
-        print(f"Variant Save Error {sku}: {e}")
+        log_event('Product Sync', 'Error', f"Variant Save Code Error {sku}: {e}", shop_url=shop_url)
         return "error"
 
     # ========================================================
     # 4. MAP UPDATE
     # ========================================================
-    if not sp.variants: return "error"
+    if not sp.variants: 
+        log_event('Product Sync', 'Error', f"Failed '{sku}': Shopify returned no variants.", shop_url=shop_url)
+        return "error"
         
     valid_vid = str(sp.variants[0].id)
-    if valid_vid == '0' or not valid_vid: return "error"
+    if valid_vid == '0' or not valid_vid: 
+        log_event('Product Sync', 'Error', f"Failed '{sku}': Invalid Shopify Variant ID.", shop_url=shop_url)
+        return "error"
+        
 
     # Image Sync
     if cfg['images'] and p.get('image_1920'):
