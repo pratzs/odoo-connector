@@ -304,21 +304,24 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
                 try: sp = shopify.Product.find(existing_variant.product_id)
                 except: sp = None
 
-    # RESCUE GUARD
+ # --- FIXED RESCUE GUARD ---
     if not sp:
         try:
+            # We search strictly by SKU. If Shopify returns multiple, 
+            # we MUST verify the SKU string matches exactly.
             candidates = shopify.Product.find(title=sku, status='any')
             for c in candidates:
-                if any(str(v.sku).strip() == sku for v in c.variants):
-                    sp = c; break
-            if not sp:
-                first_word = p['name'].split()[0]
-                clean_word = "".join(ch for ch in first_word if ch.isalnum())
-                candidates = shopify.Product.find(title=clean_word, status='any', limit=250)
-                for c in candidates:
-                    if any(str(v.sku).strip() == sku for v in c.variants):
-                        sp = c; break
-        except: pass
+                for v in c.variants:
+                    if str(v.sku).strip() == sku:
+                        sp = c
+                        break
+                if sp: break
+            
+            # If still not found, DO NOT guess. 
+            # If we don't find an exact SKU match, sp remains None 
+            # so the 'auto_create' logic can take over safely.
+        except Exception as e:
+            print(f"Rescue Guard Error: {e}")
 
     # ========================================================
     # 3. EXECUTE (Create or Update)
