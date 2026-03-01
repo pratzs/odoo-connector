@@ -282,28 +282,37 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
             'cost': str(unit_cost)
         })
 
-    # ========================================================
-    # 2. FIND SHOPIFY PRODUCT
+   # ========================================================
+    # 2. FIND SHOPIFY PRODUCT (STRICT VERSION)
     # ========================================================
     sp = None
     action_log = "updated"
 
+    # A. Check the targeted cache first (Fastest)
     if sku in shopify_product_cache:
         sp = shopify_product_cache[sku]
 
+    # B. If not in cache, check Database Mapping (Reliable)
+    if not sp and pm and pm.shopify_product_id:
+        try:
+            sp = shopify.Product.find(pm.shopify_product_id)
+        except:
+            sp = None
+
+    # C. FINAL STRICT SEARCH (Prevent Overwriting Random Products)
     if not sp:
-        if pm and pm.shopify_variant_id and pm.shopify_variant_id != '0':
-            try:
-                v = shopify.Variant.find(pm.shopify_variant_id)
-                sp = shopify.Product.find(v.product_id)
-            except: pm = None
+        # Search Shopify specifically for this SKU
+        # We use a limit of 10 to check for any variant matches
+        candidates = shopify.Product.find(title=sku, status='any')
+        for c in candidates:
+            for v in c.variants:
+                if str(v.sku).strip() == sku:
+                    sp = c
+                    break
+            if sp: break
 
-        if not sp:
-            existing_variant = safe_find_variant_by_sku(sku)
-            if existing_variant:
-                try: sp = shopify.Product.find(existing_variant.product_id)
-                except: sp = None
-
+    # If sp is still None here, the code will safely move to the CREATE logic
+    
  # --- FIXED RESCUE GUARD ---
     if not sp:
         try:
@@ -446,17 +455,30 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
         log_event('Product Sync', 'Error', f"Variant Save Code Error {sku}: {e}", shop_url=shop_url)
         return "error"
 
+# ========================================================
+    # 4. MAP UPDATE (SAVES PRODUCT ID NOW)
     # ========================================================
-    # 4. MAP UPDATE
-    # ========================================================
-    if not sp.variants: 
-        log_event('Product Sync', 'Error', f"Failed '{sku}': Shopify returned no variants.", shop_url=shop_url)
-        return "error"
+    try:
+        # Get or Create the mapping record
+        pm_final = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
         
-    valid_vid = str(sp.variants[0].id)
-    if valid_vid == '0' or not valid_vid: 
-        log_event('Product Sync', 'Error', f"Failed '{sku}': Invalid Shopify Variant ID.", shop_url=shop_url)
-        return "error"
+        if not pm_final:
+            pm_final = ProductMap(
+                sku=sku, 
+                odoo_product_id=p['id'], 
+                shop_url=shop_url
+            )
+            db.session.add(pm_final)
+
+        # Update ALL critical IDs to lock this product in
+        pm_final.shopify_product_id = str(sp.id) # <--- ADD THIS LINE
+        pm_final.shopify_variant_id = str(sp.variants[0].id)
+        pm_final.last_synced_at = datetime.utcnow()
+        
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        print(f"Mapping Update Error for {sku}: {e}")
         
 
     # Image Sync
