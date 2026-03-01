@@ -506,13 +506,25 @@ def safe_find_variant_by_sku(sku):
     return None
 
 def find_shopify_product_by_sku(sku, shop_url):
-    pm = ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first()
-    if pm and pm.shopify_variant_id and pm.shopify_variant_id != '0':
-        try:
-            variant = shopify.Variant.find(pm.shopify_variant_id)
-            return variant.product_id
-        except: pass
-    return None
+    """Strictly finds a Shopify product by SKU. No guessing."""
+    clean_sku = str(sku).strip()
+    if not clean_sku:
+        return None
+        
+    try:
+        # 1. Search Shopify for products with this SKU/Handle
+        products = shopify.Product.find(title=clean_sku) # Shopify title search is fuzzy
+        
+        for p in products:
+            # 2. STRICT VERIFICATION: Loop through variants to find the REAL SKU match
+            for v in p.variants:
+                if v.sku and v.sku.strip() == clean_sku:
+                    return p # Found the exact match
+                    
+        return None # If no exact variant SKU matches, it's a new product
+    except Exception as e:
+        print(f"Error in SKU search: {e}")
+        return None
 
 def archive_shopify_duplicates(shop_url):
     from app import app
