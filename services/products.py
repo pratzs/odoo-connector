@@ -32,10 +32,15 @@ def sync_products_master(shop_url):
         company_id = shop.odoo_company_id
         if not company_id: return
 
+        # Look back 2 days for routine syncs to prevent memory crashes
+        cutoff = datetime.utcnow() - timedelta(days=2)
+        cutoff_str = cutoff.strftime('%Y-%m-%d %H:%M:%S')
+
         domain = [
             ['sale_ok', '=', True], 
             ['type', 'in', ['product', 'consu']], 
             ['active', '=', True], 
+            ['write_date', '>=', cutoff_str], # <--- Delta Sync Gatekeeper
             '|', 
             ['company_id', '=', int(company_id)],
             ['company_id', '=', False]
@@ -469,16 +474,16 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
         db.session.rollback()
         print(f"Final mapping error for {sku}: {e}")
 
-    return action_log
-        
-
     # Image Sync
     if cfg['images'] and p.get('image_1920'):
         try:
             img_raw = p['image_1920']
             if isinstance(img_raw, bytes): img_raw = img_raw.decode('utf-8')
             new_hash = hashlib.md5(img_raw.encode('utf-8')).hexdigest()
-            current_hash = pm.image_hash if pm else ""
+            
+            # Fetch the map we just updated/created above
+            pm_upd = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
+            current_hash = pm_upd.image_hash if pm_upd else ""
             
             if new_hash != current_hash or not sp.images:
                 if sp.images:
@@ -488,23 +493,11 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
                 img = shopify.Image(prefix_options={'product_id': sp.id})
                 img.attachment = img_raw; img.save()
                 
-                pm_upd = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
                 if pm_upd:
                     pm_upd.image_hash = new_hash; db.session.commit()
         except: pass
 
-    try:
-        pm_final = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
-        if not pm_final:
-            pm_final = ProductMap(sku=sku, odoo_product_id=p['id'], shopify_variant_id=valid_vid, shop_url=shop_url)
-            db.session.add(pm_final)
-        else:
-            pm_final.shopify_variant_id = valid_vid
-            
-        pm_final.last_synced_at = datetime.utcnow()
-        db.session.commit()
-    except: db.session.rollback()
-
+    # ONLY ONE RETURN AT THE VERY END
     return action_log
 
 
