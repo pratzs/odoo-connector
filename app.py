@@ -1661,7 +1661,8 @@ def save_settings():
             'prod_sync_desc', 'prod_sync_tags', 'prod_sync_images', 
             'prod_sync_vendor', 'prod_sync_barcode', 
             'prod_auto_create', 'prod_auto_publish',  # <--- CRITICAL ONES
-            'prod_sync_meta_original_price', 'prod_sync_meta_vendor_code'
+            'prod_sync_meta_original_price', 'prod_sync_meta_vendor_code',
+            'sync_zero_stock'
         ]
 
         # Check if we are saving Product Settings (detect by checking if one exists)
