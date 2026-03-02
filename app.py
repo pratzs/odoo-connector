@@ -450,7 +450,7 @@ def perform_inventory_sync(shop_url):
                     sp_variant = shopify_variants.get(sku)
                     
                     if not sp_variant: continue
-                    if sync_zero and total_qty <= 0: continue
+                    if not sync_zero and total_qty <= 0: continue
                     
                     current_shopify_qty = int(sp_variant.inventory_quantity) if sp_variant.inventory_quantity else 0
 
