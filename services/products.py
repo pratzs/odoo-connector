@@ -533,10 +533,10 @@ def find_shopify_product_by_sku(sku, shop_url):
         return None
 
 def archive_shopify_duplicates(shop_url):
-    from app import app
+    from app import app, db
     with app.app_context():
         if not setup_shopify_session(shop_url): return
-        log_event('Duplicate Cleanup', 'Info', "Starting scan for duplicate SKUs...", shop_url=shop_url)
+        log_event('Duplicate Cleanup', 'Info', "Starting scan for duplicates. Prioritizing OLD products to preserve history...", shop_url=shop_url)
 
         page = shopify.Product.find(limit=250, status='active')
         sku_tracker = {}
@@ -546,39 +546,46 @@ def archive_shopify_duplicates(shop_url):
                 if not p.variants: continue
                 sku = p.variants[0].sku
                 if not sku: continue
-                if sku not in sku_tracker: sku_tracker[sku] = []
-                sku_tracker[sku].append(p)
+                
+                clean_sku = str(sku).strip()
+                if clean_sku not in sku_tracker: sku_tracker[clean_sku] = []
+                sku_tracker[clean_sku].append(p)
             
             if page.has_next_page(): page = page.next_page()
             else: break
 
         archived_count = 0
+        relinked_count = 0
+        
         for sku, products in sku_tracker.items():
             if len(products) > 1:
+                # 1. Sort products by CREATION DATE ascending (Oldest first)
+                # This ensures the product with SEO/Sales/App history is kept.
+                products.sort(key=lambda x: x.created_at)
+                master_product = products[0] # The historical, original product
+                
+                # 2. Archive all the newer duplicates
+                for p in products[1:]:
+                    try:
+                        p.status = 'archived'
+                        p.save()
+                        archived_count += 1
+                    except Exception as e:
+                        print(f"Failed to archive duplicate {p.id}: {e}")
+
+                # 3. REPAIR THE DATABASE MAP
+                # We must tell our app to sync to this older, historical product from now on
                 pm = ProductMap.query.filter_by(sku=sku, shop_url=shop_url).first()
-                master_id = int(pm.shopify_variant_id) if pm else 0
-                master_product = None
-                
-                if master_id:
-                    for p in products:
-                        if any(str(v.id) == str(master_id) for v in p.variants):
-                            master_product = p
-                            break
-                
-                if not master_product:
-                    products.sort(key=lambda x: x.updated_at, reverse=True)
-                    master_product = products[0]
+                if pm and master_product.variants:
+                    correct_variant_id = str(master_product.variants[0].id)
+                    if pm.shopify_variant_id != correct_variant_id:
+                        pm.shopify_variant_id = correct_variant_id
+                        db.session.commit()
+                        relinked_count += 1
 
-                for p in products:
-                    if p.id != master_product.id:
-                        try:
-                            p.status = 'archived'
-                            p.save()
-                            archived_count += 1
-                        except: pass
+        log_event('Duplicate Cleanup', 'Success', f"Complete. Archived {archived_count} new duplicates. Re-linked {relinked_count} historical products.", shop_url=shop_url)
 
-        log_event('Duplicate Cleanup', 'Success', f"Scan complete. Archived {archived_count} duplicates.", shop_url=shop_url)
-
+# Keep these aliases if they are used elsewhere in your code
 cleanup_duplicates_master = archive_shopify_duplicates
 cleanup_shopify_products = archive_shopify_duplicates
 
