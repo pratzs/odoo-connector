@@ -286,9 +286,10 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     sp = None
     
     # Priority 1: Direct ID from DB (The most reliable link)
-    if pm and pm.shopify_product_id:
+    if pm and pm.shopify_variant_id:
         try:
-            sp = shopify.Product.find(pm.shopify_product_id)
+            variant = shopify.Variant.find(pm.shopify_variant_id)
+            sp = shopify.Product.find(variant.product_id)
         except:
             sp = None
 
@@ -458,7 +459,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
             pm_final = ProductMap(sku=sku, odoo_product_id=p['id'], shop_url=shop_url)
             db.session.add(pm_final)
         
-        pm_final.shopify_product_id = str(sp.id)
+        # Ensure we capture the Shopify IDs
         if sp.variants:
             pm_final.shopify_variant_id = str(sp.variants[0].id)
             
