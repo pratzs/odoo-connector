@@ -435,16 +435,26 @@ def perform_inventory_sync(shop_url):
             if not batch_ids: continue
 
             try:
-                # Read Odoo Stock
+                # Read Odoo Stock safely
                 qty_map = {pid: 0 for pid in batch_ids}
-                for loc_id in target_locations:
-                    ctx = {'location': loc_id}
+                
+                if target_locations:
+                    # Specific locations selected
+                    for loc_id in target_locations:
+                        ctx = {'location': int(loc_id)}
+                        stock_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                            'product.product', 'read', [batch_ids], {'fields': [target_field], 'context': ctx})
+                        for record in stock_data:
+                            qty_map[record['id']] += float(record.get(target_field, 0.0))
+                else:
+                    # Fallback: No locations selected, get global total stock
                     stock_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                        'product.product', 'read', [batch_ids], {'fields': [target_field], 'context': ctx})
+                        'product.product', 'read', [batch_ids], {'fields': [target_field]})
                     for record in stock_data:
-                        qty_map[record['id']] += record.get(target_field, 0)
+                        qty_map[record['id']] += float(record.get(target_field, 0.0))
                 
                 # Update Shopify
+    
                 for pid, total_qty in qty_map.items():
                     sku = batch_skus[pid]
                     sp_variant = shopify_variants.get(sku)
