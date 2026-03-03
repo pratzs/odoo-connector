@@ -114,12 +114,22 @@ def process_order_data(data, odoo_client, shop_url):
 
             if data.get('billing_address'):
                 b = data['billing_address']
-                inv_data = {'name': f"{b.get('company') or partner['name']} (Invoice)", 'street': b.get('address1'), 'city': b.get('city'), 'zip': b.get('zip'), 'country_code': b.get('country_code'), 'phone': b.get('phone'), 'email': email}
+                # FIX: Use the person's name to avoid duplicating the parent company.
+                b_name = f"{b.get('first_name', '')} {b.get('last_name', '')}".strip()
+                if not b_name:
+                    b_name = "Billing Address"
+                    
+                inv_data = {'name': b_name, 'street': b.get('address1'), 'city': b.get('city'), 'zip': b.get('zip'), 'country_code': b.get('country_code'), 'phone': b.get('phone'), 'email': email}
                 invoice_id = odoo.find_or_create_child_address(main_partner_id, inv_data, type='invoice')
 
             if data.get('shipping_address'):
                 s = data['shipping_address']
-                ship_data = {'name': f"{s.get('company') or partner['name']} (Delivery)", 'street': s.get('address1'), 'city': s.get('city'), 'zip': s.get('zip'), 'country_code': s.get('country_code'), 'phone': s.get('phone'), 'email': email}
+                # FIX: Use the person's name and drop the hardcoded '(Delivery)'
+                s_name = f"{s.get('first_name', '')} {s.get('last_name', '')}".strip()
+                if not s_name:
+                    s_name = "Shipping Address"
+                    
+                ship_data = {'name': s_name, 'street': s.get('address1'), 'city': s.get('city'), 'zip': s.get('zip'), 'country_code': s.get('country_code'), 'phone': s.get('phone'), 'email': email}
                 shipping_id = odoo.find_or_create_child_address(main_partner_id, ship_data, type='delivery')
             
             sales_rep_id = odoo.get_partner_salesperson(main_partner_id) or odoo.uid
