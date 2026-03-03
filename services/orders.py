@@ -107,28 +107,39 @@ def process_order_data(data, odoo_client, shop_url):
                         db.session.rollback()
                         print(f"Customer Map Error: {e}")
 
-            # 2. Handle Addresses
+           # 2. Handle Addresses
             main_partner_id = partner['id']
             invoice_id = main_partner_id
             shipping_id = main_partner_id
 
+            def build_clean_name(address_dict, default_name):
+                # Safely grab strings
+                first = (address_dict.get('first_name') or '').strip()
+                last = (address_dict.get('last_name') or '').strip()
+                
+                # Smart Deduplication: Prevent Shopify from doubling up names
+                if first and last:
+                    if last.lower() in first.lower():
+                        full_name = first
+                    elif first.lower() in last.lower():
+                        full_name = last
+                    else:
+                        full_name = f"{first} {last}"
+                else:
+                    full_name = first or last
+
+                # Fallback if both are empty
+                return full_name if full_name else default_name
+
             if data.get('billing_address'):
                 b = data['billing_address']
-                # FIX: Use the person's name to avoid duplicating the parent company.
-                b_name = f"{b.get('first_name', '')} {b.get('last_name', '')}".strip()
-                if not b_name:
-                    b_name = "Billing Address"
-                    
+                b_name = build_clean_name(b, "Billing Address")
                 inv_data = {'name': b_name, 'street': b.get('address1'), 'city': b.get('city'), 'zip': b.get('zip'), 'country_code': b.get('country_code'), 'phone': b.get('phone'), 'email': email}
                 invoice_id = odoo.find_or_create_child_address(main_partner_id, inv_data, type='invoice')
 
             if data.get('shipping_address'):
                 s = data['shipping_address']
-                # FIX: Use the person's name and drop the hardcoded '(Delivery)'
-                s_name = f"{s.get('first_name', '')} {s.get('last_name', '')}".strip()
-                if not s_name:
-                    s_name = "Shipping Address"
-                    
+                s_name = build_clean_name(s, "Shipping Address")
                 ship_data = {'name': s_name, 'street': s.get('address1'), 'city': s.get('city'), 'zip': s.get('zip'), 'country_code': s.get('country_code'), 'phone': s.get('phone'), 'email': email}
                 shipping_id = odoo.find_or_create_child_address(main_partner_id, ship_data, type='delivery')
             
