@@ -40,7 +40,8 @@ from utils import (
     acquire_distributed_lock,
     get_odoo_connection, 
     setup_shopify_session, 
-    automate_webhook_registration
+    automate_webhook_registration,
+    send_inventory_alert 
 )
 # --- SERVICES ---
 from services.orders import process_order_data
@@ -195,9 +196,8 @@ with app.app_context():
 
 
 def verify_shopify(data, hmac_header):
-    # FIX: Use the consistent variable name
-    secret = os.getenv('SHOPIFY_API_SECRET') 
-    if not secret: return True 
+    secret = os.getenv('SHOPIFY_API_SECRET')
+    if not secret: return False  # ← was True, now fails safely
     if not hmac_header: return False
     digest = hmac.new(secret.encode('utf-8'), data, hashlib.sha256).digest()
     return hmac.compare_digest(base64.b64encode(digest).decode(), hmac_header)
@@ -628,10 +628,12 @@ def confirm_billing():
 
 @app.route('/webhooks/shopify', methods=['POST'])
 def shopify_webhook():
-    """
-    Receives automated notifications from Shopify.
-    Handles Orders, Products, Cancellations, and Refunds.
-    """
+    # ✅ SECURITY: Verify this actually came from Shopify
+    raw_body = request.get_data()
+    hmac_header = request.headers.get('X-Shopify-Hmac-Sha256')
+    if not verify_shopify(raw_body, hmac_header):
+        return "Unauthorized", 401
+
     topic = request.headers.get('X-Shopify-Topic')
     shop_url = request.headers.get('X-Shopify-Shop-Domain')
     data = request.get_json()
@@ -888,6 +890,7 @@ def api_refresh_locations():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/maintenance/wipe_logs', methods=['GET'])
+@require_shopify_session 
 def maintenance_wipe_logs():
     """Deletes ALL logs to give a clean slate."""
     with app.app_context():
@@ -1079,6 +1082,7 @@ def trigger_purge():
     return jsonify({"message": "Emergency Purge Queued."})
 
 @app.route('/sync/images/manual', methods=['GET'])
+@require_shopify_session  
 def trigger_manual_image_sync():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
@@ -1167,6 +1171,7 @@ def register_webhooks_manual():
 
 
 @app.route('/maintenance/clear_product_map', methods=['GET', 'POST'])
+@require_shopify_session 
 def clear_product_map():
     shop_url = request.args.get('shop')
     if not shop_url:
@@ -1184,6 +1189,7 @@ def clear_product_map():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/sync/fulfillments', methods=['GET'])
+@require_shopify_session 
 def trigger_fulfillment_sync():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
@@ -1196,6 +1202,7 @@ def trigger_fulfillment_sync():
     return jsonify({"message": "Started checking for shipments (Queued)."})
 
 @app.route('/sync/cancellations', methods=['GET'])
+@require_shopify_session
 def trigger_cancellation_sync():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
@@ -1208,6 +1215,7 @@ def trigger_cancellation_sync():
     return jsonify({"message": "Odoo Cancellation Sync Queued"})
 
 @app.route('/sync/returns', methods=['GET'])
+@require_shopify_session 
 def trigger_return_sync():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
@@ -1220,6 +1228,7 @@ def trigger_return_sync():
     return jsonify({"message": "Odoo Return Sync Queued"})
 
 @app.route('/sync/categories/run_initial_import', methods=['GET'])
+@require_shopify_session   
 def run_initial_category_import():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
@@ -1265,26 +1274,6 @@ def background_product_sync(shop_url, product_data):
     # Simply return without doing anything. 
     # This keeps the worker queue fast and clean.
     return
-
-
-# --- 2. UPDATED ROUTE: Product Webhook (Now uses Queue) ---
-@app.route('/webhook/products/create', methods=['POST'])
-@app.route('/webhook/products/update', methods=['POST'])
-def product_webhook():
-    # 1. Verify
-    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')): 
-        return "Unauthorized", 401
-    
-    # 2. Identify Shop
-    shop_url = request.headers.get('X-Shopify-Shop-Domain')
-    if not shop_url: return "Missing Shop Header", 400
-
-    # 3. Queue the Job
-    data = request.json
-    
-    # q_default.enqueue(background_product_sync, shop_url, data, job_timeout=300)
-    
-    return "Queued", 200
 
 
 # --- 3. UPDATED ROUTE: Master Sync ---
@@ -1512,63 +1501,6 @@ def background_order_sync(shop_url, order_data):
             log_event('Order', 'Error', f"Worker Crash: {str(e)}", shop_url=shop_url)
     
 
-@app.route('/webhook/orders', methods=['POST'])
-@app.route('/webhook/orders/updated', methods=['POST'])
-@app.route('/webhook/orders/cancelled', methods=['POST'])
-def order_webhook():
-    # 1. Security Check
-    hmac_header = request.headers.get('X-Shopify-Hmac-Sha256')
-    if not verify_shopify(request.get_data(), hmac_header):
-        return "Unauthorized", 401
-
-    # 2. Extract Info
-    topic = request.headers.get('X-Shopify-Topic', '')
-    shop_url = request.headers.get('X-Shopify-Shop-Domain')
-    data = request.json
-    topic = request.headers.get('X-Shopify-Topic', '')
-    order_num = data.get('name')
-
-    # 3. Handle Cancellation
-    if topic == 'orders/cancelled':
-        # FAST LANE
-        q_critical.enqueue(
-            process_cancellation, 
-            data, 
-            shop_url,
-            retry=Retry(max=5, interval=[60, 120, 240, 600, 1200])
-        ) 
-        return "Cancellation Queued", 200
-
-   # 4. QUEUE THE SYNC
-    if topic in ['orders/create', 'orders/paid', 'orders/updated']:
-        # FAST LANE
-        q_critical.enqueue(
-            background_order_sync, 
-            shop_url, 
-            data, 
-            job_timeout=300,
-            retry=Retry(max=5, interval=[60, 120, 240, 600, 1200])
-        )
-        return "Queued", 200
-
-    return "Ignored", 200
-
-@app.route('/webhook/refunds', methods=['POST'])
-def refund_webhook():
-    # ... (Keep auth logic) ...
-    shop_url = request.headers.get('X-Shopify-Shop-Domain')
-    data = request.json
-
-    # FAST LANE
-    q_critical.enqueue(
-        background_refund_sync, 
-        shop_url, 
-        data, 
-        job_timeout=300,
-        retry=Retry(max=5, interval=[60, 120, 240, 600, 1200])
-    )
-    
-    return "Refund Received & Queued", 200
 
 @app.route('/test/simulate_order', methods=['POST'])
 def test_sim_dummy():
