@@ -366,7 +366,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
         if t_names: sp.tags = ",".join(t_names)
 
         # Clean Options
-        if is_pack:
+    if is_pack:
         if not sp.options or sp.options[0].name != 'Pack Size':
             sp.options = [{'name': 'Pack Size'}]
     elif hasattr(sp, 'options') and sp.options and sp.options[0].name != 'Title':
