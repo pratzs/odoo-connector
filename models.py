@@ -40,9 +40,11 @@ class Shop(db.Model):
 
 class ProductMap(db.Model):
     __tablename__ = 'product_map'
-    # Composite PK: A Variant ID is unique, but adding shop_url makes queries faster/safer
+    __table_args__ = (
+        db.UniqueConstraint('shop_url', 'sku', name='uq_product_map_shop_sku'),
+    )
     id = db.Column(db.Integer, primary_key=True)
-    shop_url = db.Column(db.String(255), index=True, nullable=False) # SECURITY
+    shop_url = db.Column(db.String(255), index=True, nullable=False)
     shopify_variant_id = db.Column(db.String(50), nullable=False)
     odoo_product_id = db.Column(db.Integer, nullable=False)
     sku = db.Column(db.String(50), index=True)
