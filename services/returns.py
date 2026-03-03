@@ -50,10 +50,14 @@ def sync_odoo_returns(shop_url):
                 if not orders: continue
                 order = orders[0]
 
-                shopify.Comment.create({
-                    'body': f"Inventory Return received in Odoo ({ret['name']}). Items are back in stock.",
-                    'order_id': order.id
-                })
+                # Post a timeline note on the order (shopify.Comment doesn't exist in the library)
+                note_prefix = f"[Return] {ret['name']} received in Odoo."
+                existing_note = getattr(order, 'note', '') or ''
+                
+                # Append to existing note rather than overwriting it
+                if note_prefix not in existing_note:
+                    order.note = f"{existing_note}\n{note_prefix}".strip()
+                    order.save()
                 
                 log_event('Return Sync', 'Success', f"Synced return {ret['name']} to Shopify {shopify_order_name}", shop_url=shop_url)
 
