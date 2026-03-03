@@ -315,13 +315,12 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     # ========================================================
     action_log = "updated" # Default state
 
-        if not sp:
+    if not sp:
         if not cfg['auto_create']:
             log_event('Product Sync', 'Warning', f"Skipped '{sku}' - Auto-Create is OFF.", shop_url=shop_url)
             return "skipped"
 
-        # ✅ FINAL SAFETY CHECK: One last GraphQL search before creating
-        # Catches the race condition where another worker just created this product
+        # Final safety check before creating — catches race conditions
         try:
             client = shopify.GraphQL()
             safety_check = json.loads(client.execute("""
@@ -331,33 +330,31 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
               }
             }
             """ % sku.replace("'", "\\'")))
-
             edges = safety_check.get('data', {}).get('productVariants', {}).get('edges', [])
             for edge in edges:
                 if edge.get('node', {}).get('sku', '').strip() == sku:
-                    # Another worker already created it — fetch and update instead
                     existing_id = int(edge['node']['product']['legacyResourceId'])
                     sp = shopify.Product.find(existing_id)
                     log_event('Product Sync', 'Info',
-                        f"Race condition caught for '{sku}' — updating existing product instead of creating.",
+                        f"Race condition caught for '{sku}' — updating existing product.",
                         shop_url=shop_url)
                     break
         except Exception as e:
             print(f"Safety check error for {sku}: {e}")
 
         if not sp:
-        log_event('Product Sync', 'Info', f"Creating NEW product in Shopify: {sku}", shop_url=shop_url)
-        sp = shopify.Product()
-        sp.title = p['name']
-        sp.vendor = vendor_name
-        sp.status = 'active' if cfg['auto_publish'] else 'draft'
-        
-        if p.get('public_categ_ids'):
-            cat_id = p['public_categ_ids'][0]
-            if cat_id in categ_map: 
-                sp.product_type = categ_map[cat_id]
-        
-        action_log = "created"
+            log_event('Product Sync', 'Info', f"Creating NEW product in Shopify: {sku}", shop_url=shop_url)
+            sp = shopify.Product()
+            sp.title = p['name']
+            sp.vendor = vendor_name
+            sp.status = 'active' if cfg['auto_publish'] else 'draft'
+
+            if p.get('public_categ_ids'):
+                cat_id = p['public_categ_ids'][0]
+                if cat_id in categ_map:
+                    sp.product_type = categ_map[cat_id]
+
+            action_log = "created"
 
     if sp.status == 'archived': sp.status = 'active'
 
@@ -368,8 +365,8 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
         t_names = [tag_map[tid] for tid in p['product_tag_ids'] if tid in tag_map]
         if t_names: sp.tags = ",".join(t_names)
 
-   # Clean Options
-    if is_pack:
+        # Clean Options
+        if is_pack:
         if not sp.options or sp.options[0].name != 'Pack Size':
             sp.options = [{'name': 'Pack Size'}]
     elif hasattr(sp, 'options') and sp.options and sp.options[0].name != 'Title':
@@ -463,8 +460,8 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
         log_event('Product Sync', 'Error', f"Variant Save Code Error {sku}: {e}", shop_url=shop_url)
         return "error"
 
-# Final Map Update - Ensure we use the ID from the saved Shopify object
-    try:
+        # Final Map Update - Ensure we use the ID from the saved Shopify object
+            try:
         # Save mapping for ALL variants, not just the first one
         # This prevents the secondary variant (e.g. COCA24C-UNIT) 
         # from being treated as a new product on the next sync run
