@@ -135,4 +135,3 @@ def sync_odoo_fulfillments(shop_url):
             log_event('Fulfillment', 'Success',
                 f"Fulfillment sync complete. Pushed {synced_count} shipments to Shopify.",
                 shop_url=shop_url)
-```
