@@ -1,58 +1,97 @@
 import shopify
-from utils import get_odoo_connection, log_event
+from utils import get_odoo_connection, log_event, setup_shopify_session
 
 def process_refund_data(data, shop_url):
     """
-    Handles Shopify Refund Webhook -> Odoo Credit Note
+    Handles Shopify Refund Webhook -> Odoo Credit Note (Reverse Transfer).
+    Strategy: Find the confirmed invoice for the sale order, then reverse it.
     """
     from app import app
-    
+
     with app.app_context():
         odoo = get_odoo_connection(shop_url)
-        if not odoo: return
+        if not odoo:
+            return False, "No Odoo connection"
 
-        # 1. Get Shopify Order ID/Name
-        # Webhooks usually send 'order_id' (numeric) but we sync using Name (#1001)
-        # We need to fetch the order name if not present, or use the parent_id
+        # ── 1. Get the Shopify Order Name ──────────────────────────────
         order_id = data.get('order_id')
-        
-        # We need the Order NAME (e.g. #1234) to match your 'ONLINE_#1234' pattern
-        # Since the webhook might only give ID, we might need a quick lookup or heuristic
-        # Ideally, we fetch the Shopify Order to get the 'name'
         shopify_order_name = ""
-        
+
         try:
-            # We assume session is set up by caller or we do it here
-            from utils import setup_shopify_session
             if setup_shopify_session(shop_url):
                 sp_order = shopify.Order.find(order_id)
                 shopify_order_name = sp_order.name
-        except:
-            # Fallback: sometimes data contains it
-            pass
-            
+        except Exception as e:
+            log_event('Refund', 'Warning', f"Could not fetch Shopify order {order_id}: {e}", shop_url=shop_url)
+
         if not shopify_order_name:
-            log_event('Refund', 'Warning', f"Could not determine Order Name for Refund {data.get('id')}", shop_url=shop_url)
-            return
+            return False, f"Could not determine Order Name for Refund {data.get('id')}"
 
         client_ref = f"ONLINE_{shopify_order_name}"
 
         try:
-            # 2. Find Odoo Sale Order using CLIENT_ORDER_REF
-            # FIX: Do NOT use 'shopify_order_id'
-            domain = [['client_order_ref', '=', client_ref]]
-            ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'search', [domain])
-            
-            if not ids:
-                log_event('Refund', 'Warning', f"Original Order {client_ref} not found in Odoo.", shop_url=shop_url)
-                return
-            
-            sale_order_id = ids[0]
+            # ── 2. Find the Sale Order in Odoo ─────────────────────────
+            so_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'sale.order', 'search', [[['client_order_ref', '=', client_ref]]])
 
-            # 3. Log the "To-Do" (Creating actual Credit Notes is complex via API)
-            # For now, we log that we found it, so you know the connection works.
-            # Automated Credit Note creation requires finding the Invoice, not just the Order.
-            log_event('Refund', 'Info', f"Refund detected for {client_ref}. Automated Credit Note creation is pending implementation.", shop_url=shop_url)
+            if not so_ids:
+                return False, f"Sale order {client_ref} not found in Odoo"
+
+            so_id = so_ids[0]
+
+            # ── 3. Find the Confirmed Invoice for this Sale Order ───────
+            inv_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'account.move', 'search', [[
+                    ['invoice_origin', 'like', client_ref],
+                    ['move_type', '=', 'out_invoice'],
+                    ['state', '=', 'posted']   # Only confirmed invoices can be reversed
+                ]])
+
+            if not inv_ids:
+                # Invoice not confirmed yet — log it for manual follow-up
+                log_event('Refund', 'Warning',
+                    f"Refund received for {client_ref} but no confirmed invoice found. "
+                    f"Please create credit note manually.",
+                    shop_url=shop_url)
+                return True, f"Skipped: No confirmed invoice for {client_ref}"
+
+            invoice_id = inv_ids[0]
+
+            # ── 4. Check if a Credit Note already exists ────────────────
+            existing_credit = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'account.move', 'search', [[
+                    ['reversed_entry_id', '=', invoice_id],
+                    ['move_type', '=', 'out_refund']
+                ]])
+
+            if existing_credit:
+                return True, f"Skipped: Credit note already exists for {client_ref}"
+
+            # ── 5. Create the Credit Note (Reverse the Invoice) ─────────
+            # This calls Odoo's built-in reversal wizard
+            reversal_result = odoo.models.execute_kw(
+                odoo.db, odoo.uid, odoo.password,
+                'account.move.reversal', 'create',
+                [{
+                    'move_ids': [(4, invoice_id)],
+                    'reason': f"Shopify Refund - {shopify_order_name}",
+                    'refund_method': 'refund',   # 'refund' = partial, 'cancel' = full reversal
+                    'journal_id': False           # Uses the invoice's journal automatically
+                }]
+            )
+
+            # Call the action to actually generate the credit note
+            odoo.models.execute_kw(
+                odoo.db, odoo.uid, odoo.password,
+                'account.move.reversal', 'reverse_moves',
+                [[reversal_result]]
+            )
+
+            log_event('Refund', 'Success',
+                f"Credit note created for {client_ref} (Invoice ID: {invoice_id})",
+                shop_url=shop_url)
+            return True, f"Credit note created for {client_ref}"
 
         except Exception as e:
-            log_event('Refund', 'Error', f"Refund Logic Failed: {e}", shop_url=shop_url)
+            log_event('Refund', 'Error', f"Refund processing failed for {client_ref}: {e}", shop_url=shop_url)
+            return False, str(e)
