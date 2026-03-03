@@ -1,7 +1,7 @@
 # services/orders.py
 from datetime import datetime
 from models import db, ProcessedOrder, Shop, CustomerMap
-from utils import get_config, log_event, acquire_distributed_lock
+from utils import get_config, set_config, log_event, acquire_distributed_lock
 
 def process_order_data(data, odoo_client, shop_url): 
     """
