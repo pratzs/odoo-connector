@@ -200,8 +200,15 @@
         }
 
         function clearLogs() {
-             if(confirm('Clear all logs?')) fetch('/maintenance/wipe_logs').then(() => fetchLogs());
-        }
+    if(confirm('Clear all logs?')) {
+        const shop = shopParam || '';
+        fetch(`/maintenance/wipe_logs?shop=${shop}`)
+            .then(() => {
+                lastDataJSON = ''; // Reset comparison so empty state shows
+                fetchLogs();
+            });
+    }
+}
 
         setInterval(fetchLogs, 2000);
         fetchLogs(); 
