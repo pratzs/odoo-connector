@@ -298,38 +298,31 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
         except:
             sp = None
 
-    # Priority 2: Strict SKU Search (If DB link is missing)
+    # Priority 2: GraphQL strict SKU search (if DB link is missing)
     if not sp:
-        # We search specifically for the SKU string
-        # Note: Shopify API title search can be fuzzy, so we MUST verify
-        candidates = shopify.Product.find(title=sku, status='any')
-        for candidate in candidates:
-            # Check every variant in the candidate for an EXACT SKU match
-            if any(str(v.sku).strip() == sku for v in candidate.variants):
-                sp = candidate
-                break
-
+        sp_id = find_shopify_product_by_sku(sku, shop_url)
+        if sp_id:
+            try:
+                sp = shopify.Product.find(sp_id)
+            except:
+                sp = None
 
     # ========================================================
     # 3. EXECUTE (Create or Update)
     # ========================================================
-    action_log = "updated" # Default state
+    action_log = "updated"  # Default state
 
     if not sp:
         if not cfg['auto_create']:
             log_event('Product Sync', 'Warning', f"Skipped '{sku}' - Auto-Create is OFF.", shop_url=shop_url)
             return "skipped"
 
-        # Final safety check before creating — catches race conditions
+        # Final race-condition safety check before creating
         try:
             client = shopify.GraphQL()
-            safety_check = json.loads(client.execute("""
-            {
-              productVariants(first: 1, query: "sku:'%s'") {
-                edges { node { sku product { legacyResourceId } } }
-              }
-            }
-            """ % sku.replace("'", "\\'")))
+            safety_check = json.loads(client.execute(
+                '{ productVariants(first: 1, query: "sku:\'%s\'") { edges { node { sku product { legacyResourceId } } } } }'
+                % sku.replace("'", "\\'")))
             edges = safety_check.get('data', {}).get('productVariants', {}).get('edges', [])
             for edge in edges:
                 if edge.get('node', {}).get('sku', '').strip() == sku:
@@ -355,7 +348,6 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
                     sp.product_type = categ_map[cat_id]
 
             action_log = "created"
-
     if sp.status == 'archived': sp.status = 'active'
 
     if cfg['title']: sp.title = p['name']
@@ -365,7 +357,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
         t_names = [tag_map[tid] for tid in p['product_tag_ids'] if tid in tag_map]
         if t_names: sp.tags = ",".join(t_names)
 
-        # Clean Options
+   # Clean Options
     if is_pack:
         if not sp.options or sp.options[0].name != 'Pack Size':
             sp.options = [{'name': 'Pack Size'}]
@@ -460,36 +452,22 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
         log_event('Product Sync', 'Error', f"Variant Save Code Error {sku}: {e}", shop_url=shop_url)
         return "error"
 
-        # Final Map Update - Ensure we use the ID from the saved Shopify object
-            try:
-        # Save mapping for ALL variants, not just the first one
-        # This prevents the secondary variant (e.g. COCA24C-UNIT) 
-        # from being treated as a new product on the next sync run
+    # Final Map Update — save ALL variant IDs to prevent duplicate creates
+    try:
         for variant in sp.variants:
-            v_sku = getattr(variant, 'sku', None)
+            v_sku = getattr(variant, "sku", None)
             if not v_sku:
                 continue
-
-            pm_v = ProductMap.query.filter_by(
-                sku=v_sku, shop_url=shop_url
-            ).first()
-
+            pm_v = ProductMap.query.filter_by(sku=v_sku, shop_url=shop_url).first()
             if not pm_v:
-                pm_v = ProductMap(
-                    sku=v_sku,
-                    odoo_product_id=p['id'],
-                    shop_url=shop_url
-                )
+                pm_v = ProductMap(sku=v_sku, odoo_product_id=p['id'], shop_url=shop_url)
                 db.session.add(pm_v)
-
             pm_v.shopify_variant_id = str(variant.id)
             pm_v.last_synced_at = datetime.utcnow()
-
         db.session.commit()
     except Exception as e:
         db.session.rollback()
         print(f"Final mapping error for {sku}: {e}")
-
     # Image Sync
     if cfg['images'] and p.get('image_1920'):
         try:
@@ -528,52 +506,24 @@ def safe_find_variant_by_sku(sku):
     return None
 
 def find_shopify_product_by_sku(sku, shop_url):
-    """
-    Strictly finds a Shopify product ID by variant SKU using GraphQL.
-    Returns the Shopify product ID (integer) or None.
-    """
+    """Strictly finds a Shopify product by SKU. No guessing."""
     clean_sku = str(sku).strip()
     if not clean_sku:
         return None
-
+        
     try:
-        # GraphQL variant SKU search — exact match, no fuzzy title matching
-        gql_query = """
-        {
-          productVariants(first: 5, query: "sku:'%s'") {
-            edges {
-              node {
-                sku
-                product {
-                  id
-                  legacyResourceId
-                }
-              }
-            }
-          }
-        }
-        """ % clean_sku.replace("'", "\\'")  # Escape any single quotes in SKU
-
-        client = shopify.GraphQL()
-        result = client.execute(gql_query)
-        data = json.loads(result)
-
-        edges = data.get('data', {}).get('productVariants', {}).get('edges', [])
-
-        for edge in edges:
-            node = edge.get('node', {})
-            # Strict verification — GraphQL query can return partial matches
-            if node.get('sku', '').strip() == clean_sku:
-                # Return the numeric product ID (legacyResourceId)
-                # so callers can use shopify.Product.find(id)
-                legacy_id = node.get('product', {}).get('legacyResourceId')
-                if legacy_id:
-                    return int(legacy_id)
-
-        return None
-
+        # 1. Search Shopify for products with this SKU/Handle
+        products = shopify.Product.find(title=clean_sku) # Shopify title search is fuzzy
+        
+        for p in products:
+            # 2. STRICT VERIFICATION: Loop through variants to find the REAL SKU match
+            for v in p.variants:
+                if v.sku and v.sku.strip() == clean_sku:
+                    return p # Found the exact match
+                    
+        return None # If no exact variant SKU matches, it's a new product
     except Exception as e:
-        print(f"GraphQL SKU search error for '{sku}': {e}")
+        print(f"Error in SKU search: {e}")
         return None
 
 def archive_shopify_duplicates(shop_url):
