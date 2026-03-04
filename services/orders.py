@@ -160,30 +160,25 @@ def process_order_data(data, odoo_client, shop_url):
                         db.session.rollback()
                         print(f"Customer Map Error: {e}")
 
-            # 2. Handle Addresses
-            main_partner_id = partner['id']
+            # 2. Assign Addresses to Order
+            main_partner_id = partner_id
             invoice_id = main_partner_id
             shipping_id = main_partner_id
-
-            # Map Shopify Billing to Odoo Invoice (Relying purely on Odoo's native Invoice icon)
-            if data.get('billing_address'):
-                b = data['billing_address']
-                inv_data = {
-                    'street': b.get('address1'), 'city': b.get('city'), 
-                    'zip': b.get('zip'), 'country_code': b.get('country_code'), 
-                    'phone': b.get('phone'), 'email': email
-                }
-                invoice_id = odoo.find_or_create_child_address(main_partner_id, inv_data, type='invoice')
-
-            # Map Shopify Shipping to Odoo Delivery (Relying purely on Odoo's native Truck icon)
-            if data.get('shipping_address'):
-                s = data['shipping_address']
-                ship_data = {
-                    'street': s.get('address1'), 'city': s.get('city'), 
-                    'zip': s.get('zip'), 'country_code': s.get('country_code'), 
-                    'phone': s.get('phone'), 'email': email
-                }
-                shipping_id = odoo.find_or_create_child_address(main_partner_id, ship_data, type='delivery')
+            
+            # --- SMART ADDRESS ROUTING ---
+            # Automatically detect if this branch already has specific Invoice or Delivery 
+            # child records (the Bill/Truck icons) and apply them to the Sales Order natively.
+            try:
+                child_domain = [['parent_id', '=', main_partner_id], ['type', 'in', ['invoice', 'delivery']], ['active', '=', True]]
+                children = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'res.partner', 'search_read', [child_domain], {'fields': ['id', 'type']})
+                
+                for child in children:
+                    if child['type'] == 'invoice' and invoice_id == main_partner_id:
+                        invoice_id = child['id']
+                    elif child['type'] == 'delivery' and shipping_id == main_partner_id:
+                        shipping_id = child['id']
+            except Exception as e:
+                print(f"Address routing error: {e}")
             
             sales_rep_id = odoo.get_partner_salesperson(main_partner_id) or odoo.uid
 
