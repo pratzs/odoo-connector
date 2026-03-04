@@ -593,7 +593,7 @@ def create_billing():
         "name": f"Odoo Connector - {display_name}",
         "price": price,
         "return_url": f"{os.getenv('HOST')}/billing/confirm?shop={shop_url}",
-        "test": True, # KEEP TRUE until App Store submission
+        "test": shop_url in FREE_STORES,  # True only for whitelisted dev/review stores
         "trial_days": 7
     })
     return redirect(charge.confirmation_url)
@@ -828,7 +828,8 @@ def home():
     
 @app.route('/live_logs')
 def live_logs():
-    return render_template('live_logs.html')
+    shop_url = request.args.get('shop', '')
+    return render_template('live_logs.html', shop_url=shop_url)
 
 @app.route('/api/logs/live', methods=['GET'])
 def api_live_logs():
@@ -1265,6 +1266,18 @@ def run_initial_category_import():
 #         except Exception as e:
 #             # We still log errors immediately because they are important
 #             log_event('Product', 'Error', f"Webhook Failed for '{product_title}': {str(e)}", shop_url=shop_url)
+
+
+@app.route('/sync/products/force_catchup', methods=['POST'])
+@require_shopify_session
+def trigger_force_catchup():
+    """60-day catch-up scan — finds and re-syncs any Odoo products missing from Shopify."""
+    shop_url = request.args.get('shop')
+    if not shop_url:
+        return jsonify({"error": "Missing shop parameter"}), 400
+    from services.products import sync_missing_new_products
+    job = q_default.enqueue(sync_missing_new_products, shop_url, job_timeout=3600)
+    return jsonify({"message": f"Force Catch-Up queued — scanning last 60 days of Odoo products (Job: {job.get_id()})"})
 
 def background_product_sync(shop_url, product_data):
     """
