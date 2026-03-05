@@ -161,24 +161,36 @@ def process_order_data(data, odoo_client, shop_url):
                         print(f"Customer Map Error: {e}")
 
             # 2. Assign Addresses to Order
-            main_partner_id = partner_id
+            # FIX: Safely extract ID whether the partner was just created or found in Odoo
+            main_partner_id = partner.get('id') 
             invoice_id = main_partner_id
             shipping_id = main_partner_id
             
-            # --- SMART ADDRESS ROUTING ---
-            # Automatically detect if this branch already has specific Invoice or Delivery 
-            # child records (the Bill/Truck icons) and apply them to the Sales Order natively.
-            try:
-                child_domain = [['parent_id', '=', main_partner_id], ['type', 'in', ['invoice', 'delivery']], ['active', '=', True]]
-                children = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'res.partner', 'search_read', [child_domain], {'fields': ['id', 'type']})
-                
-                for child in children:
-                    if child['type'] == 'invoice' and invoice_id == main_partner_id:
-                        invoice_id = child['id']
-                    elif child['type'] == 'delivery' and shipping_id == main_partner_id:
-                        shipping_id = child['id']
-            except Exception as e:
-                print(f"Address routing error: {e}")
+            # --- SMART ADDRESS ROUTING (Updated for B2B Precision) ---
+            # We now explicitly pass the Shopify order addresses to Odoo. 
+            # This ensures Caltex stores get their own specific delivery/invoice 
+            # addresses attached to the main parent payer.
+            
+            bill_addr = data.get('billing_address')
+            ship_addr = data.get('shipping_address')
+
+            # 1. Set Invoice Address
+            if bill_addr:
+                try:
+                    inv_id = odoo.find_or_create_child_address(main_partner_id, bill_addr, type='invoice')
+                    if inv_id: 
+                        invoice_id = inv_id
+                except Exception as e:
+                    print(f"Invoice address routing error: {e}")
+
+            # 2. Set Delivery Address
+            if ship_addr:
+                try:
+                    del_id = odoo.find_or_create_child_address(main_partner_id, ship_addr, type='delivery')
+                    if del_id: 
+                        shipping_id = del_id
+                except Exception as e:
+                    print(f"Delivery address routing error: {e}")
             
             sales_rep_id = odoo.get_partner_salesperson(main_partner_id) or odoo.uid
 
