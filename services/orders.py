@@ -160,37 +160,42 @@ def process_order_data(data, odoo_client, shop_url):
                         db.session.rollback()
                         print(f"Customer Map Error: {e}")
 
-            # 2. Assign Addresses to Order
-            # FIX: Safely extract ID whether the partner was just created or found in Odoo
+           # 2. Assign Addresses to Order
             main_partner_id = partner.get('id') 
             invoice_id = main_partner_id
             shipping_id = main_partner_id
             
-            # --- SMART ADDRESS ROUTING (Updated for B2B Precision) ---
-            # We now explicitly pass the Shopify order addresses to Odoo. 
-            # This ensures Caltex stores get their own specific delivery/invoice 
-            # addresses attached to the main parent payer.
-            
-            bill_addr = data.get('billing_address')
-            ship_addr = data.get('shipping_address')
+            if is_new_customer:
+                # --- SCENARIO A: NEW CUSTOMER ---
+                # Build the complete Parent/Child structure using Shopify's payload
+                bill_addr = data.get('billing_address')
+                ship_addr = data.get('shipping_address')
 
-            # 1. Set Invoice Address
-            if bill_addr:
-                try:
-                    inv_id = odoo.find_or_create_child_address(main_partner_id, bill_addr, type='invoice')
-                    if inv_id: 
-                        invoice_id = inv_id
-                except Exception as e:
-                    print(f"Invoice address routing error: {e}")
+                if bill_addr:
+                    try:
+                        inv_id = odoo.find_or_create_child_address(main_partner_id, bill_addr, type='invoice')
+                        if inv_id: invoice_id = inv_id
+                    except Exception as e:
+                        print(f"New customer invoice routing error: {e}")
 
-            # 2. Set Delivery Address
-            if ship_addr:
+                if ship_addr:
+                    try:
+                        del_id = odoo.find_or_create_child_address(main_partner_id, ship_addr, type='delivery')
+                        if del_id: shipping_id = del_id
+                    except Exception as e:
+                        print(f"New customer delivery routing error: {e}")
+                        
+            else:
+                # --- SCENARIO B: EXISTING B2B CUSTOMER ---
+                # Odoo is Master. Ignore Shopify payload and use official structure.
                 try:
-                    del_id = odoo.find_or_create_child_address(main_partner_id, ship_addr, type='delivery')
-                    if del_id: 
-                        shipping_id = del_id
+                    addr_res = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+                        'res.partner', 'address_get', [[main_partner_id], ['invoice', 'delivery']])
+                    
+                    invoice_id = addr_res.get('invoice', main_partner_id)
+                    shipping_id = addr_res.get('delivery', main_partner_id)
                 except Exception as e:
-                    print(f"Delivery address routing error: {e}")
+                    print(f"Odoo native address routing error: {e}")
             
             sales_rep_id = odoo.get_partner_salesperson(main_partner_id) or odoo.uid
 
