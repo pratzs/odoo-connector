@@ -73,42 +73,7 @@ def process_order_data(data, odoo_client, shop_url):
 
             # 1. Handle Customer
             partner = odoo.search_partner_by_email(email)
-            cust_data = data.get('customer', {})
-            def_address = data.get('billing_address') or data.get('shipping_address') or {}
-            
-            if not partner:
-                company_name = def_address.get('company')
-                person_name = f"{cust_data.get('first_name', '')} {cust_data.get('last_name', '')}".strip()
-                final_name = company_name if company_name else (person_name or email)
-                
-                vals = {
-                    'name': final_name, 'email': email, 'phone': cust_data.get('phone'),
-                    'street': def_address.get('address1'), 'city': def_address.get('city'),
-                    'zip': def_address.get('zip'), 'country_code': def_address.get('country_code'),
-                    'is_company': True, 'company_type': 'company'
-                }
-                if company_id: vals['company_id'] = int(company_id)
-                partner_id = odoo.create_partner(vals)
-                partner = {'id': partner_id, 'name': final_name}
-                
-                if shopify_id and data.get('customer', {}).get('id'):
-                    try:
-                        sh_cust_id = str(data['customer']['id'])
-                        cust_map_exists = CustomerMap.query.filter_by(shopify_customer_id=sh_cust_id, shop_url=shop_url).first()
-                        if not cust_map_exists:
-                            db.session.add(CustomerMap(
-                                shop_url=shop_url,
-                                shopify_customer_id=sh_cust_id, 
-                                odoo_partner_id=partner_id, 
-                                email=email
-                            ))
-                            db.session.commit()
-                    except Exception as e: 
-                        db.session.rollback()
-                        print(f"Customer Map Error: {e}")
-
-          # 1. Handle Customer
-            partner = odoo.search_partner_by_email(email)
+            is_new_customer = False
             cust_data = data.get('customer', {})
             def_address = data.get('billing_address') or data.get('shipping_address') or {}
             
@@ -143,6 +108,7 @@ def process_order_data(data, odoo_client, shop_url):
                 if company_id: vals['company_id'] = int(company_id)
                 partner_id = odoo.create_partner(vals)
                 partner = {'id': partner_id, 'name': final_name}
+                is_new_customer = True
                 
                 if shopify_id and data.get('customer', {}).get('id'):
                     try:
@@ -160,7 +126,7 @@ def process_order_data(data, odoo_client, shop_url):
                         db.session.rollback()
                         print(f"Customer Map Error: {e}")
 
-           # 2. Assign Addresses to Order
+            # 2. Assign Addresses to Order
             main_partner_id = partner.get('id') 
             invoice_id = main_partner_id
             shipping_id = main_partner_id
