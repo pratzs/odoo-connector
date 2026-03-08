@@ -92,10 +92,10 @@ def log_event(entity, status, message, shop_url=None):
 
     # Check if we are inside an application context
     from flask import current_app
-    if current_app:
+    try:
+        current_app._get_current_object()
         write_log()
-    else:
-        # If no context (e.g., inside RQ worker), create one manually
+    except RuntimeError:
         from app import app
         with app.app_context():
             write_log()
