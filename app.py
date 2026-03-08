@@ -689,6 +689,11 @@ def app_uninstalled():
     Triggered when a merchant deletes the app.
     We mark the shop as inactive to stop background syncs.
     """
+    raw_body = request.get_data()
+    hmac_header = request.headers.get('X-Shopify-Hmac-Sha256')
+    if not verify_shopify(raw_body, hmac_header):
+        return "Unauthorized", 401
+        
     data = request.get_json()
     shop_url = request.headers.get('X-Shopify-Shop-Domain')
 
@@ -904,6 +909,7 @@ def maintenance_wipe_logs():
             return jsonify({"error": str(e)})
 
 @app.route('/maintenance/force_tax_all', methods=['GET'])
+@require_shopify_session
 def force_tax_all():
     shop_url = request.args.get('shop')
     if not setup_shopify_session(shop_url): 
@@ -930,6 +936,7 @@ def force_tax_all():
     return jsonify({"message": f"Successfully fixed {count} customers. GST is now being collected."})
 
 @app.route('/maintenance/clear_queue', methods=['POST'])
+@require_shopify_session
 def clear_background_queue():
     """
     Emergency tool to wipe all pending tasks.
@@ -1093,6 +1100,7 @@ def trigger_manual_image_sync():
     return jsonify({"message": "Image Sync Queued."})
 
 @app.route('/maintenance/diagnose_categories', methods=['GET'])
+@require_shopify_session
 def trigger_diagnose():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
@@ -1311,6 +1319,7 @@ def trigger_customer_master_sync():
     return jsonify({"message": f"Customer Sync Queued (ID: {job.get_id()})"})
 
 @app.route('/sync/products/archive_duplicates', methods=['POST'])
+@require_shopify_session
 def trigger_duplicate_scan():
     shop_url = request.args.get('shop')
     
