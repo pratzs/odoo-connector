@@ -269,14 +269,7 @@ class OdooClient:
             return [{'id': l['id'], 'name': f"{l['display_name']} [{l.get('usage', 'unknown')}]"} for l in locs]
         except Exception as e:
             return [{'id': 0, 'name': f"Error: {str(e)}"}]
-
-    def get_total_qty_for_locations(self, product_id, location_ids, field_name='qty_available'):
-        total_qty = 0
-        for loc_id in location_ids:
-            context = {'location': loc_id}
-            data = self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'read', [product_id], {'fields': [field_name], 'context': context})
-            if data: total_qty += data[0].get(field_name, 0)
-        return total_qty
+            
 
     def get_stock_batch(self, product_ids, location_ids, field_name='qty_available'):
         """
