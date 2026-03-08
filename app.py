@@ -304,11 +304,9 @@ def sync_categories_only(shop_url):
 
         
 def perform_inventory_sync(shop_url):
+    """Runs inside the Worker Process..."""
     discrepancy_list = []
-    """
-    Runs inside the Worker Process.
-    STRATEGY: ID-Based Sync + Active Only Filter.
-    """
+    
     with app.app_context():
         log_event('Inventory', 'Info', "Starting Inventory Sync...", shop_url=shop_url)
         
@@ -1556,6 +1554,7 @@ def api_get_companies():
 
 # --- API: Fetch Locations (Dynamic) ---
 @app.route('/api/odoo/locations')
+@require_shopify_session
 def api_get_locations():
     shop_url = request.args.get('shop')
     company_id = request.args.get('company_id')
