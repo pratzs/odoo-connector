@@ -181,17 +181,17 @@ def sync_customers_master(shop_url):
             if not odoo_customers: break 
 
             for p in odoo_customers:
-            parent_info = p.get('parent_id')
-        
-            # Skip the group parent company itself (e.g. "CSB Group 3 Ltd")
-            is_group_parent = any(g in p.get('name', '').lower() for g in group_whitelist)
-            if is_group_parent and not parent_info:
-                continue
-        
-            if parent_info:
-                parent_name = parent_info[1]
-                is_whitelisted = any(g in parent_name.lower() for g in group_whitelist)
-                if not is_whitelisted: continue
+                parent_info = p.get('parent_id')
+
+                # Skip the group parent company itself (e.g. "CSB Group 3 Ltd")
+                is_group_parent = any(g in p.get('name', '').lower() for g in group_whitelist)
+                if is_group_parent and not parent_info:
+                    continue
+
+                if parent_info:
+                    parent_name = parent_info[1]
+                    is_whitelisted = any(g in parent_name.lower() for g in group_whitelist)
+                    if not is_whitelisted: continue
 
                 # --- 1. NAMES ---
                 shopify_first_name = p.get('name')
