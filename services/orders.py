@@ -189,8 +189,6 @@ def process_order_data(data, odoo_client, shop_url):
                     sku = sku.replace('-UNIT', '')
                     is_unit_variant = True
 
-                # ✅ FIX 1: Strict Company-Compatible Search
-                # We specifically look for a product that is EITHER Global OR owned by this Company
                 product_id = None
                 p_domain = [['default_code', '=', sku]]
                 if company_id:
@@ -203,18 +201,31 @@ def process_order_data(data, odoo_client, shop_url):
                 except: pass
 
                 if not product_id:
-                    # Fallback: Create if missing (Standard creation logic)
                     if not odoo.check_product_exists_by_sku(sku, company_id):
                         try:
                             new_p = {'name': item['name'], 'default_code': sku, 'list_price': float(item.get('price', 0)), 'type': 'product'}
                             if company_id: new_p['company_id'] = int(company_id)
                             odoo.create_product(new_p)
-                            
-                            # Search again after creation
                             p_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                                 'product.product', 'search', [p_domain], {'limit': 1})
                             if p_ids: product_id = p_ids[0]
                         except: pass
+
+                # ✅ NEW: If still not found, try stripping the pack suffix (e.g. OBBA24C-6perpack -> OBBA24C)
+                if not product_id and '-' in raw_sku and not is_unit_variant:
+                    base_sku = raw_sku.rsplit('-', 1)[0]
+                    base_domain = [['default_code', '=', base_sku]]
+                    if company_id:
+                        base_domain += ['|', ['company_id', '=', False], ['company_id', '=', int(company_id)]]
+                    try:
+                        p_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                            'product.product', 'search', [base_domain], {'limit': 1})
+                        if p_ids:
+                            product_id = p_ids[0]
+                            sku = base_sku
+                            is_unit_variant = True
+                    except: pass
+
                 
                 if product_id:
                     price = float(item.get('price', 0))
