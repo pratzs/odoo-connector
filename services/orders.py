@@ -236,7 +236,7 @@ def process_order_data(data, odoo_client, shop_url):
                     line_vals = {'product_id': product_id, 'product_uom_qty': qty, 'price_unit': price, 'name': item['name'], 'discount': pct}
                     
                     variant_title = (item.get('variant_title') or '').lower()
-                    title_indicates_unit = any(x in variant_title for x in ['unit', 'single', 'each', 'bottle', 'can', 'pce'])
+                    title_indicates_unit = any(x in variant_title for x in ['unit', 'single', 'each', 'bottle', 'can', 'pce', 'per pack'])
                     
                     if unit_uom_id and (is_unit_variant or title_indicates_unit):
                         line_vals['product_uom'] = unit_uom_id
