@@ -193,12 +193,13 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
     """
     Sends a setup/reset email to the customer.
     `identifier` can be either:
-      - An Odoo ID (numeric string, e.g. "35819")
+      - An Odoo ID (numeric string, e.g. "31274")
       - An email address (e.g. "pratham@worthy.nz")
 
     The email sent includes:
       - Their Store ID (so managers always have it)
-      - A one-time password setup link (valid 48 hours)
+      - A one-time password setup link via the STORE domain (not the connector)
+        e.g. https://vjtrading.myshopify.com/pages/set-password?token=xxx
     """
     identifier = str(identifier).strip()
     if not identifier:
@@ -208,13 +209,11 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
     customer = None
 
     if '@' in identifier:
-        # Looks like an email — search by email
         customer = CustomerMap.query.filter_by(
             email=identifier.lower(),
             shop_url=shop_url
         ).first()
     else:
-        # Looks like a numeric ID
         try:
             odoo_id_int = int(identifier)
             customer = CustomerMap.query.filter_by(
@@ -224,14 +223,12 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
         except ValueError:
             return False, "Please enter a valid email address or Store ID."
 
-    # Always return a neutral message — don't reveal whether the ID/email exists
     neutral_msg = "If we found a matching account, a setup email has been sent."
 
     if not customer or not customer.email or '@' not in customer.email:
         return True, neutral_msg
 
     if 'pos.local' in customer.email:
-        # Placeholder email — no real address on file
         return False, "No email address is linked to this account. Please contact your account manager."
 
     # 2. Generate a secure one-time token
@@ -240,20 +237,23 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
     customer.reset_token_expires = datetime.utcnow() + timedelta(hours=48)
     db.session.commit()
 
-    # 3. Build the setup URL
-    app_host = os.getenv('HOST', '').rstrip('/')
-    setup_url = f"{app_host}/multipass/reset/{token}"
+    # 3. Build the setup URL — goes through the STORE domain, not the connector
+    # The store has a /pages/set-password page that reads ?token= from the URL
+    clean_shop = shop_url.replace('https://', '').replace('http://', '').rstrip('/')
+    setup_url = f"https://{clean_shop}/pages/set-password?token={token}"
 
     action_label = "Set Up Your Password" if not customer.password_hash else "Reset Your Password"
-    clean_shop = shop_url.replace('https://', '').replace('http://', '').rstrip('/')
 
-    # 4. Send email (includes their Store ID so managers always have it)
+    # 4. Get per-shop from-email from AppSettings (falls back to developer email)
+    from_email = _get_shop_from_email(shop_url)
+
     success = _send_setup_email(
         to_email=customer.email,
         odoo_id=customer.odoo_partner_id,
         setup_url=setup_url,
         action_label=action_label,
-        shop_domain=clean_shop
+        shop_domain=clean_shop,
+        from_email=from_email
     )
 
     if success:
@@ -268,23 +268,46 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
         return False, "Failed to send email. Please contact your account manager."
 
 
+def _get_shop_from_email(shop_url: str) -> str:
+    """
+    Returns the configured from-email for this shop.
+    Store owners set this in Settings as 'multipass_from_email'.
+    Falls back to the developer email if not configured.
+    """
+    try:
+        from utils import get_config
+        configured = get_config('multipass_from_email', None, shop_url=shop_url)
+        if configured and '@' in str(configured):
+            return str(configured).strip()
+    except Exception:
+        pass
+    # Fallback — developer email
+    return "hello@tripsterdevelopers.com"
+
+
 def _send_setup_email(to_email: str, odoo_id: int, setup_url: str,
-                      action_label: str, shop_domain: str) -> bool:
+                      action_label: str, shop_domain: str,
+                      from_email: str = "hello@tripsterdevelopers.com") -> bool:
     """Internal helper — sends the password setup/reset email via Namecheap SMTP."""
     SMTP_SERVER     = "premium74.web-hosting.com"
     SMTP_PORT       = 465
-    SENDER_EMAIL    = "hello@tripsterdevelopers.com"
+    SENDER_EMAIL    = "hello@tripsterdevelopers.com"   # Always sends via this SMTP account
     SENDER_PASSWORD = os.getenv('SMTP_PASSWORD')
 
     if not SENDER_PASSWORD:
         print("MULTIPASS EMAIL ERROR: SMTP_PASSWORD not set")
         return False
 
-    subject = f"[{shop_domain}] {action_label} — Your B2B Account Details"
+    # Show store's email in the From field (display name trick)
+    # e.g. "Worthy Products <hello@tripsterdevelopers.com>"
+    display_name = shop_domain.replace('.myshopify.com', '').replace('-', ' ').title()
+    formatted_from = f"{display_name} <{SENDER_EMAIL}>"
+
+    subject = f"{action_label} — Your B2B Account Details"
 
     body = f"""Hello,
 
-You (or your account manager) requested a password {"setup" if "Set Up" in action_label else "reset"} for your B2B ordering account on {shop_domain}.
+You (or your account manager) requested a password {"setup" if "Set Up" in action_label else "reset"} for your B2B ordering account.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 YOUR ACCOUNT DETAILS
@@ -302,16 +325,16 @@ To {action_label.lower()}, click the link below:
 This link expires in 48 hours.
 
 If you did not request this, you can safely ignore this email.
-
-— {shop_domain} Support Team
 """
 
     try:
         msg = EmailMessage()
         msg.set_content(body)
         msg['Subject'] = subject
-        msg['From']    = SENDER_EMAIL
+        msg['From']    = formatted_from
         msg['To']      = to_email
+        # Reply-To goes to the store's configured email
+        msg['Reply-To'] = from_email
 
         with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as smtp:
             smtp.login(SENDER_EMAIL, SENDER_PASSWORD)
