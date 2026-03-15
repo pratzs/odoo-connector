@@ -2285,6 +2285,184 @@ def clear_failed_jobs():
 
 
 # ==========================================
+#  MULTIPASS LOGIN ROUTES (Public — No session required)
+# ==========================================
+
+def _multipass_cors(response):
+    """Add CORS headers so the Shopify Liquid template can POST cross-origin."""
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'POST, GET, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    return response
+
+
+@app.route('/multipass/login', methods=['POST', 'OPTIONS'])
+def multipass_login():
+    """
+    Receives Odoo ID + password from the Shopify login page.
+    On success: returns JSON with the Multipass redirect URL.
+    On failure: returns JSON with an error message.
+    The Liquid template JS handles the redirect or shows the error.
+    """
+    if request.method == 'OPTIONS':
+        return _multipass_cors(jsonify({}))
+
+    data = request.get_json(silent=True) or request.form
+    shop_url   = data.get('shop_url') or data.get('shop')
+    odoo_id    = data.get('odoo_id', '').strip()
+    password   = data.get('password', '')
+
+    if not shop_url:
+        return _multipass_cors(jsonify({'success': False, 'error': 'Missing shop_url'})), 400
+
+    try:
+        from services.multipass import do_multipass_login
+        success, result = do_multipass_login(odoo_id, password, shop_url)
+        if success:
+            return _multipass_cors(jsonify({'success': True, 'redirect_url': result}))
+        else:
+            return _multipass_cors(jsonify({'success': False, 'error': result}))
+    except Exception as e:
+        log_event('Multipass', 'Error', f"Login route error: {e}", shop_url=shop_url)
+        return _multipass_cors(jsonify({'success': False, 'error': 'Unexpected error. Please try again.'})), 500
+
+
+@app.route('/multipass/reset/request', methods=['POST', 'OPTIONS'])
+def multipass_reset_request():
+    """
+    Customer clicks 'Forgot / Set up password' on the login page.
+    Sends a one-time setup/reset email.
+    """
+    if request.method == 'OPTIONS':
+        return _multipass_cors(jsonify({}))
+
+    data     = request.get_json(silent=True) or request.form
+    shop_url = data.get('shop_url') or data.get('shop')
+    odoo_id  = data.get('odoo_id', '').strip()
+
+    if not shop_url or not odoo_id:
+        return _multipass_cors(jsonify({'success': False, 'error': 'Missing Store ID or shop'})), 400
+
+    try:
+        from services.multipass import request_password_setup
+        ok, msg = request_password_setup(odoo_id, shop_url)
+        return _multipass_cors(jsonify({'success': ok, 'message': msg}))
+    except Exception as e:
+        return _multipass_cors(jsonify({'success': False, 'error': str(e)})), 500
+
+
+@app.route('/multipass/reset/<token>', methods=['GET'])
+def multipass_reset_page(token):
+    """
+    Customer lands here from the email link.
+    Renders a minimal HTML page with a 'Set password' form.
+    """
+    from models import CustomerMap
+    customer = CustomerMap.query.filter_by(reset_token=token).first()
+
+    if not customer:
+        return render_template_string(_RESET_HTML,
+            token=token, error="This link is invalid or has already been used.", success=None)
+
+    if customer.reset_token_expires and datetime.utcnow() > customer.reset_token_expires:
+        return render_template_string(_RESET_HTML,
+            token=token, error="This link has expired. Please request a new one.", success=None)
+
+    return render_template_string(_RESET_HTML, token=token, error=None, success=None)
+
+
+@app.route('/multipass/reset/<token>', methods=['POST'])
+def multipass_reset_confirm(token):
+    """
+    Receives the new password from the reset form.
+    """
+    new_password = request.form.get('password', '').strip()
+    confirm      = request.form.get('confirm_password', '').strip()
+
+    if new_password != confirm:
+        return render_template_string(_RESET_HTML,
+            token=token, error="Passwords do not match.", success=None)
+
+    try:
+        from services.multipass import set_customer_password
+        ok, msg = set_customer_password(token, new_password)
+        if ok:
+            return render_template_string(_RESET_HTML, token=token, error=None, success=msg)
+        else:
+            return render_template_string(_RESET_HTML, token=token, error=msg, success=None)
+    except Exception as e:
+        return render_template_string(_RESET_HTML,
+            token=token, error="Unexpected error. Please try again.", success=None)
+
+
+@app.route('/multipass/admin/send-setup-emails', methods=['POST'])
+@require_shopify_session
+def multipass_admin_send_setup():
+    """
+    Admin button: sends setup emails to all customers without a password yet.
+    """
+    shop_url = request.args.get('shop')
+    try:
+        from services.multipass import send_setup_emails_to_all
+        job = q_default.enqueue(send_setup_emails_to_all, shop_url, job_timeout=3600)
+        return jsonify({'success': True,
+            'message': f'Queued setup email job (ID: {job.id[:8]}...). Check Live Logs for progress.'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+# Minimal HTML template for the password set/reset page
+_RESET_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Set Your Password</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background: #f6f6f7; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+        .card { max-width: 440px; width: 100%; border: none; border-radius: 8px;
+                box-shadow: 0 0 0 1px rgba(63,63,68,.05), 0 1px 3px rgba(63,63,68,.15); }
+        .btn-primary { background: #202223; border-color: #202223; }
+        .btn-primary:hover { background: #444; border-color: #444; }
+    </style>
+</head>
+<body>
+    <div class="card p-4">
+        <h5 class="fw-bold mb-1">Set Your Password</h5>
+        <p class="text-muted small mb-4">Enter a new password for your B2B account.</p>
+
+        {% if success %}
+            <div class="alert alert-success">{{ success }}</div>
+            <p class="small text-center"><a href="javascript:window.close()">You can close this tab and return to the login page.</a></p>
+        {% elif error %}
+            <div class="alert alert-danger">{{ error }}</div>
+            {% if 'expired' in error or 'invalid' in error %}
+                <p class="small text-center text-muted">Return to the login page and click 'Forgot password' to request a new link.</p>
+            {% endif %}
+        {% else %}
+            <form method="POST">
+                <div class="mb-3">
+                    <label class="form-label fw-semibold" style="font-size:13px;">New Password</label>
+                    <input type="password" name="password" class="form-control" required minlength="8"
+                           placeholder="Minimum 8 characters">
+                </div>
+                <div class="mb-4">
+                    <label class="form-label fw-semibold" style="font-size:13px;">Confirm Password</label>
+                    <input type="password" name="confirm_password" class="form-control" required minlength="8"
+                           placeholder="Repeat your password">
+                </div>
+                <button type="submit" class="btn btn-primary w-100">Set Password</button>
+            </form>
+        {% endif %}
+    </div>
+</body>
+</html>
+"""
+
+
+# ==========================================
 #  METAFIELD MANUAL REFRESH ENDPOINT
 # ==========================================
 @app.route('/api/metafields/refresh', methods=['POST'])
