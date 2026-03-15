@@ -2331,21 +2331,23 @@ def multipass_login():
 def multipass_reset_request():
     """
     Customer clicks 'Forgot / Set up password' on the login page.
-    Sends a one-time setup/reset email.
+    Accepts either an email address or a Store ID (Odoo partner ID).
+    Sends a one-time setup/reset email with their Store ID included.
     """
     if request.method == 'OPTIONS':
         return _multipass_cors(jsonify({}))
 
-    data     = request.get_json(silent=True) or request.form
-    shop_url = data.get('shop_url') or data.get('shop')
-    odoo_id  = data.get('odoo_id', '').strip()
+    data       = request.get_json(silent=True) or request.form
+    shop_url   = data.get('shop_url') or data.get('shop')
+    # New: 'identifier' can be email or odoo_id — backend figures it out
+    identifier = (data.get('identifier') or data.get('odoo_id') or '').strip()
 
-    if not shop_url or not odoo_id:
-        return _multipass_cors(jsonify({'success': False, 'error': 'Missing Store ID or shop'})), 400
+    if not shop_url or not identifier:
+        return _multipass_cors(jsonify({'success': False, 'error': 'Missing identifier or shop'})), 400
 
     try:
         from services.multipass import request_password_setup
-        ok, msg = request_password_setup(odoo_id, shop_url)
+        ok, msg = request_password_setup(identifier, shop_url)
         return _multipass_cors(jsonify({'success': ok, 'message': msg}))
     except Exception as e:
         return _multipass_cors(jsonify({'success': False, 'error': str(e)})), 500
