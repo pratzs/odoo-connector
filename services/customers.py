@@ -147,7 +147,7 @@ def sync_customers_master(shop_url):
         domain = [
             ('write_date', '>', last_run), 
             ('active', '=', True),
-            ('email', '!=', False)
+            ('email', '!=', False),  # FIX: Missing comma was causing a TypeError crash
             ('type', '=', 'contact')
         ]
         if company_id:
@@ -199,7 +199,10 @@ def sync_customers_master(shop_url):
                 shopify_company = p.get('name')
                 
                 b2b_company_name = p.get('name')
-                b2b_location_name = p.get('name')
+                # FIX: Append Odoo ID to location name so it's a stable unique key.
+                # Without this, any rename in Odoo silently creates a duplicate
+                # Shopify Company Location on the next sync run.
+                b2b_location_name = f"{p.get('name')} [OID:{p['id']}]"
                 staff_note = f"Independent | Odoo ID: {p['id']}"
                 context_tags = ["Independent"]
 
@@ -208,7 +211,7 @@ def sync_customers_master(shop_url):
                     shopify_first_name = p.get('name') 
                     shopify_company = parent_name        
                     b2b_company_name = parent_name
-                    b2b_location_name = p.get('name')
+                    b2b_location_name = f"{p.get('name')} [OID:{p['id']}]"
                     staff_note = f"Franchise Site | Odoo ID: {p['id']}"
                     context_tags = ["Franchise", "Site"]
 
