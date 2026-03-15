@@ -144,28 +144,21 @@
             Welcome to the Odoo Connector. Automate your operations with real-time synchronization.
         </p>
         
-        <div class="d-flex gap-3">
+        <div class="d-flex gap-3 flex-wrap">
             <div class="bg-white border rounded px-3 py-2 shadow-sm d-flex align-items-center" style="border-color: var(--p-border) !important;">
-                <div class="rounded-circle me-2" id="dot-last-ret" style="width: 8px; height: 8px; background: #adb5bd;"></div>
-                <small class="text-muted me-1">Last Return Sync:</small>
-                <small class="fw-bold" id="status-last-ret" style="color: var(--p-on-surface);">
-                    {{ config.last_return_sync_success if config.last_return_sync_success else 'Never' }}
-                </small>
-            </div>
-            <div class="bg-white border rounded px-3 py-2 shadow-sm d-flex align-items-center" style="border-color: var(--p-border) !important;">
-                <div class="rounded-circle bg-success me-2" style="width: 8px; height: 8px;"></div>
+                <div class="rounded-circle me-2" id="dot-last-order" style="width: 8px; height: 8px; background: #adb5bd;"></div>
                 <small class="text-muted me-1">Last Order Sync:</small>
                 <small class="fw-bold" id="status-last-order" style="color: var(--p-on-surface);">
                     {{ config.last_order_sync_success if config.last_order_sync_success else 'Never' }}
                 </small>
             </div>
             <div class="bg-white border rounded px-3 py-2 shadow-sm d-flex align-items-center" style="border-color: var(--p-border) !important;">
-    <div class="rounded-circle bg-success me-2" style="width: 8px; height: 8px;"></div>
-    <small class="text-muted me-1">Last Return Sync:</small>
-    <small class="fw-bold" id="status-last-ret" style="color: var(--p-on-surface);">
-        {{ config.last_return_sync_success if config.last_return_sync_success else 'Never' }}
-    </small>
-</div>
+                <div class="rounded-circle me-2" id="dot-last-inv" style="width: 8px; height: 8px; background: #adb5bd;"></div>
+                <small class="text-muted me-1">Last Inventory Sync:</small>
+                <small class="fw-bold" id="status-last-inv" style="color: var(--p-on-surface);">
+                    {{ config.last_inventory_sync_success if config.last_inventory_sync_success else 'Never' }}
+                </small>
+            </div>
         </div>
     </div>
 
@@ -382,6 +375,20 @@
                                 <li>Type: <strong>Money</strong> (Number)</li>
                             </ul>
                         </div>
+                    </div>
+
+                    <!-- METAFIELD MANUAL REFRESH -->
+                    <div class="w-100 mt-3 pt-3 border-top">
+                        <div class="d-flex align-items-center justify-content-between">
+                            <div>
+                                <span class="fw-semibold" style="font-size: 13px;">Manual Metafield Refresh</span>
+                                <p class="text-muted mb-0" style="font-size: 12px;">Force re-writes <code>original_retail_price</code> &amp; <code>vendor_product_code</code> on all synced products. Use this if metafields appear blank.</p>
+                            </div>
+                            <button class="btn btn-secondary ms-3 text-nowrap" id="btnRefreshMeta" onclick="refreshMetafields()" style="font-size: 12px; padding: 6px 14px; white-space: nowrap;">
+                                <i class="bi bi-arrow-repeat me-1"></i> Refresh Metafields
+                            </button>
+                        </div>
+                        <div id="metaRefreshResult" class="mt-2" style="display:none; font-size: 12px;"></div>
                     </div>
                 </div>
             </div>
@@ -1459,6 +1466,34 @@ function clearDiagnose() {
     document.getElementById('diagEmail').value = '';
 }
 
+
+function refreshMetafields() {
+    const btn = document.getElementById('btnRefreshMeta');
+    const result = document.getElementById('metaRefreshResult');
+
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Refreshing...`;
+    result.style.display = 'none';
+
+    fetch(`/api/metafields/refresh?shop=${CURRENT_SHOP_URL}`, { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            result.style.display = 'block';
+            if (data.success) {
+                result.innerHTML = `<span class="text-success"><i class="bi bi-check-circle-fill me-1"></i>${data.message}</span>`;
+            } else {
+                result.innerHTML = `<span class="text-danger"><i class="bi bi-x-circle-fill me-1"></i>Error: ${data.message}</span>`;
+            }
+        })
+        .catch(err => {
+            result.style.display = 'block';
+            result.innerHTML = `<span class="text-danger"><i class="bi bi-x-circle-fill me-1"></i>Network error</span>`;
+        })
+        .finally(() => {
+            btn.disabled = false;
+            btn.innerHTML = `<i class="bi bi-arrow-repeat me-1"></i> Refresh Metafields`;
+        });
+}
 
         // --- SUPPORT MODAL FUNCTIONS ---
 function openSupportModal() {
