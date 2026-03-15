@@ -907,3 +907,217 @@ def sync_missing_new_products(shop_url):
             q_default.enqueue(sync_product_batch_task, shop_url, batch_ids, f"Force Catch-Up {index+1}/{len(chunks)}", job_timeout=3600)
 
         log_event('Missing Sync', 'Success', f"Force Queued {len(missing_product_ids)} recent Odoo products for verification.", shop_url=shop_url)
+
+
+def refresh_metafields_for_shop(shop_url):
+    """
+    Force re-writes the two metafields (original_retail_price + vendor_product_code)
+    on every product in ProductMap for this shop.
+
+    Unlike the regular sync which skips unchanged values, this ALWAYS writes —
+    which is exactly what you need when metafields are blank in Shopify but the
+    setting is ticked. Called by the manual "Refresh Metafields" button.
+    """
+    from app import app
+    from models import ProductMap
+
+    with app.app_context():
+        odoo = get_odoo_connection(shop_url)
+        if not odoo or not setup_shopify_session(shop_url):
+            log_event('Metafield Refresh', 'Error', 'Connection failed (Odoo or Shopify)', shop_url=shop_url)
+            return 0, "Connection failed"
+
+        # Only run if at least one of the two metafields is enabled in settings
+        sync_price  = get_config('prod_sync_meta_original_price', False, shop_url=shop_url)
+        sync_vendor = get_config('prod_sync_meta_vendor_code',    False, shop_url=shop_url)
+
+        if not sync_price and not sync_vendor:
+            return 0, "Both metafields are disabled in settings — tick at least one to refresh"
+
+        # 1. Load every mapped product for this shop (skip placeholder -1 rows)
+        maps = ProductMap.query.filter(
+            ProductMap.shop_url == shop_url,
+            ProductMap.odoo_product_id != -1
+        ).all()
+
+        if not maps:
+            return 0, "No mapped products found"
+
+        odoo_ids    = [m.odoo_product_id for m in maps]
+        shopify_map = {m.odoo_product_id: m.shopify_variant_id for m in maps}
+
+        # 2. Bulk-fetch Odoo data we need (price + template ID for vendor code)
+        try:
+            odoo_products = odoo.models.execute_kw(
+                odoo.db, odoo.uid, odoo.password,
+                'product.product', 'read', [odoo_ids],
+                {'fields': ['id', 'list_price', 'product_tmpl_id']}
+            )
+        except Exception as e:
+            log_event('Metafield Refresh', 'Error', f"Odoo read failed: {e}", shop_url=shop_url)
+            return 0, f"Odoo read failed: {e}"
+
+        # 3. Bulk-fetch vendor codes from product.supplierinfo
+        vendor_code_map = {}
+        if sync_vendor:
+            tmpl_ids = [p['product_tmpl_id'][0] for p in odoo_products if p.get('product_tmpl_id')]
+            if tmpl_ids:
+                try:
+                    supplier_info = odoo.models.execute_kw(
+                        odoo.db, odoo.uid, odoo.password,
+                        'product.supplierinfo', 'search_read',
+                        [[['product_tmpl_id', 'in', tmpl_ids]]],
+                        {'fields': ['product_tmpl_id', 'product_code']}
+                    )
+                    for info in supplier_info:
+                        if info.get('product_code') and info.get('product_tmpl_id'):
+                            vendor_code_map[info['product_tmpl_id'][0]] = info['product_code']
+                except Exception as e:
+                    log_event('Metafield Refresh', 'Warning', f"Vendor code fetch error: {e}", shop_url=shop_url)
+
+        # 4. Build lookup: odoo_id -> {price, vendor_code}
+        odoo_data = {}
+        for p in odoo_products:
+            tmpl_id = p['product_tmpl_id'][0] if p.get('product_tmpl_id') else None
+            odoo_data[p['id']] = {
+                'price': "{:.2f}".format(float(p.get('list_price') or 0.0)),
+                'vendor_code': vendor_code_map.get(tmpl_id, '') if tmpl_id else ''
+            }
+
+        # 5. Walk through each product and force-write metafields
+        updated = 0
+        errors  = 0
+        BATCH_SIZE = 50
+
+        # Process in batches to avoid memory issues on large catalogs
+        map_items = list(shopify_map.items())  # [(odoo_id, shopify_variant_id), ...]
+
+        for i in range(0, len(map_items), BATCH_SIZE):
+            batch = map_items[i:i + BATCH_SIZE]
+            variant_ids = [str(v_id) for _, v_id in batch]
+
+            # Bulk-fetch Shopify products by variant ID via GraphQL
+            gql = """
+            query($ids: [ID!]!) {
+              nodes(ids: $ids) {
+                ... on ProductVariant {
+                  id
+                  product {
+                    id
+                    metafields(first: 20, namespace: "custom") {
+                      edges { node { id key value } }
+                    }
+                  }
+                }
+              }
+            }
+            """
+            gql_ids = [f"gid://shopify/ProductVariant/{v}" for v in variant_ids]
+            try:
+                import shopify as _shopify
+                client = _shopify.GraphQL()
+                import json as _json
+                result = _json.loads(client.execute(gql, {'ids': gql_ids}))
+                nodes = result.get('data', {}).get('nodes', [])
+            except Exception as e:
+                log_event('Metafield Refresh', 'Warning', f"GraphQL batch error: {e}", shop_url=shop_url)
+                errors += len(batch)
+                continue
+
+            # Build reverse map: variant GID -> odoo_id
+            gid_to_odoo = {}
+            for odoo_id, v_id in batch:
+                gid_to_odoo[f"gid://shopify/ProductVariant/{v_id}"] = odoo_id
+
+            for node in nodes:
+                if not node:
+                    continue
+                variant_gid = node.get('id')
+                odoo_id = gid_to_odoo.get(variant_gid)
+                if not odoo_id or odoo_id not in odoo_data:
+                    continue
+
+                data = odoo_data[odoo_id]
+                product_gid = node.get('product', {}).get('id')
+                existing_metas = {
+                    edge['node']['key']: edge['node']
+                    for edge in node.get('product', {}).get('metafields', {}).get('edges', [])
+                }
+
+                # Build the metafield mutations
+                mutations = []
+
+                if sync_price:
+                    mutations.append({
+                        'key':   'original_retail_price',
+                        'value': data['price'],
+                        'type':  'number_decimal',
+                        'existing': existing_metas.get('original_retail_price')
+                    })
+
+                if sync_vendor and data['vendor_code']:
+                    mutations.append({
+                        'key':   'vendor_product_code',
+                        'value': data['vendor_code'],
+                        'type':  'single_line_text_field',
+                        'existing': existing_metas.get('vendor_product_code')
+                    })
+
+                for m in mutations:
+                    existing = m.pop('existing')
+                    try:
+                        if existing:
+                            # UPDATE — force write even if value looks the same (fixes blank issue)
+                            update_gql = """
+                            mutation($id: ID!, $metafield: MetafieldInput!) {
+                              metafieldUpdate(metafield: {id: $id, value: $metafield.value}) {
+                                metafield { id value }
+                                userErrors { field message }
+                              }
+                            }
+                            """
+                            # Use the simpler metafieldsSet mutation which handles both create/update
+                            set_gql = """
+                            mutation($metafields: [MetafieldsSetInput!]!) {
+                              metafieldsSet(metafields: $metafields) {
+                                metafields { key value }
+                                userErrors { field message }
+                              }
+                            }
+                            """
+                            set_vars = {'metafields': [{
+                                'ownerId': product_gid,
+                                'namespace': 'custom',
+                                'key': m['key'],
+                                'value': m['value'],
+                                'type': m['type']
+                            }]}
+                            client.execute(set_gql, set_vars)
+                        else:
+                            # CREATE
+                            create_gql = """
+                            mutation($metafields: [MetafieldsSetInput!]!) {
+                              metafieldsSet(metafields: $metafields) {
+                                metafields { key value }
+                                userErrors { field message }
+                              }
+                            }
+                            """
+                            create_vars = {'metafields': [{
+                                'ownerId': product_gid,
+                                'namespace': 'custom',
+                                'key': m['key'],
+                                'value': m['value'],
+                                'type': m['type']
+                            }]}
+                            client.execute(create_gql, create_vars)
+                        updated += 1
+                    except Exception as e:
+                        errors += 1
+                        print(f"Metafield write error ({m['key']}): {e}")
+
+        summary = f"Metafield refresh complete. Updated {updated} metafields across {len(maps)} products."
+        if errors:
+            summary += f" ({errors} errors — check logs)"
+        log_event('Metafield Refresh', 'Success', summary, shop_url=shop_url)
+        return updated, summary
