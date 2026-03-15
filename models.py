@@ -59,6 +59,14 @@ class CustomerMap(db.Model):
     odoo_partner_id = db.Column(db.Integer, nullable=False)
     email = db.Column(db.String(100), index=True)
 
+    # --- MULTIPASS LOGIN ---
+    # Stores a bcrypt/werkzeug hash of the customer's self-set password.
+    # Never stores plaintext. Null = password not yet set.
+    password_hash = db.Column(db.String(255), nullable=True)
+    # One-time token emailed to the customer for password set/reset
+    reset_token = db.Column(db.String(100), nullable=True, index=True)
+    reset_token_expires = db.Column(db.DateTime, nullable=True)
+
 class SyncLog(db.Model):
     __tablename__ = 'sync_logs'
     id = db.Column(db.Integer, primary_key=True)
