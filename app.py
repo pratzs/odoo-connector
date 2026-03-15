@@ -2271,17 +2271,21 @@ def api_job_action(action, job_id):
 @app.route('/api/jobs/clear_failed', methods=['POST'])
 @require_shopify_session
 def clear_failed_jobs():
-    from utils import q_default
+    from utils import q_default, q_critical
     from rq.registry import FailedJobRegistry
     
-    registry = FailedJobRegistry(queue=q_default)
-    count = len(registry)
-    
-    # Delete all failed jobs
-    for job_id in registry.get_job_ids():
-        registry.remove(job_id, delete_job=True)
+    total_cleared = 0
+
+    # FIX: Clear BOTH queues — previously only q_default was cleared,
+    # leaving q_critical (orders/inventory) failures piling up silently.
+    for queue in [q_default, q_critical]:
+        registry = FailedJobRegistry(queue=queue)
+        count = len(registry)
+        for job_id in registry.get_job_ids():
+            registry.remove(job_id, delete_job=True)
+        total_cleared += count
         
-    return jsonify({'success': True, 'message': f'Cleared {count} failed jobs.'})
+    return jsonify({'success': True, 'message': f'Cleared {total_cleared} failed jobs (both queues).'})
 
 # ==========================================
 #  SUPPORT EMAIL ENDPOINT (Namecheap)
