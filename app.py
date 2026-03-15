@@ -2271,21 +2271,45 @@ def api_job_action(action, job_id):
 @app.route('/api/jobs/clear_failed', methods=['POST'])
 @require_shopify_session
 def clear_failed_jobs():
-    from utils import q_default, q_critical
+    from utils import q_default
     from rq.registry import FailedJobRegistry
     
-    total_cleared = 0
-
-    # FIX: Clear BOTH queues — previously only q_default was cleared,
-    # leaving q_critical (orders/inventory) failures piling up silently.
-    for queue in [q_default, q_critical]:
-        registry = FailedJobRegistry(queue=queue)
-        count = len(registry)
-        for job_id in registry.get_job_ids():
-            registry.remove(job_id, delete_job=True)
-        total_cleared += count
+    registry = FailedJobRegistry(queue=q_default)
+    count = len(registry)
+    
+    # Delete all failed jobs
+    for job_id in registry.get_job_ids():
+        registry.remove(job_id, delete_job=True)
         
-    return jsonify({'success': True, 'message': f'Cleared {total_cleared} failed jobs (both queues).'})
+    return jsonify({'success': True, 'message': f'Cleared {count} failed jobs.'})
+
+
+# ==========================================
+#  METAFIELD MANUAL REFRESH ENDPOINT
+# ==========================================
+@app.route('/api/metafields/refresh', methods=['POST'])
+@require_shopify_session
+def api_refresh_metafields():
+    """
+    Manually force-writes original_retail_price + vendor_product_code
+    on every mapped product. Enqueues as a background job so the UI
+    doesn't time out on large catalogs.
+    """
+    shop_url = request.args.get('shop')
+    try:
+        from services.products import refresh_metafields_for_shop
+        job = q_default.enqueue(
+            refresh_metafields_for_shop,
+            shop_url,
+            job_timeout=3600
+        )
+        return jsonify({
+            'success': True,
+            'message': f'Metafield refresh queued (Job ID: {job.id[:8]}...). Check Live Logs for progress.'
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
 
 # ==========================================
 #  SUPPORT EMAIL ENDPOINT (Namecheap)
