@@ -152,6 +152,15 @@ app = Flask(__name__)
 app.secret_key = os.getenv('FLASK_SECRET_KEY')
 
 # --- CONFIGURATION ---
+@app.after_request
+def apply_multipass_cors(response):
+    if request.path.startswith('/multipass/'):
+        response.headers['Access-Control-Allow-Origin']  = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        response.headers['Access-Control-Max-Age']       = '600'
+    return response
+
 database_url = os.getenv('DATABASE_URL', 'sqlite:///local.db')
 
 if database_url:
@@ -305,11 +314,7 @@ def sync_categories_only(shop_url):
         
 def perform_inventory_sync(shop_url):
     """Runs inside the Worker Process..."""
-    # FIX: Import locally to guarantee availability in RQ worker subprocess.
-    # When app.py is re-imported in the worker, a partial import failure between
-    # line 44 and this function can leave send_inventory_alert out of the global
-    # namespace. A local import always resolves fresh from utils directly.
-    from utils import send_inventory_alert
+    from utils import send_inventory_alert  # FIX: local import for RQ worker
     discrepancy_list = []
     
     with app.app_context():
@@ -2276,17 +2281,115 @@ def api_job_action(action, job_id):
 @app.route('/api/jobs/clear_failed', methods=['POST'])
 @require_shopify_session
 def clear_failed_jobs():
-    from utils import q_default
+    from utils import q_default, q_critical
     from rq.registry import FailedJobRegistry
     
-    registry = FailedJobRegistry(queue=q_default)
-    count = len(registry)
-    
-    # Delete all failed jobs
-    for job_id in registry.get_job_ids():
-        registry.remove(job_id, delete_job=True)
+    total_cleared = 0
+    for queue in [q_default, q_critical]:
+        registry = FailedJobRegistry(queue=queue)
+        for job_id in registry.get_job_ids():
+            registry.remove(job_id, delete_job=True)
+            total_cleared += 1
         
-    return jsonify({'success': True, 'message': f'Cleared {count} failed jobs.'})
+    return jsonify({'success': True, 'message': f'Cleared {total_cleared} failed jobs (both queues).'})
+
+# ==========================================
+#  MULTIPASS LOGIN ROUTES
+# ==========================================
+
+def _multipass_cors(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'POST, GET, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    return response
+
+@app.route('/multipass/login', methods=['POST', 'OPTIONS'])
+def multipass_login():
+    if request.method == 'OPTIONS':
+        return _multipass_cors(jsonify({}))
+    data = request.get_json(silent=True) or request.form
+    shop_url   = data.get('shop_url') or data.get('shop')
+    odoo_id    = data.get('odoo_id', '').strip()
+    password   = data.get('password', '')
+    if not shop_url:
+        return _multipass_cors(jsonify({'success': False, 'error': 'Missing shop_url'})), 400
+    try:
+        from services.multipass import do_multipass_login
+        success, result = do_multipass_login(odoo_id, password, shop_url)
+        if success:
+            return _multipass_cors(jsonify({'success': True, 'redirect_url': result}))
+        else:
+            return _multipass_cors(jsonify({'success': False, 'error': result}))
+    except Exception as e:
+        log_event('Multipass', 'Error', f"Login route error: {e}", shop_url=shop_url)
+        return _multipass_cors(jsonify({'success': False, 'error': 'Unexpected error. Please try again.'})), 500
+
+
+@app.route('/multipass/reset/request', methods=['POST', 'OPTIONS'])
+def multipass_reset_request():
+    if request.method == 'OPTIONS':
+        return _multipass_cors(jsonify({}))
+    data       = request.get_json(silent=True) or request.form
+    shop_url   = data.get('shop_url') or data.get('shop')
+    identifier = (data.get('identifier') or data.get('odoo_id') or '').strip()
+    if not shop_url or not identifier:
+        return _multipass_cors(jsonify({'success': False, 'error': 'Missing identifier or shop'})), 400
+    try:
+        from services.multipass import request_password_setup
+        ok, msg = request_password_setup(identifier, shop_url)
+        return _multipass_cors(jsonify({'success': ok, 'message': msg}))
+    except Exception as e:
+        return _multipass_cors(jsonify({'success': False, 'error': str(e)})), 500
+
+
+@app.route('/multipass/set-password', methods=['POST', 'OPTIONS'])
+def multipass_set_password_json():
+    if request.method == 'OPTIONS':
+        return _multipass_cors(jsonify({}))
+    data     = request.get_json(silent=True) or {}
+    token    = data.get('token', '').strip()
+    password = data.get('password', '').strip()
+    confirm  = data.get('confirm_password', '').strip()
+    if not token:
+        return _multipass_cors(jsonify({'success': False, 'error': 'Missing token.'})), 400
+    if not password:
+        return _multipass_cors(jsonify({'success': False, 'error': 'Please enter a password.'})), 400
+    if password != confirm:
+        return _multipass_cors(jsonify({'success': False, 'error': 'Passwords do not match.'}))
+    try:
+        from services.multipass import set_customer_password
+        ok, msg = set_customer_password(token, password)
+        return _multipass_cors(jsonify({'success': ok, 'message': msg if ok else None, 'error': msg if not ok else None}))
+    except Exception as e:
+        return _multipass_cors(jsonify({'success': False, 'error': 'Unexpected error. Please try again.'})), 500
+
+
+@app.route('/multipass/admin/send-setup-emails', methods=['POST'])
+@require_shopify_session
+def multipass_admin_send_setup():
+    shop_url = request.args.get('shop')
+    try:
+        from services.multipass import send_setup_emails_to_all
+        job = q_default.enqueue(send_setup_emails_to_all, shop_url, job_timeout=3600)
+        return jsonify({'success': True, 'message': f'Queued setup email job (ID: {job.id[:8]}...). Check Live Logs.'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+# ==========================================
+#  METAFIELD MANUAL REFRESH ENDPOINT
+# ==========================================
+@app.route('/api/metafields/refresh', methods=['POST'])
+@require_shopify_session
+def api_refresh_metafields():
+    shop_url = request.args.get('shop')
+    try:
+        from services.products import refresh_metafields_for_shop
+        job = q_default.enqueue(refresh_metafields_for_shop, shop_url, job_timeout=3600)
+        return jsonify({'success': True, 'message': f'Metafield refresh queued (Job ID: {job.id[:8]}...). Check Live Logs for progress.'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
 
 # ==========================================
 #  SUPPORT EMAIL ENDPOINT (Namecheap)
