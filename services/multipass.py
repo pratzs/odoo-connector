@@ -231,7 +231,28 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
     if 'pos.local' in customer.email:
         return False, "No email address is linked to this account. Please contact your account manager."
 
-    # 2. Generate a secure one-time token
+    # 2. Fetch customer name and store name from Odoo
+    customer_name = "Valued Customer"
+    store_name = shop_url.replace('.myshopify.com', '').replace('-', ' ').replace('_', ' ').title()
+    try:
+        odoo = get_odoo_connection(shop_url)
+        if odoo:
+            partners = odoo.models.execute_kw(
+                odoo.db, odoo.uid, odoo.password,
+                'res.partner', 'read',
+                [[customer.odoo_partner_id]],
+                {'fields': ['name', 'parent_id']}
+            )
+            if partners:
+                p = partners[0]
+                customer_name = p.get('name') or customer_name
+                # If they have a parent company, use that as store name
+                if p.get('parent_id'):
+                    store_name = p['parent_id'][1]
+    except Exception as e:
+        print(f"Name lookup error: {e}")
+
+    # 3. Generate a secure one-time token
     token = secrets.token_urlsafe(32)
     customer.reset_token = token
     customer.reset_token_expires = datetime.utcnow() + timedelta(hours=48)
@@ -253,7 +274,9 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
         setup_url=setup_url,
         action_label=action_label,
         shop_domain=clean_shop,
-        from_email=from_email
+        from_email=from_email,
+        customer_name=customer_name,
+        store_name=store_name
     )
 
     if success:
@@ -286,7 +309,9 @@ def _get_shop_from_email(shop_url: str) -> str:
 
 
 def _send_setup_email(to_email, odoo_id, setup_url, action_label, shop_domain,
-                      from_email="hello@tripsterdevelopers.com"):
+                      from_email="hello@tripsterdevelopers.com",
+                      customer_name="Valued Customer",
+                      store_name=""):
 
     # --- SMTP config (same logic as before) ---
     SMTP_SERVER     = "premium74.web-hosting.com"
@@ -310,24 +335,27 @@ def _send_setup_email(to_email, odoo_id, setup_url, action_label, shop_domain,
             html_body = f.read()
 
         html_body = html_body.format(
-            action_label = action_label,
-            action_word  = action_word,
-            shop_domain  = shop_domain,
-            odoo_id      = odoo_id,
-            to_email     = to_email,
-            setup_url    = setup_url,
+            action_label  = action_label,
+            action_word   = action_word,
+            shop_domain   = shop_domain,
+            odoo_id       = odoo_id,
+            to_email      = to_email,
+            setup_url     = setup_url,
+            customer_name = customer_name,
+            store_name    = store_name or shop_domain,
         )
     except Exception as e:
         print(f"Email template load error: {e} — falling back to plain text")
         html_body = None
 
     # Plain text fallback
-    plain_body = f"""Hello,
+    plain_body = f"""Hello {customer_name},
 
 {action_label} — Your B2B Account Details
 
-Store ID : {odoo_id}
-Email    : {to_email}
+Store Name : {store_name or shop_domain}
+Store ID   : {odoo_id}
+Email      : {to_email}
 
 To {action_label.lower()}: {setup_url}
 
