@@ -285,26 +285,47 @@ def _get_shop_from_email(shop_url: str) -> str:
     return "hello@tripsterdevelopers.com"
 
 
-def _send_setup_email(to_email: str, odoo_id: int, setup_url: str,
-                      action_label: str, shop_domain: str,
-                      from_email: str = "hello@tripsterdevelopers.com") -> bool:
-    """Internal helper — sends the password setup/reset email via Namecheap SMTP."""
-    SMTP_SERVER     = "premium74.web-hosting.com"
-    SMTP_PORT       = 465
-    SENDER_EMAIL    = "hello@tripsterdevelopers.com"   # Always sends via this SMTP account
-    SENDER_PASSWORD = os.getenv('SMTP_PASSWORD')
+def _send_setup_email(to_email, odoo_id, setup_url, action_label, shop_domain, from_email="hello@tripsterdevelopers.com"):
+    from utils import get_config
+
+    # Try shop's own SMTP first
+    shop_url = f"{shop_domain}"  # already cleaned
+    smtp_host = None
+    try:
+        # Look up shop_url from shop_domain
+        from models import Shop
+        shop = Shop.query.filter(Shop.shop_url.contains(shop_domain.replace('.myshopify.com',''))).first()
+        if shop:
+            from utils import get_config as gc
+            smtp_host = gc('smtp_host', None, shop_url=shop.shop_url)
+            smtp_port = int(gc('smtp_port', 465, shop_url=shop.shop_url))
+            smtp_user = gc('smtp_user', None, shop_url=shop.shop_url)
+            smtp_pass_enc = gc('smtp_pass', None, shop_url=shop.shop_url)
+            from security_utils import decrypt_val
+            smtp_pass = decrypt_val(smtp_pass_enc) if smtp_pass_enc else None
+    except Exception as e:
+        print(f"SMTP config lookup error: {e}")
+        smtp_host = None
+
+    # Use shop SMTP if configured, else fall back to developer SMTP
+    if smtp_host and smtp_user and smtp_pass:
+        SMTP_SERVER   = smtp_host
+        SMTP_PORT     = smtp_port
+        SENDER_EMAIL  = smtp_user
+        SENDER_PASSWORD = smtp_pass
+        display_from  = smtp_user  # Sends genuinely FROM their address
+    else:
+        SMTP_SERVER   = "premium74.web-hosting.com"
+        SMTP_PORT     = 465
+        SENDER_EMAIL  = "hello@tripsterdevelopers.com"
+        SENDER_PASSWORD = os.getenv('SMTP_PASSWORD')
+        display_from  = from_email  # Reply-To only
 
     if not SENDER_PASSWORD:
-        print("MULTIPASS EMAIL ERROR: SMTP_PASSWORD not set")
+        print("MULTIPASS EMAIL ERROR: No SMTP password available")
         return False
 
-    # Show store's email in the From field (display name trick)
-    # e.g. "Worthy Products <hello@tripsterdevelopers.com>"
-    display_name = shop_domain.replace('.myshopify.com', '').replace('-', ' ').title()
-    formatted_from = f"{display_name} <{SENDER_EMAIL}>"
-
     subject = f"{action_label} — Your B2B Account Details"
-
     body = f"""Hello,
 
 You (or your account manager) requested a password {"setup" if "Set Up" in action_label else "reset"} for your B2B ordering account.
@@ -331,51 +352,21 @@ If you did not request this, you can safely ignore this email.
         msg = EmailMessage()
         msg.set_content(body)
         msg['Subject'] = subject
-        msg['From']    = formatted_from
+        msg['From']    = display_from
         msg['To']      = to_email
-        # Reply-To goes to the store's configured email
-        msg['Reply-To'] = from_email
+        if display_from != SENDER_EMAIL:
+            msg['Reply-To'] = display_from
 
-        with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as smtp:
-            smtp.login(SENDER_EMAIL, SENDER_PASSWORD)
-            smtp.send_message(msg)
+        if SMTP_PORT == 587:
+            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
+                smtp.starttls()
+                smtp.login(SENDER_EMAIL, SENDER_PASSWORD)
+                smtp.send_message(msg)
+        else:
+            with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as smtp:
+                smtp.login(SENDER_EMAIL, SENDER_PASSWORD)
+                smtp.send_message(msg)
         return True
     except Exception as e:
         print(f"Multipass email send error: {e}")
         return False
-
-
-# ─────────────────────────────────────────────
-# 5. ADMIN: BULK SEND SETUP EMAILS
-# ─────────────────────────────────────────────
-
-def send_setup_emails_to_all(shop_url: str) -> tuple[int, int]:
-    """
-    Sends setup emails to ALL customers in CustomerMap for this shop
-    who do NOT yet have a password set. Returns (sent, skipped).
-    Used from the admin dashboard "Send All Setup Emails" button.
-    """
-    customers = CustomerMap.query.filter_by(
-        shop_url=shop_url,
-        password_hash=None
-    ).filter(CustomerMap.email.isnot(None)).all()
-
-    sent = 0
-    skipped = 0
-
-    for c in customers:
-        if not c.email or '@' not in c.email or 'pos.local' in c.email:
-            skipped += 1
-            continue
-
-        ok, _ = request_password_setup(str(c.odoo_partner_id), shop_url)
-        if ok:
-            sent += 1
-        else:
-            skipped += 1
-
-    log_event('Multipass', 'Info',
-        f"Bulk setup emails: {sent} sent, {skipped} skipped (no email/already set)",
-        shop_url=shop_url)
-
-    return sent, skipped
