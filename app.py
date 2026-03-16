@@ -1624,6 +1624,13 @@ def save_settings():
             
         if 'sync_start_date' in data: shop.sync_start_date = data['sync_start_date']
 
+        # Encrypt SMTP password before saving to AppSettings
+        if data.get('smtp_pass') and data['smtp_pass'].strip():
+            from security_utils import encrypt_val
+            data['smtp_pass'] = encrypt_val(data['smtp_pass'])
+        else:
+            data.pop('smtp_pass', None)  # Don't overwrite with blank
+
         # 5. Save App Settings
         ignore_fields = ['odoo_company_id', 'company_id', 'sync_start_date', 'shop', 'shop_url', 'hmac', 'timestamp', 'odoo_url', 'odoo_db', 'odoo_user', 'odoo_pass']
         
