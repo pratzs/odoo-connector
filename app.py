@@ -437,17 +437,33 @@ def perform_inventory_sync(shop_url):
         
         for i in range(0, len(map_items), BATCH_SIZE):
             batch = map_items[i:i+BATCH_SIZE]
-            batch_ids = [item[1] for item in batch if item[1] > 0] # Skip ignored items (-1)
-            batch_skus = {item[1]: item[0] for item in batch if item[1] > 0}
+            batch_ids = list(set([item[1] for item in batch if item[1] > 0])) # Unique, valid Odoo IDs
+            
+            # FIX 1: Map ONE Odoo ID to MULTIPLE SKUs to prevent variant overwriting
+            batch_skus = {}
+            for sku, pid in batch:
+                if pid > 0:
+                    if pid not in batch_skus:
+                        batch_skus[pid] = []
+                    batch_skus[pid].append(sku)
             
             if not batch_ids: continue
 
             try:
+                # FIX 2: Fetch Pack Info alongside stock to calculate correct ratios
+                import math
+                pack_info = {}
+                prod_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                    'product.product', 'read', [batch_ids], 
+                    {'fields': ['sh_is_secondary_unit', 'qty_per_pack']})
+                
+                for p in prod_data:
+                    pack_info[p['id']] = p
+
                 # Read Odoo Stock safely
-                qty_map = {pid: 0 for pid in batch_ids}
+                qty_map = {pid: 0.0 for pid in batch_ids}
                 
                 if target_locations:
-                    # Specific locations selected
                     for loc_id in target_locations:
                         ctx = {'location': int(loc_id)}
                         stock_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
@@ -455,40 +471,50 @@ def perform_inventory_sync(shop_url):
                         for record in stock_data:
                             qty_map[record['id']] += float(record.get(target_field, 0.0))
                 else:
-                    # Fallback: No locations selected, get global total stock
                     stock_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                         'product.product', 'read', [batch_ids], {'fields': [target_field]})
                     for record in stock_data:
                         qty_map[record['id']] += float(record.get(target_field, 0.0))
                 
                 # Update Shopify
-    
                 for pid, total_qty in qty_map.items():
-                    sku = batch_skus[pid]
-                    sp_variant = shopify_variants.get(sku)
-                    
-                    if not sp_variant: continue
-                    if sync_zero and total_qty <= 0: continue
-                    
-                    current_shopify_qty = int(sp_variant.inventory_quantity) if sp_variant.inventory_quantity else 0
+                    p_info = pack_info.get(pid, {})
+                    is_pack = p_info.get('sh_is_secondary_unit', False)
+                    qty_per_pack = float(p_info.get('qty_per_pack') or 1.0)
 
-                    diff = abs(int(total_qty) - current_shopify_qty)
-                    if diff >= alert_threshold:
-                        discrepancy_list.append({
-                            'sku': sku, 'odoo': int(total_qty), 
-                            'shopify': current_shopify_qty, 'diff': diff
-                        })
-                    
-                    if int(total_qty) != current_shopify_qty:
-                        try:
-                            shopify.InventoryLevel.set(
-                                location_id=shopify_location_id, 
-                                inventory_item_id=sp_variant.inventory_item_id,
-                                available=int(total_qty)
-                            )
-                            updates += 1
-                        except Exception as e:
-                            print(f"Failed to update {sku}: {e}")
+                    # Process EVERY SKU attached to this Odoo ID
+                    for sku in batch_skus.get(pid, []):
+                        sp_variant = shopify_variants.get(sku)
+                        if not sp_variant: continue
+                        
+                        # Apply Pack Mathematics
+                        final_qty = total_qty
+                        if is_pack and qty_per_pack > 1.0 and not sku.endswith('-UNIT'):
+                            final_qty = math.floor(total_qty / qty_per_pack)
+                            
+                        final_qty = int(final_qty)
+                        
+                        if sync_zero and final_qty <= 0: continue
+                        
+                        current_shopify_qty = int(sp_variant.inventory_quantity) if sp_variant.inventory_quantity else 0
+
+                        diff = abs(final_qty - current_shopify_qty)
+                        if diff >= alert_threshold:
+                            discrepancy_list.append({
+                                'sku': sku, 'odoo': final_qty, 
+                                'shopify': current_shopify_qty, 'diff': diff
+                            })
+                        
+                        if final_qty != current_shopify_qty:
+                            try:
+                                shopify.InventoryLevel.set(
+                                    location_id=shopify_location_id, 
+                                    inventory_item_id=sp_variant.inventory_item_id,
+                                    available=final_qty
+                                )
+                                updates += 1
+                            except Exception as e:
+                                print(f"Failed to update {sku}: {e}")
 
                 processed += len(batch)
                     
