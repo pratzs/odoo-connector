@@ -461,7 +461,8 @@ def perform_inventory_sync(shop_url):
                     pack_info[p['id']] = p
 
                 # Read Odoo Stock safely
-                qty_map = {pid: 0.0 for pid in batch_ids}
+                qty_map = {pid: 0 for pid in batch_ids}
+                found_in_odoo = set() # NEW: Track which IDs actually exist
                 
                 if target_locations:
                     for loc_id in target_locations:
@@ -469,32 +470,28 @@ def perform_inventory_sync(shop_url):
                         stock_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                             'product.product', 'read', [batch_ids], {'fields': [target_field], 'context': ctx})
                         for record in stock_data:
+                            found_in_odoo.add(record['id']) # Mark as found
                             qty_map[record['id']] += float(record.get(target_field, 0.0))
                 else:
                     stock_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                         'product.product', 'read', [batch_ids], {'fields': [target_field]})
                     for record in stock_data:
+                        found_in_odoo.add(record['id']) # Mark as found
                         qty_map[record['id']] += float(record.get(target_field, 0.0))
                 
                 # Update Shopify
                 for pid, total_qty in qty_map.items():
-                    p_info = pack_info.get(pid, {})
-                    is_pack = p_info.get('sh_is_secondary_unit', False)
-                    qty_per_pack = float(p_info.get('qty_per_pack') or 1.0)
+                    sku = batch_skus[pid]
+                    sp_variant = shopify_variants.get(sku)
+                    
+                    if not sp_variant: continue
 
-                    # Process EVERY SKU attached to this Odoo ID
-                    for sku in batch_skus.get(pid, []):
-                        sp_variant = shopify_variants.get(sku)
-                        if not sp_variant: continue
+                    # NEW: Safety check to prevent the "Silent Zero" bug
+                    if pid not in found_in_odoo:
+                        print(f"⚠️ Warning: Odoo ID {pid} for SKU {sku} not found in Odoo. Skipping sync.")
+                        continue 
                         
-                        # Apply Pack Mathematics
-                        final_qty = total_qty
-                        if is_pack and qty_per_pack > 1.0 and not sku.endswith('-UNIT'):
-                            final_qty = math.floor(total_qty / qty_per_pack)
-                            
-                        final_qty = int(final_qty)
-                        
-                        if sync_zero and final_qty <= 0: continue
+                    if sync_zero and total_qty <= 0: continue
                         
                         current_shopify_qty = int(sp_variant.inventory_quantity) if sp_variant.inventory_quantity else 0
 
