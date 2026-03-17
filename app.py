@@ -437,9 +437,8 @@ def perform_inventory_sync(shop_url):
         
         for i in range(0, len(map_items), BATCH_SIZE):
             batch = map_items[i:i+BATCH_SIZE]
-            batch_ids = list(set([item[1] for item in batch if item[1] > 0])) # Unique, valid Odoo IDs
+            batch_ids = list(set([item[1] for item in batch if item[1] > 0]))
             
-            # FIX 1: Map ONE Odoo ID to MULTIPLE SKUs to prevent variant overwriting
             batch_skus = {}
             for sku, pid in batch:
                 if pid > 0:
@@ -450,7 +449,6 @@ def perform_inventory_sync(shop_url):
             if not batch_ids: continue
 
             try:
-                # FIX 2: Fetch Pack Info alongside stock to calculate correct ratios
                 import math
                 pack_info = {}
                 prod_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
@@ -460,9 +458,8 @@ def perform_inventory_sync(shop_url):
                 for p in prod_data:
                     pack_info[p['id']] = p
 
-                # Read Odoo Stock safely
                 qty_map = {pid: 0 for pid in batch_ids}
-                found_in_odoo = set() # NEW: Track which IDs actually exist
+                found_in_odoo = set()
                 
                 if target_locations:
                     for loc_id in target_locations:
@@ -470,28 +467,36 @@ def perform_inventory_sync(shop_url):
                         stock_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                             'product.product', 'read', [batch_ids], {'fields': [target_field], 'context': ctx})
                         for record in stock_data:
-                            found_in_odoo.add(record['id']) # Mark as found
+                            found_in_odoo.add(record['id'])
                             qty_map[record['id']] += float(record.get(target_field, 0.0))
                 else:
                     stock_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                         'product.product', 'read', [batch_ids], {'fields': [target_field]})
                     for record in stock_data:
-                        found_in_odoo.add(record['id']) # Mark as found
+                        found_in_odoo.add(record['id'])
                         qty_map[record['id']] += float(record.get(target_field, 0.0))
                 
                 # Update Shopify
                 for pid, total_qty in qty_map.items():
-                    sku = batch_skus[pid]
-                    sp_variant = shopify_variants.get(sku)
-                    
-                    if not sp_variant: continue
+                    p_info = pack_info.get(pid, {})
+                    is_pack = p_info.get('sh_is_secondary_unit', False)
+                    qty_per_pack = float(p_info.get('qty_per_pack') or 1.0)
 
-                    # NEW: Safety check to prevent the "Silent Zero" bug
-                    if pid not in found_in_odoo:
-                        print(f"⚠️ Warning: Odoo ID {pid} for SKU {sku} not found in Odoo. Skipping sync.")
-                        continue 
+                    for sku in batch_skus.get(pid, []):
+                        sp_variant = shopify_variants.get(sku)
+                        if not sp_variant: continue
                         
-                    if sync_zero and total_qty <= 0: continue
+                        if pid not in found_in_odoo:
+                            print(f"⚠️ Warning: Odoo ID {pid} for SKU {sku} not found in Odoo. Skipping sync.")
+                            continue 
+                        
+                        final_qty = total_qty
+                        if is_pack and qty_per_pack > 1.0 and not sku.endswith('-UNIT'):
+                            final_qty = math.floor(total_qty / qty_per_pack)
+                            
+                        final_qty = int(final_qty)
+                        
+                        if sync_zero and final_qty <= 0: continue
                         
                         current_shopify_qty = int(sp_variant.inventory_quantity) if sp_variant.inventory_quantity else 0
 
@@ -513,8 +518,6 @@ def perform_inventory_sync(shop_url):
                             except Exception as e:
                                 print(f"Failed to update {sku}: {e}")
 
-                processed += len(batch)
-                    
             except Exception as e:
                 log_event('Inventory', 'Error', f"Batch Error: {e}", shop_url=shop_url)
 
