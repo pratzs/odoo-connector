@@ -262,10 +262,16 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
     # 3. Build the setup URL — goes through the STORE domain, not the connector
     # The store has a /pages/set-password page that reads ?token= from the URL
     clean_shop = shop_url.replace('https://', '').replace('http://', '').rstrip('/')
+    
+    # --- CUSTOM DOMAIN OVERRIDE ---
+    if 'vjtrading.myshopify.com' in clean_shop:
+        clean_shop = 'worthyproducts.nz'
+        store_name = 'Worthy Products'
+    # ------------------------------
+
     setup_url = f"https://{clean_shop}/pages/set-password?token={token}"
 
     action_label = "Set Up Your Password" if not customer.password_hash else "Reset Your Password"
-
     # 4. Get per-shop from-email from AppSettings (falls back to developer email)
     from_email = _get_shop_from_email(shop_url)
 
