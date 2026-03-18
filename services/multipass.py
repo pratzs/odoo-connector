@@ -39,7 +39,8 @@ from cryptography.hazmat.backends import default_backend
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from models import db, CustomerMap, Shop
-from utils import log_event
+from utils import get_config, log_event
+from security_utils import decrypt_val
 
 
 # ─────────────────────────────────────────────
@@ -252,10 +253,10 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
     except Exception as e:
         print(f"Name lookup error: {e}")
 
-    # 3. Generate a secure one-time token
+    # 3. Generate a secure one-time token (INCREASED EXPIRY TO 7 DAYS)
     token = secrets.token_urlsafe(32)
     customer.reset_token = token
-    customer.reset_token_expires = datetime.utcnow() + timedelta(hours=48)
+    customer.reset_token_expires = datetime.utcnow() + timedelta(days=7)
     db.session.commit()
 
     # 3. Build the setup URL — goes through the STORE domain, not the connector
@@ -274,6 +275,7 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
         setup_url=setup_url,
         action_label=action_label,
         shop_domain=clean_shop,
+        shop_url=shop_url, # <--- NEW: Pass shop_url here
         from_email=from_email,
         customer_name=customer_name,
         store_name=store_name
@@ -308,18 +310,37 @@ def _get_shop_from_email(shop_url: str) -> str:
     return "hello@tripsterdevelopers.com"
 
 
-def _send_setup_email(to_email, odoo_id, setup_url, action_label, shop_domain,
+def _send_setup_email(to_email, odoo_id, setup_url, action_label, shop_domain, shop_url,
                       from_email="hello@tripsterdevelopers.com",
                       customer_name="Valued Customer",
                       store_name=""):
+    
+    from utils import get_config
+    from security_utils import decrypt_val
 
-    # --- SMTP config (same logic as before) ---
-    SMTP_SERVER     = "premium74.web-hosting.com"
-    SMTP_PORT       = 465
-    SENDER_EMAIL    = "hello@tripsterdevelopers.com"
-    SENDER_PASSWORD = os.getenv('SMTP_PASSWORD')
-    if not SENDER_PASSWORD:
-        print("MULTIPASS EMAIL ERROR: SMTP_PASSWORD not set")
+    # 1. Fetch Custom Merchant SMTP Settings
+    custom_host = get_config('smtp_host', '', shop_url=shop_url)
+    custom_port = get_config('smtp_port', '465', shop_url=shop_url)
+    custom_user = get_config('smtp_user', '', shop_url=shop_url)
+    custom_pass_enc = get_config('smtp_pass', '', shop_url=shop_url)
+    custom_pass = decrypt_val(custom_pass_enc) if custom_pass_enc else ''
+
+    # 2. Default Fallbacks (Tripster Server)
+    DEFAULT_HOST = "premium74.web-hosting.com"
+    DEFAULT_PORT = 465
+    DEFAULT_USER = "hello@tripsterdevelopers.com"
+    DEFAULT_PASS = os.getenv('SMTP_PASSWORD')
+
+    # 3. Determine which configuration to use
+    use_custom_smtp = bool(custom_host and custom_user and custom_pass)
+
+    smtp_host = custom_host if use_custom_smtp else DEFAULT_HOST
+    smtp_port = int(custom_port) if use_custom_smtp else DEFAULT_PORT
+    smtp_user = custom_user if use_custom_smtp else DEFAULT_USER
+    smtp_pass = custom_pass if use_custom_smtp else DEFAULT_PASS
+
+    if not smtp_pass:
+        print("MULTIPASS EMAIL ERROR: SMTP password not available")
         return False
 
     action_word = "setup" if "Set Up" in action_label else "reset"
@@ -359,24 +380,39 @@ Email      : {to_email}
 
 To {action_label.lower()}: {setup_url}
 
-This link expires in 48 hours.
+This link expires in 7 days.
 """
 
     try:
         msg = EmailMessage()
         msg['Subject']  = subject
-        msg['From']     = f"{shop_domain.replace('.myshopify.com','').title()} <{SENDER_EMAIL}>"
         msg['To']       = to_email
         msg['Reply-To'] = from_email
+
+        # Set from address based on custom vs default
+        if use_custom_smtp:
+            # Send directly from the merchant's authenticated email
+            msg['From'] = f"{shop_domain.replace('.myshopify.com','').title()} <{smtp_user}>"
+        else:
+            # Must send from authenticated default user to prevent SPF/DKIM bounces
+            msg['From'] = f"{shop_domain.replace('.myshopify.com','').title()} <{DEFAULT_USER}>"
 
         # Set plain text first, then add HTML alternative
         msg.set_content(plain_body)
         if html_body:
             msg.add_alternative(html_body, subtype='html')
 
-        with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as smtp:
-            smtp.login(SENDER_EMAIL, SENDER_PASSWORD)
-            smtp.send_message(msg)
+        # Send via SMTP or SMTP_SSL
+        if smtp_port == 465:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port) as smtp:
+                smtp.login(smtp_user, smtp_pass)
+                smtp.send_message(msg)
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port) as smtp:
+                smtp.starttls()
+                smtp.login(smtp_user, smtp_pass)
+                smtp.send_message(msg)
+                
         return True
     except Exception as e:
         print(f"Multipass email send error: {e}")
