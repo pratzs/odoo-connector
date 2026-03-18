@@ -232,10 +232,11 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
     if 'pos.local' in customer.email:
         return False, "No email address is linked to this account. Please contact your account manager."
 
-    # 2. Fetch customer name and store name from Odoo
-    customer_name = "Valued Customer"
-    store_name = "" # Start empty to force the fallback logic
+    # 2. Fetch customer name and store name
+    customer_name = ""
+    store_name = ""
 
+    # --- ATTEMPT 1: ODOO ---
     try:
         odoo = get_odoo_connection(shop_url)
         if odoo:
@@ -243,27 +244,43 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
                 odoo.db, odoo.uid, odoo.password,
                 'res.partner', 'read',
                 [[customer.odoo_partner_id]],
-                {'fields': ['name', 'parent_id', 'is_company']}
+                {'fields': ['name', 'parent_id']}
             )
             if partners:
                 p = partners[0]
                 contact_name = p.get('name', '')
                 
-                # Logic: If they have a parent company, use that as Store Name
+                # If they have a parent company, use it for Store Name
                 if p.get('parent_id'):
-                    company_name = p['parent_id'][1]
-                    store_name = company_name
-                    customer_name = contact_name if contact_name else company_name
+                    store_name = p['parent_id'][1]
+                    customer_name = contact_name if contact_name else store_name
                 else:
-                    # Logic: No parent company, fallback Store Name to the Contact Name
                     store_name = contact_name
                     customer_name = contact_name
     except Exception as e:
-        print(f"Name lookup error: {e}")
+        print(f"Odoo name lookup error: {e}")
 
-    # Final safety fallback if Odoo is unreachable
-    if not store_name:
-        store_name = customer_name if customer_name != "Valued Customer" else "Your Store"
+    # --- ATTEMPT 2: SHOPIFY FALLBACK ---
+    if not customer_name or not store_name:
+        try:
+            if setup_shopify_session(shop_url):
+                sp_customers = shopify.Customer.search(query=f"email:{customer.email}")
+                if sp_customers:
+                    sp_cust = sp_customers[0]
+                    # Combine first and last name safely
+                    full_name = f"{sp_cust.first_name or ''} {sp_cust.last_name or ''}".strip()
+                    
+                    if full_name:
+                        customer_name = customer_name or full_name
+                        store_name = store_name or full_name
+        except Exception as e:
+            print(f"Shopify name lookup error: {e}")
+
+    # --- FINAL SAFETY CATCH ---
+    if not customer_name: 
+        customer_name = "Valued Customer"
+    if not store_name: 
+        store_name = customer_name
 
     # 3. Generate a secure one-time token
     token = secrets.token_urlsafe(32)
