@@ -30,6 +30,7 @@ import hashlib
 import base64
 import secrets
 import smtplib
+import shopify
 
 from datetime import datetime, timedelta
 from email.message import EmailMessage
@@ -39,7 +40,7 @@ from cryptography.hazmat.backends import default_backend
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from models import db, CustomerMap, Shop
-from utils import get_config, log_event
+from utils import get_config, log_event, setup_shopify_session
 from security_utils import decrypt_val
 
 
