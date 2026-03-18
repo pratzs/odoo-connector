@@ -234,7 +234,8 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
 
     # 2. Fetch customer name and store name from Odoo
     customer_name = "Valued Customer"
-    store_name = shop_url.replace('.myshopify.com', '').replace('-', ' ').replace('_', ' ').title()
+    store_name = "" # Start empty to force the fallback logic
+
     try:
         odoo = get_odoo_connection(shop_url)
         if odoo:
@@ -242,37 +243,47 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
                 odoo.db, odoo.uid, odoo.password,
                 'res.partner', 'read',
                 [[customer.odoo_partner_id]],
-                {'fields': ['name', 'parent_id']}
+                {'fields': ['name', 'parent_id', 'is_company']}
             )
             if partners:
                 p = partners[0]
-                customer_name = p.get('name') or customer_name
-                # If they have a parent company, use that as store name
+                contact_name = p.get('name', '')
+                
+                # Logic: If they have a parent company, use that as Store Name
                 if p.get('parent_id'):
-                    store_name = p['parent_id'][1]
+                    company_name = p['parent_id'][1]
+                    store_name = company_name
+                    customer_name = contact_name if contact_name else company_name
+                else:
+                    # Logic: No parent company, fallback Store Name to the Contact Name
+                    store_name = contact_name
+                    customer_name = contact_name
     except Exception as e:
         print(f"Name lookup error: {e}")
 
-    # 3. Generate a secure one-time token (INCREASED EXPIRY TO 7 DAYS)
+    # Final safety fallback if Odoo is unreachable
+    if not store_name:
+        store_name = customer_name if customer_name != "Valued Customer" else "Your Store"
+
+    # 3. Generate a secure one-time token
     token = secrets.token_urlsafe(32)
     customer.reset_token = token
-    customer.reset_token_expires = datetime.utcnow() + timedelta(days=7)
+    # (You can change hours=48 to days=7 here if you want longer expiry)
+    customer.reset_token_expires = datetime.utcnow() + timedelta(hours=48)
     db.session.commit()
 
-    # 3. Build the setup URL — goes through the STORE domain, not the connector
-    # The store has a /pages/set-password page that reads ?token= from the URL
+    # 4. Build the setup URL & Apply Domain Override
     clean_shop = shop_url.replace('https://', '').replace('http://', '').rstrip('/')
     
-    # --- CUSTOM DOMAIN OVERRIDE ---
+    # --- DOMAIN OVERRIDE FOR WORTHY PRODUCTS ---
     if 'vjtrading.myshopify.com' in clean_shop:
         clean_shop = 'worthyproducts.nz'
-        store_name = 'Worthy Products'
-    # ------------------------------
+    # -----------------------------------------
 
     setup_url = f"https://{clean_shop}/pages/set-password?token={token}"
-
     action_label = "Set Up Your Password" if not customer.password_hash else "Reset Your Password"
-    # 4. Get per-shop from-email from AppSettings (falls back to developer email)
+  
+    # 5. Get per-shop from-email from AppSettings (falls back to developer email)
     from_email = _get_shop_from_email(shop_url)
 
     success = _send_setup_email(
@@ -281,7 +292,7 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
         setup_url=setup_url,
         action_label=action_label,
         shop_domain=clean_shop,
-        shop_url=shop_url, # <--- NEW: Pass shop_url here
+        shop_url=shop_url,
         from_email=from_email,
         customer_name=customer_name,
         store_name=store_name
