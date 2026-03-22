@@ -869,10 +869,12 @@ def fix_variant_mess_task(shop_url, company_id):
 
 
 # =====================================================
-# 7. FORCE HEAL RECENT PRODUCTS (60-DAY SCAN)
+# 7. FORCE HEAL MISSING/UNMAPPED PRODUCTS (ALL TIME)
 # =====================================================
 def sync_missing_new_products(shop_url):
     from app import app
+    from models import ProductMap # Ensure we have access to the mapping table
+    
     with app.app_context():
         shop = Shop.query.filter_by(shop_url=shop_url).first()
         if not shop: return
@@ -883,15 +885,11 @@ def sync_missing_new_products(shop_url):
         company_id = shop.odoo_company_id
         if not company_id: return
 
-        # Look back 60 days to cast a wider net
-        cutoff = datetime.utcnow() - timedelta(days=60)
-        cutoff_str = cutoff.strftime('%Y-%m-%d %H:%M:%S')
-
+        # 1. NO DATE LIMIT: Scan ALL active products
         domain = [
             ['sale_ok', '=', True], 
             ['type', 'in', ['product', 'consu']], 
             ['active', '=', True], 
-            ['write_date', '>=', cutoff_str],
             '|', 
             ['company_id', '=', int(company_id)],
             ['company_id', '=', False]
@@ -908,21 +906,33 @@ def sync_missing_new_products(shop_url):
             return
 
         if not odoo_products:
-            log_event('Missing Sync', 'Info', "No Odoo products found in the last 60 days.", shop_url=shop_url)
+            log_event('Missing Sync', 'Info', "No Odoo products found.", shop_url=shop_url)
             return
 
-        # BYPASS THE DATABASE CHECK! 
-        # We send all recent products directly to the worker. 
-        # The worker will skip what truly exists, and recreate the missing "ghosts".
-        missing_product_ids = [p['id'] for p in odoo_products]
+        # 2. CHECK DATABASE FOR BROKEN/MISSING MAPPINGS
+        existing_maps = ProductMap.query.filter_by(shop_url=shop_url).all()
+        mapped_odoo_ids = set()
+        
+        for pm in existing_maps:
+            # If the shopify_variant_id exists and is not '0' or empty, it is fully mapped
+            if pm.shopify_variant_id and pm.shopify_variant_id.strip() not in ['0', '']:
+                mapped_odoo_ids.add(pm.odoo_product_id)
 
+        # 3. FILTER: Only keep Odoo IDs that are NOT perfectly mapped
+        missing_product_ids = [p['id'] for p in odoo_products if p['id'] not in mapped_odoo_ids]
+
+        if not missing_product_ids:
+            log_event('Missing Sync', 'Success', "All active Odoo products are already correctly mapped in the database. Nothing to fix.", shop_url=shop_url)
+            return
+
+        # 4. QUEUE THE FIXES
         BATCH_SIZE = 50
         chunks = [missing_product_ids[i:i + BATCH_SIZE] for i in range(0, len(missing_product_ids), BATCH_SIZE)]
 
         for index, batch_ids in enumerate(chunks):
-            q_default.enqueue(sync_product_batch_task, shop_url, batch_ids, f"Force Catch-Up {index+1}/{len(chunks)}", job_timeout=3600)
+            q_default.enqueue(sync_product_batch_task, shop_url, batch_ids, f"Force Map Catch-Up {index+1}/{len(chunks)}", job_timeout=3600)
 
-        log_event('Missing Sync', 'Success', f"Force Queued {len(missing_product_ids)} recent Odoo products for verification.", shop_url=shop_url)
+        log_event('Missing Sync', 'Success', f"Force Queued {len(missing_product_ids)} unmapped Odoo products to fetch Shopify IDs and repair database.", shop_url=shop_url)
 
 
 def refresh_metafields_for_shop(shop_url):
