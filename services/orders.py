@@ -285,10 +285,10 @@ def process_order_data(data, odoo_client, shop_url):
             if not lines:
                 # Release the DB lock so it can be retried later
                 try:
-                    lock = ProcessedOrder.query.get((shopify_id, shop_url))
-                    if lock:
-                        db.session.delete(lock)
-                        db.session.commit()
+                lock = ProcessedOrder.query.get((shopify_id, shop_url))
+                if lock:
+                    db.session.delete(lock)
+                    db.session.commit()
             except: pass
             return False, "No valid lines — lock released for retry"
 
