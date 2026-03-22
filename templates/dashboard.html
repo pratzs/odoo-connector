@@ -133,7 +133,7 @@
                 <div class="p-banner-title" style="font-weight: 600;">Finish your setup</div>
                 <div class="p-banner-message" style="font-size: 13px;">
                     Welcome! To start syncing, you need to connect your Odoo instance. 
-                    Go to the <strong><a href="javascript:void(0)" onclick="window.location.pathname='/settings'; handleNavigation();" style="color: #005bd3; text-decoration: underline;">Settings</a></strong> tab to enter your Odoo URL and credentials.
+                    Go to the <strong><a href="javascript:void(0)" onclick="switchTab('tab-settings')" style="color: #005bd3; text-decoration: underline;">Settings</a></strong> tab to enter your Odoo URL and credentials.
                 </div>
             </div>
         </div>
@@ -912,7 +912,14 @@
         }
         
         function switchTab(tabId) {
-    window.location.hash = tabId;
+    const pathMap = {
+        'tab-overview':     '/',
+        'tab-settings':     '/settings',
+        'tab-maintenance':  '/maintenance'
+    };
+    const path = pathMap[tabId] || '/';
+    history.pushState({}, '', path + window.location.search);
+    handleNavigation();
 }
 
 
