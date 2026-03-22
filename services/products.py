@@ -506,24 +506,40 @@ def safe_find_variant_by_sku(sku):
     return None
 
 def find_shopify_product_by_sku(sku, shop_url):
-    """Strictly finds a Shopify product by SKU. No guessing."""
+    """
+    Strictly finds a Shopify product ID by SKU using GraphQL.
+    Returns the integer product ID, or None if not found.
+
+    Uses exact SKU match — no fuzzy title search.
+    The same GraphQL pattern is used in the race-condition safety
+    check inside process_product_data, so we know it works.
+    """
     clean_sku = str(sku).strip()
     if not clean_sku:
         return None
-        
+
+    # Escape any single quotes in the SKU to avoid breaking the query
+    escaped_sku = clean_sku.replace("'", "\\'")
+
     try:
-        # 1. Search Shopify for products with this SKU/Handle
-        products = shopify.Product.find(title=clean_sku) # Shopify title search is fuzzy
-        
-        for p in products:
-            # 2. STRICT VERIFICATION: Loop through variants to find the REAL SKU match
-            for v in p.variants:
-                if v.sku and v.sku.strip() == clean_sku:
-                    return p # Found the exact match
-                    
-        return None # If no exact variant SKU matches, it's a new product
+        client = shopify.GraphQL()
+        result = json.loads(client.execute(
+            '{ productVariants(first: 5, query: "sku:\'%s\'") { edges { node { sku product { legacyResourceId } } } } }'
+            % escaped_sku
+        ))
+
+        edges = result.get('data', {}).get('productVariants', {}).get('edges', [])
+
+        for edge in edges:
+            node = edge.get('node', {})
+            # Strict exact match — GraphQL query can return partial matches
+            if node.get('sku', '').strip() == clean_sku:
+                return int(node['product']['legacyResourceId'])
+
+        return None
+
     except Exception as e:
-        print(f"Error in SKU search: {e}")
+        print(f"SKU search error for '{clean_sku}': {e}")
         return None
 
 def archive_shopify_duplicates(shop_url):
