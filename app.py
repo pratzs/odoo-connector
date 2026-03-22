@@ -1328,13 +1328,13 @@ def run_initial_category_import():
 @app.route('/sync/products/force_catchup', methods=['POST'])
 @require_shopify_session
 def trigger_force_catchup():
-    """60-day catch-up scan — finds and re-syncs any Odoo products missing from Shopify."""
+    """All-Time catch-up scan — finds and re-syncs unmapped products."""
     shop_url = request.args.get('shop')
     if not shop_url:
         return jsonify({"error": "Missing shop parameter"}), 400
     from services.products import sync_missing_new_products
     job = q_default.enqueue(sync_missing_new_products, shop_url, job_timeout=3600)
-    return jsonify({"message": f"Force Catch-Up queued — scanning last 60 days of Odoo products (Job: {job.get_id()})"})
+    return jsonify({"message": f"Map Repair queued — scanning all products for missing IDs (Job: {job.get_id()})"})
 
 def background_product_sync(shop_url, product_data):
     """
