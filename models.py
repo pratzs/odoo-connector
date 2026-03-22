@@ -85,6 +85,7 @@ class AppSetting(db.Model):
 
 class ProcessedOrder(db.Model):
     __tablename__ = 'processed_orders'
-    # Shopify IDs are globally unique, so this is safe as-is
+    # Composite primary key — scoped per tenant for multi-tenant safety
     shopify_id = db.Column(db.String(50), primary_key=True)
+    shop_url   = db.Column(db.String(255), primary_key=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
