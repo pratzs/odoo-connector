@@ -761,18 +761,24 @@ def home():
 
     # --- 1. BILLING CHECK ---
     is_free_store = shop_url in FREE_STORES
-    
+
     # We only run the billing logic if they are NOT a white-listed free store
     if not is_free_store and not shop.charge_id:
         try:
+            # FIX: Must activate session before calling any Shopify API.
+            # Without this, Shop.current() throws a 401 which was causing
+            # an infinite redirect loop (home -> create_billing -> home -> ...)
+            if not setup_shopify_session(shop_url):
+                # Token is invalid/expired — send them back through OAuth
+                return redirect(url_for('install', shop=shop_url))
+
             shopify_shop = shopify.Shop.current()
             raw_plan = shopify_shop.plan_name.lower()
-            
+
             # Development stores (affiliate/staff) are free
             is_dev = any(x in raw_plan for x in ['affiliate', 'staff', 'partner_test'])
-            
+
             if not is_dev:
-                # This triggers the tiered pricing logic we wrote in /billing/create
                 return redirect(url_for('create_billing', shop=shop_url))
         except Exception as e:
             print(f"Billing bypass error: {e}")
