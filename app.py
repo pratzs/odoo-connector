@@ -925,7 +925,7 @@ def api_refresh_locations():
         locations = odoo.get_locations(company_id=company_id)
 
         # 3. Cache them in the Database
-        set_config('available_locations', locations)
+        set_config('available_locations', locations, shop_url=shop_url)
 
         return jsonify({
             "message": f"Success! Found {len(locations)} locations in Odoo.",
