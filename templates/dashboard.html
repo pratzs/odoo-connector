@@ -865,6 +865,16 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+        function escapeHtml(str) {
+    if (!str) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+        }
+        
         function showToast(message) {
         const toastEl = document.getElementById('liveToast');
         const msgEl = document.getElementById('toastMessage');
@@ -1069,7 +1079,7 @@ function fetchCompanies() {
         })
         .then(data => {
             if(data.error) { 
-                sel.innerHTML = `<option value="">Error: ${data.error}</option>`;
+                sel.innerHTML = `<option value="">Error: ${escapeHtml(data.error)}</option>`;
                 if(banner) banner.style.display = 'flex'; 
                 return; 
             }
@@ -1109,7 +1119,7 @@ function fetchLocations(companyId) {
     fetch(`/api/odoo/locations?company_id=${companyId}&shop=${CURRENT_SHOP_URL}`)
         .then(r => r.json())
         .then(data => {
-            if(data.error) { list.innerHTML = `<span class="text-danger">${data.error}</span>`; return; }
+            if(data.error) { list.innerHTML = `<span class="text-danger">${escapeHtml(data.error)}</span>`; return; }
             
             // Use the correct key from your SAVED_SETTINGS
             const savedLocs = SAVED_SETTINGS.inventory_locations || []; 
@@ -1314,7 +1324,7 @@ function openUnmappedModal() {
             });
         })
         .catch(err => {
-            if(loadingEl) loadingEl.innerHTML = `<div class="text-danger">Error loading report: ${err}</div>`;
+            if(loadingEl) loadingEl.innerHTML = `<div class="text-danger">Error loading report: ${escapeHtml(String(err))}</div>`;
         });
 }
 
@@ -1415,10 +1425,9 @@ function openJobModal(status) {
                 return;
             }
 
-            // --- SORTING: NEWEST FIRST ---
-            // Assuming jobs come in order, reversing them shows newest first.
-            // If they have timestamps, we could sort by that, but array reverse is usually sufficient for RQ.
-            const sortedJobs = data.jobs.reverse();
+            // Backend already returns newest-first for failed/active jobs.
+            // Pending jobs come in queue order (oldest first = next to run).
+            const sortedJobs = data.jobs;
 
             sortedJobs.forEach(job => {
                 let details = `<span class="text-muted small">${job.args}</span>`;
@@ -1427,8 +1436,8 @@ function openJobModal(status) {
                 // --- BUTTON LOGIC ---
                 if (status === 'failed') {
                     // Show Error + Retry Button
-                    details = `<span class="text-danger small fw-bold">${job.error}</span><br>${details}`;
-                    actionBtn = `<button onclick="doJobAction('retry', '${job.id}', this)" class="btn btn-sm btn-outline-primary py-0" style="font-size: 11px;">Retry</button>`;
+                    details = `<span class="text-danger small fw-bold">${escapeHtml(job.error)}</span><br>${escapeHtml(details)}`;
+                    actionBtn = `<button onclick="doJobAction('retry', '${escapeHtml(job.id)}', this)" class="btn btn-sm btn-outline-primary py-0" style="font-size: 11px;">Retry</button>`;
                 } else if (status === 'pending') {
                     // Show Cancel Button
                     actionBtn = `<button onclick="doJobAction('cancel', '${job.id}', this)" class="btn btn-sm btn-outline-danger py-0" style="font-size: 11px;">Cancel</button>`;
