@@ -37,19 +37,19 @@ def process_order_data(data, odoo_client, shop_url):
         except Exception as e:
             print(f"Date Check Warning for {shopify_name}: {e}")
 
-        # --- GUARD 1: SQL DATABASE CHECK ---
+       # --- GUARD 1: SQL DATABASE CHECK ---
         try:
-            exists = ProcessedOrder.query.get(shopify_id)
+            exists = ProcessedOrder.query.get((shopify_id, shop_url))
             if exists:
                 return True, "Skipped: Found in Local Lock (Already Processed)"
-        except: pass 
+        except: pass
 
         # --- GUARD 2: Cancelled Checks ---
         if data.get('cancelled_at'): return False, "Skipped: Order is Cancelled."
 
         # --- LOCK IT PERMANENTLY IN DB ---
         try:
-            new_lock = ProcessedOrder(shopify_id=shopify_id)
+            new_lock = ProcessedOrder(shopify_id=shopify_id, shop_url=shop_url)
             db.session.add(new_lock)
             db.session.commit()
         except Exception as e:
@@ -285,12 +285,12 @@ def process_order_data(data, odoo_client, shop_url):
             if not lines:
                 # Release the DB lock so it can be retried later
                 try:
-                    lock = ProcessedOrder.query.get(shopify_id)
+                    lock = ProcessedOrder.query.get((shopify_id, shop_url))
                     if lock:
                         db.session.delete(lock)
                         db.session.commit()
-                except: pass
-                return False, "No valid lines — lock released for retry"
+            except: pass
+            return False, "No valid lines — lock released for retry"
 
             gateway = data.get('gateway') or (data.get('payment_gateway_names')[0] if data.get('payment_gateway_names') else 'Shopify')
             customer_note = data.get('note') or ""
@@ -313,8 +313,8 @@ def process_order_data(data, odoo_client, shop_url):
         except Exception as e:
             log_event('Order', 'Error', f"Error {shopify_name}: {e}", shop_url=shop_url)
             try:
-                l = ProcessedOrder.query.get(shopify_id)
-                if l: 
+                l = ProcessedOrder.query.get((shopify_id, shop_url))
+                if l:
                     db.session.delete(l)
                     db.session.commit()
             except: pass
