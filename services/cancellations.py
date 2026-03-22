@@ -24,7 +24,12 @@ def sync_odoo_cancellations(shop_url):
         ]
 
         try:
-            cancelled_orders = odoo.execute('sale.order', 'search_read', domain, ['client_order_ref', 'name'])
+            cancelled_orders = odoo.models.execute_kw(
+                odoo.db, odoo.uid, odoo.password,
+                'sale.order', 'search_read',
+                [domain],
+                {'fields': ['client_order_ref', 'name']}
+            )
         except Exception as e:
             log_event('Cancel Sync', 'Error', f"Odoo Search Failed: {e}", shop_url=shop_url)
             return
