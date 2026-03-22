@@ -170,7 +170,7 @@ def set_customer_password(token: str, new_password: str) -> tuple[bool, str]:
     if not customer:
         return False, "This link is invalid or has already been used."
 
-    # 2. Check expiry (tokens valid for 48 hours)
+    # 2. Check expiry (tokens valid for 7 days)
     if customer.reset_token_expires and datetime.utcnow() > customer.reset_token_expires:
         return False, "This link has expired. Please request a new one."
 
@@ -286,8 +286,7 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
     # 3. Generate a secure one-time token
     token = secrets.token_urlsafe(32)
     customer.reset_token = token
-    # (You can change hours=48 to days=7 here if you want longer expiry)
-    customer.reset_token_expires = datetime.utcnow() + timedelta(hours=48)
+    customer.reset_token_expires = datetime.utcnow() + timedelta(days=7)
     db.session.commit()
 
     # 4. Build the setup URL & Apply Domain Override
