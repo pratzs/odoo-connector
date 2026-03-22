@@ -912,14 +912,19 @@
         }
         
         function switchTab(tabId) {
-    const pathMap = {
-        'tab-overview':     '/',
-        'tab-settings':     '/settings',
-        'tab-maintenance':  '/maintenance'
-    };
-    const path = pathMap[tabId] || '/';
-    history.pushState({}, '', path + window.location.search);
-    handleNavigation();
+    // Don't use history.pushState — App Bridge intercepts URL changes
+    // in the embedded context and causes unexpected iframe reloads.
+    // The <ui-nav-menu> links handle URL-based navigation via page reload.
+    // switchTab() is only for in-page links (e.g. the setup banner).
+    document.querySelectorAll('.tab-content-area').forEach(el => {
+        el.classList.remove('active');
+        el.style.display = 'none';
+    });
+    const targetEl = document.getElementById(tabId);
+    if (targetEl) {
+        targetEl.classList.add('active');
+        targetEl.style.display = 'block';
+    }
 }
 
 
