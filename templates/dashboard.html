@@ -102,10 +102,10 @@
     </div>
 </div>
     <ui-nav-menu>
-        <a href="/" rel="home">Overview</a>
-        <a href="/settings">Settings</a>
-        <a href="/maintenance">Tools</a>
-    </ui-nav-menu>
+    <a href="/?shop={{ shop_url }}" rel="home">Overview</a>
+    <a href="/settings?shop={{ shop_url }}">Settings</a>
+    <a href="/maintenance?shop={{ shop_url }}">Tools</a>
+</ui-nav-menu>
 
   <ui-title-bar title="Dashboard">
         <button variant="primary" onclick="saveSettings()">Save Configuration</button>
