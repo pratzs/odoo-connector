@@ -16,16 +16,16 @@ def start_worker(queue_name):
     # This prevents "ValueError: There exists an active worker..."
     unique_id = str(uuid.uuid4())[:8]
     unique_name = f"Worker-{queue_name}-{unique_id}"
-    
+
     print(f"👷 Starting {unique_name} for '{queue_name}' queue...")
-    
-    with Connection(conn):
-        # Listen strictly to the assigned queue
-        q = Queue(queue_name)
-        w = Worker([q], name=unique_name)
-        
-        with app.app_context():
-            w.work()
+
+    # FIX: Pass connection directly to Queue and Worker instead of using
+    # the deprecated Connection context manager (removed in RQ 2.x).
+    q = Queue(queue_name, connection=conn)
+    w = Worker([q], connection=conn, name=unique_name)
+
+    with app.app_context():
+        w.work()
 
 if __name__ == '__main__':
     print("🚀 Launching Parallel Workers...")
