@@ -904,21 +904,54 @@
             }
         }
         
-        function switchTab(tabId) {
-    // Don't use history.pushState — App Bridge intercepts URL changes
-    // in the embedded context and causes unexpected iframe reloads.
-    // The <ui-nav-menu> links handle URL-based navigation via page reload.
-    // switchTab() is only for in-page links (e.g. the setup banner).
+    // --- FAIL-SAFE TAB ROUTER ---
+function switchTab(tabId) {
     document.querySelectorAll('.tab-content-area').forEach(el => {
         el.classList.remove('active');
         el.style.display = 'none';
     });
+    
     const targetEl = document.getElementById(tabId);
     if (targetEl) {
-        targetEl.classList.add('active');
         targetEl.style.display = 'block';
+        // Slight delay ensures the CSS animation triggers correctly after display:block
+        setTimeout(() => targetEl.classList.add('active'), 10);
     }
 }
+
+function handleAppBridgeNavigation() {
+    const path = window.location.pathname;
+    let targetTab = 'tab-overview';
+    
+    if (path.includes('settings')) targetTab = 'tab-settings';
+    else if (path.includes('maintenance')) targetTab = 'tab-maintenance';
+    
+    switchTab(targetTab);
+}
+
+// Catch silent URL updates from App Bridge (Turbo/SPA behavior)
+const _pushState = history.pushState;
+history.pushState = function() {
+    _pushState.apply(this, arguments);
+    handleAppBridgeNavigation();
+};
+
+const _replaceState = history.replaceState;
+history.replaceState = function() {
+    _replaceState.apply(this, arguments);
+    handleAppBridgeNavigation();
+};
+
+window.addEventListener('popstate', handleAppBridgeNavigation);
+
+// Turn dot green only if sync has run recently (within 24h)
+function updateStatusDot(dotId, timeText) {
+    const dot = document.getElementById(dotId);
+    if (!dot) return;
+    dot.style.background = (timeText && timeText !== 'Never') ? '#198754' : '#adb5bd';
+}
+updateStatusDot('dot-last-ret', document.getElementById('status-last-ret')?.innerText);
+// -----------------------------
 
 
 // Turn dot green only if sync has run recently (within 24h)
@@ -1025,9 +1058,9 @@ document.addEventListener("DOMContentLoaded", function() {
         }
 
     // --- C. Final Startup Logic ---
-    // --- C. Final Startup Logic ---
     toggleTagFields(); 
     if(CURRENT_SHOP_URL) fetchCompanies();
+    handleAppBridgeNavigation(); 
 });
 
 function toggleTagFields() {
