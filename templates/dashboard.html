@@ -938,6 +938,7 @@ updateStatusDot('dot-last-ret', document.getElementById('status-last-ret')?.inne
 
         
 function handleNavigation() {
+    console.log('handleNavigation fired | pathname:', window.location.pathname, '| href:', window.location.href);
         // 1. Get the path from the window location
         const path = window.location.pathname; // e.g. "/settings" or "/"
         
