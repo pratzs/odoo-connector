@@ -159,8 +159,14 @@
                     {{ config.last_inventory_sync_success if config.last_inventory_sync_success else 'Never' }}
                 </small>
             </div>
+            <div class="bg-white border rounded px-3 py-2 shadow-sm d-flex align-items-center" style="border-color: var(--p-border) !important;">
+                <div class="rounded-circle me-2" id="dot-last-ret" style="width: 8px; height: 8px; background: #adb5bd;"></div>
+                <small class="text-muted me-1">Last Return Sync:</small>
+                <small class="fw-bold" id="status-last-ret" style="color: var(--p-on-surface);">
+                    {{ config.last_return_sync_success if config.last_return_sync_success else 'Never' }}
+                </small>
+            </div>
         </div>
-    </div>
 
     <div class="row">
         <div class="col-md-4">
@@ -894,20 +900,6 @@
                 return dateString; 
             }
         }
-
-        // --- UPDATE YOUR DOMContentLoaded TO USE IT ---
-        document.addEventListener("DOMContentLoaded", function() {
-           
-
-            // Format the status badges
-            const invEl = document.getElementById('status-last-inv');
-            const ordEl = document.getElementById('status-last-order');
-            if(invEl) invEl.innerText = formatTimeAgo(invEl.innerText);
-            if(ordEl) ordEl.innerText = formatTimeAgo(ordEl.innerText);
-
-            // ... the rest of your existing logic ...
-            if(CURRENT_SHOP_URL) fetchCompanies();
-        });
         
         function switchTab(tabId) {
     window.location.hash = tabId;
