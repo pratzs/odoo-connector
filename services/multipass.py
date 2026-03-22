@@ -452,3 +452,80 @@ This link expires in 7 days.
     except Exception as e:
         print(f"Multipass email send error: {e}")
         return False
+
+# ─────────────────────────────────────────────
+# 5. BULK SETUP EMAIL SENDER (Admin Tool)
+# ─────────────────────────────────────────────
+
+def send_setup_emails_to_all(shop_url: str):
+    """
+    Background job: sends password setup emails to every CustomerMap
+    entry for this shop that has no password set yet.
+
+    Skips:
+      - Customers who already have a password_hash (already set up)
+      - Placeholder emails (pos.local addresses)
+      - Invalid emails (no @ symbol)
+
+    Called by: /multipass/admin/send-setup-emails route in app.py
+    """
+    from app import app
+
+    with app.app_context():
+        log_event('Multipass', 'Info',
+            'Bulk setup email job started.',
+            shop_url=shop_url)
+
+        # 1. Find all customers for this shop without a password
+        pending = CustomerMap.query.filter_by(
+            shop_url=shop_url,
+            password_hash=None
+        ).all()
+
+        if not pending:
+            log_event('Multipass', 'Info',
+                'Bulk email: no customers without a password found. Nothing to do.',
+                shop_url=shop_url)
+            return
+
+        total      = len(pending)
+        sent_count = 0
+        skip_count = 0
+        fail_count = 0
+
+        log_event('Multipass', 'Info',
+            f'Bulk email: found {total} customers without a password. Sending...',
+            shop_url=shop_url)
+
+        for customer in pending:
+            # 2. Skip invalid / placeholder emails
+            if not customer.email or '@' not in customer.email:
+                skip_count += 1
+                continue
+            if 'pos.local' in customer.email:
+                skip_count += 1
+                continue
+
+            # 3. Send via the existing single-customer helper
+            try:
+                ok, msg = request_password_setup(
+                    str(customer.odoo_partner_id),
+                    shop_url
+                )
+                if ok:
+                    sent_count += 1
+                else:
+                    fail_count += 1
+                    log_event('Multipass', 'Warning',
+                        f'Bulk email: failed for Odoo ID {customer.odoo_partner_id} — {msg}',
+                        shop_url=shop_url)
+            except Exception as e:
+                fail_count += 1
+                log_event('Multipass', 'Error',
+                    f'Bulk email: exception for Odoo ID {customer.odoo_partner_id} — {e}',
+                    shop_url=shop_url)
+
+        # 4. Final summary log
+        log_event('Multipass', 'Success',
+            f'Bulk email complete. Sent: {sent_count}, Skipped: {skip_count}, Failed: {fail_count} (of {total} total).',
+            shop_url=shop_url)
