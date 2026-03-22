@@ -284,14 +284,14 @@ def process_order_data(data, odoo_client, shop_url):
 
             if not lines:
                 # Release the DB lock so it can be retried later
-            try:
-                lock = ProcessedOrder.query.get((shopify_id, shop_url))
-                if lock:
-                    db.session.delete(lock)
-                    db.session.commit()
-            except:
-                pass
-            return False, "No valid lines — lock released for retry"
+                try:
+                    lock = ProcessedOrder.query.get((shopify_id, shop_url))
+                    if lock:
+                        db.session.delete(lock)
+                        db.session.commit()
+                except:
+                    pass
+                return False, "No valid lines — lock released for retry"
 
             gateway = data.get('gateway') or (data.get('payment_gateway_names')[0] if data.get('payment_gateway_names') else 'Shopify')
             customer_note = data.get('note') or ""
