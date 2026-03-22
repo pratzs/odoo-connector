@@ -931,15 +931,38 @@ updateStatusDot('dot-last-ret', document.getElementById('status-last-ret')?.inne
 
         
 function handleNavigation() {
-    // Tab visibility is now set server-side by Flask/Jinja2.
-    // This function is kept only for the switchTab() in-page call
-    // (e.g. the setup banner Settings link).
+    const path = window.location.pathname;
+    
+    // 1. Hide all tabs
+    document.querySelectorAll('.tab-content-area').forEach(el => {
+        el.classList.remove('active');
+        el.style.display = 'none';
+    });
+
+    // 2. Determine active tab based on the URL path
+    let activeTab = 'tab-overview';
+    if (path.includes('settings')) activeTab = 'tab-settings';
+    else if (path.includes('maintenance')) activeTab = 'tab-maintenance';
+
+    // 3. Show the target tab instantly
+    const targetEl = document.getElementById(activeTab);
+    if (targetEl) {
+        targetEl.classList.add('active');
+        targetEl.style.display = 'block';
+    }
 }
 
-    // Listen for history changes (Back button, etc)
-    window.addEventListener('popstate', handleNavigation);
-    // Listen for initial load
-    window.addEventListener('load', handleNavigation);
+// Intercept Shopify App Bridge's internal routing
+const originalPushState = history.pushState;
+history.pushState = function() {
+    originalPushState.apply(this, arguments);
+    handleNavigation();
+};
+
+// Listen for history changes (Back button, etc)
+window.addEventListener('popstate', handleNavigation);
+// Listen for initial load
+window.addEventListener('load', handleNavigation);
 
 // --- 1. Global Config & JSON Parsing ---
 const rawConfig = {{ config | tojson | safe if config else '{}' }};
