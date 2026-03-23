@@ -747,9 +747,10 @@ def app_uninstalled():
         print(f"Error handling uninstall for {shop_url}: {e}")
         return "Error", 500
 
-@app.route('/', methods=['GET'])
-@app.route('/settings', methods=['GET'])
-@app.route('/maintenance', methods=['GET'])
+@app.route('/')
+@app.route('/settings')
+@app.route('/maintenance')
+@require_shopify_session
 def home():
     shop_url = request.args.get('shop')
     if not shop_url: 
@@ -864,11 +865,11 @@ def home():
             config[s.key] = s.value
 
     clean_shop = shop_url.replace("https://", "").replace("http://", "").split('/')[0]
-    
-    # --- DETERMINE ACTIVE TAB BASED ON ROUTE ---
-    if 'settings' in request.path:
+
+    # --- DETERMINE ACTIVE TAB ---
+    if request.path == '/settings':
         current_tab = 'tab-settings'
-    elif 'maintenance' in request.path:
+    elif request.path == '/maintenance':
         current_tab = 'tab-maintenance'
     else:
         current_tab = 'tab-overview'
@@ -878,7 +879,7 @@ def home():
                            shop_origin=clean_shop, 
                            api_key=SHOPIFY_API_KEY, 
                            config=config,
-                           current_tab=current_tab)
+                           current_tab=current_tab) # Pass it to Jinja
 
     
 @app.route('/live_logs')
