@@ -242,13 +242,14 @@
             </button>
             <div class="text-muted small mt-2 fw-bold text-uppercase" style="font-size: 11px; letter-spacing: 0.5px;">Sync Triggers</div>
             <button onclick="triggerAction('/sync/inventory')" class="btn btn-secondary text-start">Force Inventory Sync</button>
-            <button onclick="triggerAction('/sync/products/master', 'POST')" class="btn btn-secondary text-start">Force Product Sync</button>
+            <button onclick="triggerAction('/sync/products/master', 'POST')" class="btn btn-secondary text-start">Force Product Sync(Last 2 Days Updates)</button>
+            <button onclick="if(confirm('⚠️ This will overwrite all Shopify product data with fresh Odoo data for your entire catalog. This may take 60+ minutes. Continue?')) triggerAction('/sync/products/full_catalog', 'POST')" class="btn btn-warning-subtle text-start">Full Catalog Resync (Heavy)</button>
+            <button onclick="triggerAction('/sync/products/force_catchup', 'POST')" class="btn btn-secondary text-start">Force Map Repair (All Time)</button>
             <button onclick="triggerAction('/sync/images/manual')" class="btn btn-secondary text-start">Force Image Sync</button>
             <button onclick="triggerAction('/sync/fulfillments')" class="btn btn-secondary text-start">Push Fulfillment</button>
             <button onclick="triggerAction('/sync/customers/master', 'POST')" class="btn btn-secondary text-start">Force Customer Sync</button>
             <button onclick="triggerAction('/sync/returns')" class="btn btn-secondary text-start">Sync Returns</button>
             <button onclick="triggerAction('/sync/cancellations')" class="btn btn-secondary text-start">Sync Cancellations</button>
-            <button onclick="triggerAction('/sync/products/force_catchup', 'POST')" class="btn btn-secondary text-start">Force Map Repair (All Time)</button>
         </div>
     </div>
          <div class="card shadow-sm mb-4">
