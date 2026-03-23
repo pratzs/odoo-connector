@@ -125,7 +125,7 @@
         <button onclick="openSupportModal()">Contact Support</button>
     </ui-title-bar>
     
-    <div id="tab-overview" class="tab-content-area active">
+    <div id="tab-overview" class="tab-content-area {% if current_tab == 'tab-overview' %}active{% endif %}" style="display:{% if current_tab == 'tab-overview' %}block{% else %}none{% endif %};">
     <div class="mb-4">
         {% if not config.odoo_url %}
         <div class="p-banner mb-4" style="background-color: #f0f7ff; border: 1px solid #b3d1ff; border-radius: 8px; display: flex; padding: 16px;">
@@ -134,7 +134,7 @@
                 <div class="p-banner-title" style="font-weight: 600;">Finish your setup</div>
                 <div class="p-banner-message" style="font-size: 13px;">
                     Welcome! To start syncing, you need to connect your Odoo instance. 
-                    Go to the <strong><a href="javascript:void(0)" onclick="switchTab('tab-settings')" style="color: #005bd3; text-decoration: underline;">Settings</a></strong> tab to enter your Odoo URL and credentials.
+                    Go to the <strong><a href="/settings?shop={{ shop_url }}" style="color: #005bd3; text-decoration: underline;">Settings</a></strong> tab to enter your Odoo URL and credentials.
                 </div>
             </div>
         </div>
@@ -311,7 +311,7 @@
     </div>
 </div>
 
-    <div id="tab-settings" class="tab-content-area">
+    <div id="tab-settings" class="tab-content-area {% if current_tab == 'tab-settings' %}active{% endif %}" style="display:{% if current_tab == 'tab-settings' %}block{% else %}none{% endif %};">
     <div class="mb-4">
         <h1 class="h3 fw-bold mb-1" style="color: var(--p-on-surface);">Settings</h1>
         <p class="text-muted mb-0" style="font-size: 15px;">Configure your synchronization rules and connection preferences.</p>
@@ -601,7 +601,7 @@
     </div>
 </div>
 
-    <div id="tab-maintenance" class="tab-content-area">
+    <div id="tab-maintenance" class="tab-content-area {% if current_tab == 'tab-maintenance' %}active{% endif %}" style="display:{% if current_tab == 'tab-maintenance' %}block{% else %}none{% endif %};">
     <div class="mb-4">
         <h1 class="h3 fw-bold mb-1" style="color: var(--p-on-surface);">Tools</h1>
         <p class="text-muted mb-0" style="font-size: 15px;">Advanced tools for data health and troubleshooting.</p>
