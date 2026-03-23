@@ -371,7 +371,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
         print(f"Save Error {sku}: {e}")
         return "error"
 
-    # 2. Explicitly handle Metafields (The bulletproof REST API way)
+    # 2. Explicitly handle Metafields (Using Shopify's Recommended GraphQL Upsert)
     try:
         meta_targets = []
         
@@ -379,39 +379,40 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
         if cfg.get('meta_original_price'):
             safe_price = "{:.2f}".format(float(p.get('list_price') or 0.0))
             meta_targets.append({
+                'ownerId': f"gid://shopify/Product/{sp.id}",
+                'namespace': 'custom',
                 'key': 'original_retail_price', 
-                'value': safe_price, 
+                'value': str(safe_price), 
                 'type': 'number_decimal'
             })
         
         # Vendor Product Code
         if cfg.get('meta_vendor_code') and p.get('vendor_code'):
             meta_targets.append({
+                'ownerId': f"gid://shopify/Product/{sp.id}",
+                'namespace': 'custom',
                 'key': 'vendor_product_code', 
                 'value': str(p.get('vendor_code')), 
                 'type': 'single_line_text_field'
             })
 
         if meta_targets:
-            existing_meta = sp.metafields() # Fetch existing metafields for this product
+            client = shopify.GraphQL()
+            query = """
+            mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+              metafieldsSet(metafields: $metafields) {
+                metafields { key value }
+                userErrors { field message }
+              }
+            }
+            """
+            # Execute the GraphQL Upsert
+            result = json.loads(client.execute(query, {'metafields': meta_targets}))
             
-            for target in meta_targets:
-                match = next((m for m in existing_meta if m.namespace == 'custom' and m.key == target['key']), None)
-                
-                if match:
-                    # Update existing ONLY if it changed (saves API calls)
-                    if str(match.value) != target['value']:
-                        match.value = target['value']
-                        match.save()
-                else:
-                    # Create new metafield
-                    new_meta = shopify.Metafield({
-                        'namespace': 'custom', 
-                        'key': target['key'], 
-                        'value': target['value'], 
-                        'type': target['type']
-                    })
-                    sp.add_metafield(new_meta)
+            # Catch and log any specific Shopify validation errors
+            errors = result.get('data', {}).get('metafieldsSet', {}).get('userErrors', [])
+            if errors:
+                print(f"GraphQL Metafield Validation Error for {sku}: {errors}")
                     
     except Exception as e:
         print(f"Metafield Save Error {sku}: {e}")
