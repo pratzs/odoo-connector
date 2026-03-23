@@ -62,6 +62,49 @@ def sync_products_master(shop_url):
 
 
 # =====================================================
+# 1.5 THE ABSOLUTE MASTER (FULL CATALOG RESYNC)
+# =====================================================
+def sync_all_products_absolute_master(shop_url):
+    from app import app
+    with app.app_context():
+        shop = Shop.query.filter_by(shop_url=shop_url).first()
+        if not shop: return
+        
+        odoo = get_odoo_connection(shop_url)
+        if not odoo: return
+
+        company_id = shop.odoo_company_id
+        if not company_id: return
+
+        log_event('Product Sync', 'Warning', "INITIATING FULL CATALOG RESYNC (HEAVY). Bypassing 48-hour rule.", shop_url=shop_url)
+
+        # NO TIME LIMIT - GRAB EVERYTHING ACTIVE
+        domain = [
+            ['sale_ok', '=', True], 
+            ['type', 'in', ['product', 'consu']], 
+            ['active', '=', True], 
+            '|', 
+            ['company_id', '=', int(company_id)],
+            ['company_id', '=', False]
+        ]
+        
+        try:
+            product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search', [domain])
+        except Exception as e:
+            log_event('Product Sync', 'Error', f"Full Catalog Search Failed: {e}", shop_url=shop_url)
+            return
+
+        BATCH_SIZE = 50
+        chunks = [product_ids[i:i + BATCH_SIZE] for i in range(0, len(product_ids), BATCH_SIZE)]
+
+        for index, batch_ids in enumerate(chunks):
+            # We reuse the exact same reliable batch worker we already use!
+            q_default.enqueue(sync_product_batch_task, shop_url, batch_ids, f"Full Resync Batch {index+1}/{len(chunks)}", job_timeout=3600)
+
+        log_event('Product Sync', 'Success', f"Queued FULL CATALOG sync. {len(chunks)} batches processing.", shop_url=shop_url)
+
+
+# =====================================================
 # 2. THE WORKER (OPTIMIZED)
 # =====================================================
 def sync_product_batch_task(shop_url, batch_ids, batch_name):
