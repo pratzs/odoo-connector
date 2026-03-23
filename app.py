@@ -1366,6 +1366,19 @@ def trigger_customer_master_sync():
     job = q_default.enqueue(sync_customers_master, shop_url, job_timeout=3600)
     return jsonify({"message": f"Customer Sync Queued (ID: {job.get_id()})"})
 
+@app.route('/sync/customers/full_catalog', methods=['POST'])
+@require_shopify_session
+def trigger_full_customer_sync():
+    shop_url = request.args.get('shop') 
+    if not shop_url: return jsonify({"message": "Error: Missing shop parameter"}), 400
+
+    from services.customers import sync_all_customers_absolute_master
+    # SLOW LANE (Massive Job)
+    from app import q_default
+    job = q_default.enqueue(sync_all_customers_absolute_master, shop_url, job_timeout=3600)
+    
+    return jsonify({"message": f"Full Customer Resync Queued. This will take a while. (Job: {job.get_id()})"})
+
 @app.route('/sync/products/archive_duplicates', methods=['POST'])
 @require_shopify_session
 def trigger_duplicate_scan():
