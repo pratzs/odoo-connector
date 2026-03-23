@@ -37,7 +37,7 @@ def sync_odoo_returns(shop_url):
 
         # --- FIX START: Log if nothing found so the user isn't left guessing ---
         if not returns:
-            log_event('Return Sync', 'Info', "Job Complete: No new returns (incoming shipments) found.", shop_url=shop_url)
+           # log_event('Return Sync', 'Info', "Job Complete: No new returns (incoming shipments) found.", shop_url=shop_url)
             return
         # --- FIX END -----------------------------------------------------------
 
