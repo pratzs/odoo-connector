@@ -1647,6 +1647,36 @@ function sendSupportEmail() {
         btn.disabled = false;
     });
 }
+
+        function sendBulkSetupEmails() {
+    if (!confirm('This will email every B2B customer who has not yet set a password. Continue?')) return;
+    
+    const btn = document.getElementById('btnSendSetupEmails');
+    const result = document.getElementById('bulkEmailResult');
+    
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Sending...';
+    result.style.display = 'none';
+    
+    fetch(`/multipass/admin/send-setup-emails?shop=${CURRENT_SHOP_URL}`, { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            result.style.display = 'block';
+            if (data.success) {
+                result.innerHTML = `<span class="text-success"><i class="bi bi-check-circle-fill me-1"></i>${data.message}</span>`;
+            } else {
+                result.innerHTML = `<span class="text-danger"><i class="bi bi-x-circle-fill me-1"></i>Error: ${data.message}</span>`;
+            }
+        })
+        .catch(() => {
+            result.style.display = 'block';
+            result.innerHTML = '<span class="text-danger"><i class="bi bi-x-circle-fill me-1"></i>Network error</span>';
+        })
+        .finally(() => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-envelope me-1"></i> Send Setup Emails';
+        });
+}
         
     </script>
 </body>
