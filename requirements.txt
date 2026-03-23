@@ -9,3 +9,4 @@ schedule==1.2.1
 cryptography==42.0.0
 redis==5.0.1
 rq==1.15.1
+pytz==2024.1
