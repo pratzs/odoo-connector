@@ -247,7 +247,8 @@
             <button onclick="triggerAction('/sync/products/force_catchup', 'POST')" class="btn btn-secondary text-start">Force Map Repair (All Time)</button>
             <button onclick="triggerAction('/sync/images/manual')" class="btn btn-secondary text-start">Force Image Sync</button>
             <button onclick="triggerAction('/sync/fulfillments')" class="btn btn-secondary text-start">Push Fulfillment</button>
-            <button onclick="triggerAction('/sync/customers/master', 'POST')" class="btn btn-secondary text-start">Force Customer Sync</button>
+            <button onclick="triggerAction('/sync/customers/master', 'POST')" class="btn btn-secondary text-start">Force Customer Sync(Quick)</button>
+            <button onclick="if(confirm('⚠️ This will overwrite all Shopify customer notes, tags, and B2B links with fresh Odoo data for your entire database. This may take 15+ minutes. Continue?')) triggerAction('/sync/customers/full_catalog', 'POST')" class="btn btn-warning-subtle text-start">Full Customer Resync (Heavy)</button>
             <button onclick="triggerAction('/sync/returns')" class="btn btn-secondary text-start">Sync Returns</button>
             <button onclick="triggerAction('/sync/cancellations')" class="btn btn-secondary text-start">Sync Cancellations</button>
         </div>
