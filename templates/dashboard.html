@@ -17,10 +17,9 @@
     <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
 
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">    
     
     <style>
-        html, body { visibility: visible !important; }
         :root {
             --p-surface: #f6f6f7;
             --p-on-surface: #202223;
@@ -125,7 +124,7 @@
         <button onclick="openSupportModal()">Contact Support</button>
     </ui-title-bar>
     
-    <div id="tab-overview" class="tab-content-area" style="display:{% if current_tab == 'tab-settings' or current_tab == 'tab-maintenance' %}none{% else %}block{% endif %};">
+    <div id="tab-overview" class="tab-content-area active">
     <div class="mb-4">
         {% if not config.odoo_url %}
         <div class="p-banner mb-4" style="background-color: #f0f7ff; border: 1px solid #b3d1ff; border-radius: 8px; display: flex; padding: 16px;">
@@ -134,7 +133,7 @@
                 <div class="p-banner-title" style="font-weight: 600;">Finish your setup</div>
                 <div class="p-banner-message" style="font-size: 13px;">
                     Welcome! To start syncing, you need to connect your Odoo instance. 
-                    Go to the <strong><a href="#/settings" style="color: #005bd3; text-decoration: underline;">Settings</a></strong> tab to enter your Odoo URL and credentials.
+                    Go to the <strong><a href="javascript:void(0)" onclick="window.location.pathname='/settings'; handleNavigation();" style="color: #005bd3; text-decoration: underline;">Settings</a></strong> tab to enter your Odoo URL and credentials.
                 </div>
             </div>
         </div>
@@ -160,14 +159,8 @@
                     {{ config.last_inventory_sync_success if config.last_inventory_sync_success else 'Never' }}
                 </small>
             </div>
-            <div class="bg-white border rounded px-3 py-2 shadow-sm d-flex align-items-center" style="border-color: var(--p-border) !important;">
-                <div class="rounded-circle me-2" id="dot-last-ret" style="width: 8px; height: 8px; background: #adb5bd;"></div>
-                <small class="text-muted me-1">Last Return Sync:</small>
-                <small class="fw-bold" id="status-last-ret" style="color: var(--p-on-surface);">
-                    {{ config.last_return_sync_success if config.last_return_sync_success else 'Never' }}
-                </small>
-            </div>
         </div>
+    </div>
 
     <div class="row">
         <div class="col-md-4">
@@ -255,7 +248,7 @@
             <button onclick="triggerAction('/sync/customers/master', 'POST')" class="btn btn-secondary text-start">Force Customer Sync</button>
             <button onclick="triggerAction('/sync/returns')" class="btn btn-secondary text-start">Sync Returns</button>
             <button onclick="triggerAction('/sync/cancellations')" class="btn btn-secondary text-start">Sync Cancellations</button>
-            <button onclick="triggerAction('/sync/products/force_catchup', 'POST')" class="btn btn-secondary text-start">Force Map Repair (All Time)</button>
+            <button onclick="triggerAction('/sync/products/force_catchup', 'POST')" class="btn btn-secondary text-start">Force Product Catch-Up (60d)</button>
         </div>
     </div>
          <div class="card shadow-sm mb-4">
@@ -311,7 +304,7 @@
     </div>
 </div>
 
-    <div id="tab-settings" class="tab-content-area" style="display:{% if current_tab == 'tab-settings' %}block{% else %}none{% endif %};">
+    <div id="tab-settings" class="tab-content-area">
     <div class="mb-4">
         <h1 class="h3 fw-bold mb-1" style="color: var(--p-on-surface);">Settings</h1>
         <p class="text-muted mb-0" style="font-size: 15px;">Configure your synchronization rules and connection preferences.</p>
@@ -468,8 +461,6 @@
                                     Each store sets their own email here.
                                 </div>
                             </div>
-                        </div>
-                    </div>
 
                 <!-- SMTP CONFIG — inside same card -->
                 <hr class="mt-3">
@@ -506,29 +497,6 @@
                     </div>
                 </div>
             </div>
-               <!-- BULK SETUP EMAIL SENDER -->
-            <hr class="mt-3">
-            <div class="row mt-3">
-                <div class="col-12">
-                    <div class="d-flex align-items-center justify-content-between">
-                        <div>
-                            <span class="fw-semibold" style="font-size:13px;">Send Password Setup Emails</span>
-                            <p class="text-muted mb-0" style="font-size:12px;">
-                                Sends a one-time password setup link to every B2B customer 
-                                who has not yet set their password. Safe to re-run — 
-                                customers who already have a password are automatically skipped.
-                            </p>
-                        </div>
-                        <button class="btn btn-secondary ms-3 text-nowrap" 
-                                id="btnSendSetupEmails" 
-                                onclick="sendBulkSetupEmails()"
-                                style="font-size:12px; padding:6px 14px; white-space:nowrap;">
-                            <i class="bi bi-envelope me-1"></i> Send Setup Emails
-                        </button>
-                    </div>
-                    <div id="bulkEmailResult" class="mt-2" style="display:none; font-size:12px;"></div>
-                </div>
-            </div>         
         </div>
     </div>
 </div>
@@ -603,7 +571,7 @@
     </div>
 </div>
 
-    <div id="tab-maintenance" class="tab-content-area" style="display:{% if current_tab == 'tab-maintenance' %}block{% else %}none{% endif %};">
+    <div id="tab-maintenance" class="tab-content-area">
     <div class="mb-4">
         <h1 class="h3 fw-bold mb-1" style="color: var(--p-on-surface);">Tools</h1>
         <p class="text-muted mb-0" style="font-size: 15px;">Advanced tools for data health and troubleshooting.</p>
@@ -868,16 +836,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        function escapeHtml(str) {
-    if (!str) return '';
-    return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-        }
-        
         function showToast(message) {
         const toastEl = document.getElementById('liveToast');
         const msgEl = document.getElementById('toastMessage');
@@ -913,42 +871,64 @@
                 return dateString; 
             }
         }
-        
-   / --- BULLETPROOF HASH ROUTER ---
-    function handleHashNavigation() {
-        const hash = window.location.hash;
-        
-        // Hide all tabs
-        document.querySelectorAll('.tab-content-area').forEach(el => {
-            el.classList.remove('active');
-            el.style.display = 'none';
+
+        // --- UPDATE YOUR DOMContentLoaded TO USE IT ---
+        document.addEventListener("DOMContentLoaded", function() {
+           
+
+            // Format the status badges
+            const invEl = document.getElementById('status-last-inv');
+            const ordEl = document.getElementById('status-last-order');
+            if(invEl) invEl.innerText = formatTimeAgo(invEl.innerText);
+            if(ordEl) ordEl.innerText = formatTimeAgo(ordEl.innerText);
+
+            // ... the rest of your existing logic ...
+            if(CURRENT_SHOP_URL) fetchCompanies();
         });
+        
+        function switchTab(tabId) {
+    window.location.hash = tabId;
+}
 
-        // Determine target tab based on hash
-        let targetId = 'tab-overview'; // Default fallback
-        if (hash === '#/settings') targetId = 'tab-settings';
-        if (hash === '#/maintenance') targetId = 'tab-maintenance';
 
-        // Show the target tab
-        const targetEl = document.getElementById(targetId);
-        if (targetEl) {
-            targetEl.style.display = 'block';
-            setTimeout(() => targetEl.classList.add('active'), 10);
-        }
-    }
-
-    // Listen for clicks on the nav menu and back/forward buttons
-    window.addEventListener('hashchange', handleHashNavigation);
-
-   function updateStatusDot(dotId, timeText) {
+// Turn dot green only if sync has run recently (within 24h)
+function updateStatusDot(dotId, timeText) {
     const dot = document.getElementById(dotId);
     if (!dot) return;
     dot.style.background = (timeText && timeText !== 'Never') ? '#198754' : '#adb5bd';
 }
 updateStatusDot('dot-last-ret', document.getElementById('status-last-ret')?.innerText);
 
-// --- 1. Global Config & JSON Parsing ---
+        
+function handleNavigation() {
+        // 1. Get the path from the window location
+        const path = window.location.pathname; // e.g. "/settings" or "/"
+        
+        // 2. Hide all content areas
+        document.querySelectorAll('.tab-content-area').forEach(el => {
+            el.classList.remove('active');
+            el.style.display = 'none';
+        });
 
+        // 3. Simple Router Logic
+        let targetId = 'tab-overview';
+        if (path.includes('settings')) targetId = 'tab-settings';
+        if (path.includes('maintenance')) targetId = 'tab-maintenance';
+
+        // 4. Show target
+        const targetEl = document.getElementById(targetId);
+        if (targetEl) {
+            targetEl.classList.add('active');
+            targetEl.style.display = 'block';
+        }
+    }
+
+    // Listen for history changes (Back button, etc)
+    window.addEventListener('popstate', handleNavigation);
+    // Listen for initial load
+    window.addEventListener('load', handleNavigation);
+
+// --- 1. Global Config & JSON Parsing ---
 const rawConfig = {{ config | tojson | safe if config else '{}' }};
 const SAVED_SETTINGS = {};
 
@@ -1045,7 +1025,8 @@ document.addEventListener("DOMContentLoaded", function() {
     // --- C. Final Startup Logic ---
     toggleTagFields(); 
     if(CURRENT_SHOP_URL) fetchCompanies();
-}); // Ends perfectly here
+    handleNavigation(); // Corrected from handleSidebarNavigation
+});
 
 function toggleTagFields() {
     const toggle = document.getElementById('custSyncTagsSwitch');
@@ -1073,7 +1054,7 @@ function fetchCompanies() {
         })
         .then(data => {
             if(data.error) { 
-                sel.innerHTML = `<option value="">Error: ${escapeHtml(data.error)}</option>`;
+                sel.innerHTML = `<option value="">Error: ${data.error}</option>`;
                 if(banner) banner.style.display = 'flex'; 
                 return; 
             }
@@ -1113,7 +1094,7 @@ function fetchLocations(companyId) {
     fetch(`/api/odoo/locations?company_id=${companyId}&shop=${CURRENT_SHOP_URL}`)
         .then(r => r.json())
         .then(data => {
-            if(data.error) { list.innerHTML = `<span class="text-danger">${escapeHtml(data.error)}</span>`; return; }
+            if(data.error) { list.innerHTML = `<span class="text-danger">${data.error}</span>`; return; }
             
             // Use the correct key from your SAVED_SETTINGS
             const savedLocs = SAVED_SETTINGS.inventory_locations || []; 
@@ -1318,7 +1299,7 @@ function openUnmappedModal() {
             });
         })
         .catch(err => {
-            if(loadingEl) loadingEl.innerHTML = `<div class="text-danger">Error loading report: ${escapeHtml(String(err))}</div>`;
+            if(loadingEl) loadingEl.innerHTML = `<div class="text-danger">Error loading report: ${err}</div>`;
         });
 }
 
@@ -1419,9 +1400,10 @@ function openJobModal(status) {
                 return;
             }
 
-            // Backend already returns newest-first for failed/active jobs.
-            // Pending jobs come in queue order (oldest first = next to run).
-            const sortedJobs = data.jobs;
+            // --- SORTING: NEWEST FIRST ---
+            // Assuming jobs come in order, reversing them shows newest first.
+            // If they have timestamps, we could sort by that, but array reverse is usually sufficient for RQ.
+            const sortedJobs = data.jobs.reverse();
 
             sortedJobs.forEach(job => {
                 let details = `<span class="text-muted small">${job.args}</span>`;
@@ -1430,8 +1412,8 @@ function openJobModal(status) {
                 // --- BUTTON LOGIC ---
                 if (status === 'failed') {
                     // Show Error + Retry Button
-                    details = `<span class="text-danger small fw-bold">${escapeHtml(job.error)}</span><br>${escapeHtml(details)}`;
-                    actionBtn = `<button onclick="doJobAction('retry', '${escapeHtml(job.id)}', this)" class="btn btn-sm btn-outline-primary py-0" style="font-size: 11px;">Retry</button>`;
+                    details = `<span class="text-danger small fw-bold">${job.error}</span><br>${details}`;
+                    actionBtn = `<button onclick="doJobAction('retry', '${job.id}', this)" class="btn btn-sm btn-outline-primary py-0" style="font-size: 11px;">Retry</button>`;
                 } else if (status === 'pending') {
                     // Show Cancel Button
                     actionBtn = `<button onclick="doJobAction('cancel', '${job.id}', this)" class="btn btn-sm btn-outline-danger py-0" style="font-size: 11px;">Cancel</button>`;
@@ -1641,35 +1623,6 @@ function sendSupportEmail() {
         btn.innerText = originalText;
         btn.disabled = false;
     });
-}
-function sendBulkSetupEmails() {
-    if (!confirm('This will email every B2B customer who has not yet set a password. Continue?')) return;
-
-    const btn = document.getElementById('btnSendSetupEmails');
-    const result = document.getElementById('bulkEmailResult');
-
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Sending...';
-    result.style.display = 'none';
-
-    fetch(`/multipass/admin/send-setup-emails?shop=${CURRENT_SHOP_URL}`, { method: 'POST' })
-        .then(r => r.json())
-        .then(data => {
-            result.style.display = 'block';
-            if (data.success) {
-                result.innerHTML = `<span class="text-success"><i class="bi bi-check-circle-fill me-1"></i>${data.message}</span>`;
-            } else {
-                result.innerHTML = `<span class="text-danger"><i class="bi bi-x-circle-fill me-1"></i>Error: ${data.message}</span>`;
-            }
-        })
-        .catch(() => {
-            result.style.display = 'block';
-            result.innerHTML = '<span class="text-danger"><i class="bi bi-x-circle-fill me-1"></i>Network error</span>';
-        })
-        .finally(() => {
-            btn.disabled = false;
-            btn.innerHTML = '<i class="bi bi-envelope me-1"></i> Send Setup Emails';
-        });
 }
         
     </script>
