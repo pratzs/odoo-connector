@@ -5,11 +5,19 @@
     <meta name="shopify-api-key" content="{{ api_key }}" />
     
     <title>Odoo Connector Dashboard</title>
+    
+    <script type="shopify/config">
+      {
+        "apiKey": "{{ api_key }}",
+        "shopOrigin": "{{ shop_origin }}",
+        "forceRedirect": true
+      }
+    </script>
 
-    <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js" data-api-key="{{ api_key }}"></script>
+    <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
 
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">    
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
     
     <style>
         html, body { visibility: visible !important; }
@@ -106,9 +114,9 @@
     </div>
 </div>
     <ui-nav-menu>
-        <a href="/?shop={{ shop_url }}" rel="home" onclick="switchTab('tab-overview')">Overview</a>
-        <a href="/settings?shop={{ shop_url }}" onclick="switchTab('tab-settings')">Settings</a>
-        <a href="/maintenance?shop={{ shop_url }}" onclick="switchTab('tab-maintenance')">Tools</a>
+        <a href="/" rel="home">Overview</a>
+        <a href="/settings">Settings</a>
+        <a href="/maintenance">Tools</a>
     </ui-nav-menu>
 
   <ui-title-bar title="Dashboard">
@@ -117,7 +125,7 @@
         <button onclick="openSupportModal()">Contact Support</button>
     </ui-title-bar>
     
-    <div id="tab-overview" class="tab-content-area" style="display:{% if current_tab == 'tab-overview' %}block{% else %}none{% endif %};">
+    <div id="tab-overview" class="tab-content-area active">
     <div class="mb-4">
         {% if not config.odoo_url %}
         <div class="p-banner mb-4" style="background-color: #f0f7ff; border: 1px solid #b3d1ff; border-radius: 8px; display: flex; padding: 16px;">
@@ -593,7 +601,7 @@
     </div>
 </div>
 
-    <div id="tab-maintenance" class="tab-content-area" style="display:{% if current_tab == 'tab-maintenance' %}block{% else %}none{% endif %};">
+    <div id="tab-maintenance" class="tab-content-area">
     <div class="mb-4">
         <h1 class="h3 fw-bold mb-1" style="color: var(--p-on-surface);">Tools</h1>
         <p class="text-muted mb-0" style="font-size: 15px;">Advanced tools for data health and troubleshooting.</p>
@@ -919,6 +927,35 @@ function switchTab(tabId) {
     }
 }
 
+        function handleNavigation() {
+        // 1. Get the path from the window location
+        const path = window.location.pathname; 
+        
+        // 2. Hide all content areas
+        document.querySelectorAll('.tab-content-area').forEach(el => {
+            el.classList.remove('active');
+            el.style.display = 'none';
+        });
+
+        // 3. Simple Router Logic
+        let targetId = 'tab-overview';
+        if (path.includes('settings')) targetId = 'tab-settings';
+        if (path.includes('maintenance')) targetId = 'tab-maintenance';
+
+        // 4. Show target
+        const targetEl = document.getElementById(targetId);
+        if (targetEl) {
+            targetEl.classList.add('active');
+            targetEl.style.display = 'block';
+        }
+    }
+
+    // Listen for history changes (Back button, etc)
+    window.addEventListener('popstate', handleNavigation);
+    // Listen for initial load
+    window.addEventListener('load', handleNavigation);
+        
+
 function handleAppBridgeNavigation() {
     const path = window.location.pathname;
     let targetTab = 'tab-overview';
@@ -1060,7 +1097,7 @@ document.addEventListener("DOMContentLoaded", function() {
     // --- C. Final Startup Logic ---
     toggleTagFields(); 
     if(CURRENT_SHOP_URL) fetchCompanies();
-    handleAppBridgeNavigation(); 
+    handleNavigation(); 
 });
 
 function toggleTagFields() {
