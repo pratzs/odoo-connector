@@ -71,56 +71,41 @@ def process_order_data(data, odoo_client, shop_url):
                 if existing_ids: return True, "Skipped: Order exists in Odoo."
             except: pass
 
-            # 1. Handle Customer
+            # 1. Handle Customer (Strict Email Match - Odoo is Master for Name)
             partner = odoo.search_partner_by_email(email)
-            is_new_customer = False
-            cust_data = data.get('customer', {})
-            def_address = data.get('billing_address') or data.get('shipping_address') or {}
             
-            # --- NEW SMART DEDUPLICATION FUNCTION ---
-            def build_clean_name(address_dict):
-                first = (address_dict.get('first_name') or '').strip()
-                last = (address_dict.get('last_name') or '').strip()
-                if first and last:
-                    if last.lower() in first.lower(): full_name = first
-                    elif first.lower() in last.lower(): full_name = last
-                    else: full_name = f"{first} {last}"
-                else:
-                    full_name = first or last
-                return full_name
+            cust_data = data.get('customer', {})
+            bill_addr = data.get('billing_address') or data.get('shipping_address') or {}
+            ship_addr = data.get('shipping_address') or bill_addr
             
             if not partner:
-                company_name = def_address.get('company')
-                person_name = build_clean_name(def_address)
+                # NEW CUSTOMER: Only create if the email does not exist in Odoo at all
+                company_name = bill_addr.get('company', '').strip()
+                b2b_data = data.get('company')
+                if b2b_data and isinstance(b2b_data, dict) and b2b_data.get('name'):
+                    company_name = b2b_data.get('name').strip()
                 
-                # Combine Company + Branch for the Parent Name natively
-                if company_name and person_name and person_name.lower() not in company_name.lower():
-                    final_name = f"{company_name}, {person_name}"
-                else:
-                    final_name = company_name or person_name or email
+                first = (bill_addr.get('first_name') or '').strip()
+                last = (bill_addr.get('last_name') or '').strip()
+                person_name = f"{first} {last}".strip()
+                
+                final_name = company_name if company_name else (person_name or email)
                 
                 vals = {
                     'name': final_name, 'email': email, 'phone': cust_data.get('phone'),
-                    'street': def_address.get('address1'), 'city': def_address.get('city'),
-                    'zip': def_address.get('zip'), 'country_code': def_address.get('country_code'),
+                    'street': bill_addr.get('address1'), 'city': bill_addr.get('city'),
+                    'zip': bill_addr.get('zip'), 'country_code': bill_addr.get('country_code'),
                     'is_company': True, 'company_type': 'company'
                 }
                 if company_id: vals['company_id'] = int(company_id)
                 partner_id = odoo.create_partner(vals)
                 partner = {'id': partner_id, 'name': final_name}
-                is_new_customer = True
                 
-                if shopify_id and data.get('customer', {}).get('id'):
+                if shopify_id and cust_data.get('id'):
                     try:
-                        sh_cust_id = str(data['customer']['id'])
-                        cust_map_exists = CustomerMap.query.filter_by(shopify_customer_id=sh_cust_id, shop_url=shop_url).first()
-                        if not cust_map_exists:
-                            db.session.add(CustomerMap(
-                                shop_url=shop_url,
-                                shopify_customer_id=sh_cust_id, 
-                                odoo_partner_id=partner_id, 
-                                email=email
-                            ))
+                        sh_cust_id = str(cust_data['id'])
+                        if not CustomerMap.query.filter_by(shopify_customer_id=sh_cust_id, shop_url=shop_url).first():
+                            db.session.add(CustomerMap(shop_url=shop_url, shopify_customer_id=sh_cust_id, odoo_partner_id=partner_id, email=email))
                             db.session.commit()
                     except Exception as e: 
                         db.session.rollback()
@@ -128,40 +113,28 @@ def process_order_data(data, odoo_client, shop_url):
 
             # 2. Assign Addresses to Order
             main_partner_id = partner.get('id') 
-            invoice_id = main_partner_id
-            shipping_id = main_partner_id
             
-            if is_new_customer:
-                # --- SCENARIO A: NEW CUSTOMER ---
-                # Build the complete Parent/Child structure using Shopify's payload
-                bill_addr = data.get('billing_address')
-                ship_addr = data.get('shipping_address')
-
-                if bill_addr:
-                    try:
-                        inv_id = odoo.find_or_create_child_address(main_partner_id, bill_addr, type='invoice')
-                        if inv_id: invoice_id = inv_id
-                    except Exception as e:
-                        print(f"New customer invoice routing error: {e}")
-
-                if ship_addr:
-                    try:
-                        del_id = odoo.find_or_create_child_address(main_partner_id, ship_addr, type='delivery')
-                        if del_id: shipping_id = del_id
-                    except Exception as e:
-                        print(f"New customer delivery routing error: {e}")
-                        
-            else:
-                # --- SCENARIO B: EXISTING B2B CUSTOMER ---
-                # Odoo is Master. Ignore Shopify payload and use official structure.
+            # A. Invoice Address: Stick to Odoo's official billing address
+            try:
+                addr_res = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
+                    'res.partner', 'address_get', [[main_partner_id], ['invoice']])
+                invoice_id = addr_res.get('invoice', main_partner_id)
+            except Exception as e:
+                print(f"Odoo native invoice address routing error: {e}")
+                invoice_id = main_partner_id
+                
+            # B. Delivery Address: Dynamic Shopify Mapping
+            shipping_id = main_partner_id
+            if ship_addr:
                 try:
-                    addr_res = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 
-                        'res.partner', 'address_get', [[main_partner_id], ['invoice', 'delivery']])
-                    
-                    invoice_id = addr_res.get('invoice', main_partner_id)
-                    shipping_id = addr_res.get('delivery', main_partner_id)
+                    # This function checks Odoo for a child address matching the street/city.
+                    # If it exists, it uses it. If it doesn't, it creates a new "Delivery Address" 
+                    # under the parent customer so your records stay clean!
+                    del_id = odoo.find_or_create_child_address(main_partner_id, ship_addr, type='delivery')
+                    if del_id: 
+                        shipping_id = del_id
                 except Exception as e:
-                    print(f"Odoo native address routing error: {e}")
+                    print(f"Shipping address routing error: {e}")
             
             sales_rep_id = odoo.get_partner_salesperson(main_partner_id) or odoo.uid
 
