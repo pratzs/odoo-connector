@@ -311,7 +311,7 @@
     </div>
 </div>
 
-    <div id="tab-settings" class="tab-content-area" style="display:{% if current_tab == 'tab-settings' %}block{% else %}none{% endif %};">
+    <div id="tab-settings" class="tab-content-area">
     <div class="mb-4">
         <h1 class="h3 fw-bold mb-1" style="color: var(--p-on-surface);">Settings</h1>
         <p class="text-muted mb-0" style="font-size: 15px;">Configure your synchronization rules and connection preferences.</p>
@@ -912,22 +912,7 @@
             }
         }
         
-    // --- FAIL-SAFE TAB ROUTER ---
-function switchTab(tabId) {
-    document.querySelectorAll('.tab-content-area').forEach(el => {
-        el.classList.remove('active');
-        el.style.display = 'none';
-    });
-    
-    const targetEl = document.getElementById(tabId);
-    if (targetEl) {
-        targetEl.style.display = 'block';
-        // Slight delay ensures the CSS animation triggers correctly after display:block
-        setTimeout(() => targetEl.classList.add('active'), 10);
-    }
-}
-
-        function handleNavigation() {
+   function handleNavigation() {
         // 1. Get the path from the window location
         const path = window.location.pathname; 
         
@@ -954,53 +939,17 @@ function switchTab(tabId) {
     window.addEventListener('popstate', handleNavigation);
     // Listen for initial load
     window.addEventListener('load', handleNavigation);
-        
 
-function handleAppBridgeNavigation() {
-    const path = window.location.pathname;
-    let targetTab = 'tab-overview';
-    
-    if (path.includes('settings')) targetTab = 'tab-settings';
-    else if (path.includes('maintenance')) targetTab = 'tab-maintenance';
-    
-    switchTab(targetTab);
-}
-
-// Catch silent URL updates from App Bridge (Turbo/SPA behavior)
-const _pushState = history.pushState;
-history.pushState = function() {
-    _pushState.apply(this, arguments);
-    handleAppBridgeNavigation();
-};
-
-const _replaceState = history.replaceState;
-history.replaceState = function() {
-    _replaceState.apply(this, arguments);
-    handleAppBridgeNavigation();
-};
-
-window.addEventListener('popstate', handleAppBridgeNavigation);
-
-// Turn dot green only if sync has run recently (within 24h)
-function updateStatusDot(dotId, timeText) {
-    const dot = document.getElementById(dotId);
-    if (!dot) return;
-    dot.style.background = (timeText && timeText !== 'Never') ? '#198754' : '#adb5bd';
-}
-updateStatusDot('dot-last-ret', document.getElementById('status-last-ret')?.innerText);
-// -----------------------------
-
-
-// Turn dot green only if sync has run recently (within 24h)
-function updateStatusDot(dotId, timeText) {
-    const dot = document.getElementById(dotId);
-    if (!dot) return;
-    dot.style.background = (timeText && timeText !== 'Never') ? '#198754' : '#adb5bd';
-}
-updateStatusDot('dot-last-ret', document.getElementById('status-last-ret')?.innerText);
-
+    // Turn dot green only if sync has run recently (within 24h)
+    function updateStatusDot(dotId, timeText) {
+        const dot = document.getElementById(dotId);
+        if (!dot) return;
+        dot.style.background = (timeText && timeText !== 'Never') ? '#198754' : '#adb5bd';
+    }
+    updateStatusDot('dot-last-ret', document.getElementById('status-last-ret')?.innerText);
 
 // --- 1. Global Config & JSON Parsing ---
+
 const rawConfig = {{ config | tojson | safe if config else '{}' }};
 const SAVED_SETTINGS = {};
 
