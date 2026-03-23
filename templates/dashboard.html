@@ -114,9 +114,9 @@
     </div>
 </div>
     <ui-nav-menu>
-        <a href="/" rel="home">Overview</a>
-        <a href="/settings">Settings</a>
-        <a href="/maintenance">Tools</a>
+        <a href="#/" rel="home">Overview</a>
+        <a href="#/settings">Settings</a>
+        <a href="#/maintenance">Tools</a>
     </ui-nav-menu>
 
   <ui-title-bar title="Dashboard">
@@ -125,7 +125,7 @@
         <button onclick="openSupportModal()">Contact Support</button>
     </ui-title-bar>
     
-    <div id="tab-overview" class="tab-content-area {% if current_tab == 'tab-overview' %}active{% endif %}" style="display:{% if current_tab == 'tab-overview' %}block{% else %}none{% endif %};">
+    <div id="tab-settings" class="tab-content-area">
     <div class="mb-4">
         {% if not config.odoo_url %}
         <div class="p-banner mb-4" style="background-color: #f0f7ff; border: 1px solid #b3d1ff; border-radius: 8px; display: flex; padding: 16px;">
@@ -134,7 +134,7 @@
                 <div class="p-banner-title" style="font-weight: 600;">Finish your setup</div>
                 <div class="p-banner-message" style="font-size: 13px;">
                     Welcome! To start syncing, you need to connect your Odoo instance. 
-                    Go to the <strong><a href="/settings?shop={{ shop_url }}" style="color: #005bd3; text-decoration: underline;">Settings</a></strong> tab to enter your Odoo URL and credentials.
+                    Go to the <strong><a href="#/settings" style="color: #005bd3; text-decoration: underline;">Settings</a></strong> tab to enter your Odoo URL and credentials.
                 </div>
             </div>
         </div>
@@ -601,7 +601,7 @@
     </div>
 </div>
 
-    <div id="tab-maintenance" class="tab-content-area {% if current_tab == 'tab-maintenance' %}active{% endif %}" style="display:{% if current_tab == 'tab-maintenance' %}block{% else %}none{% endif %};">
+    <div id="tab-maintenance" class="tab-content-area">
     <div class="mb-4">
         <h1 class="h3 fw-bold mb-1" style="color: var(--p-on-surface);">Tools</h1>
         <p class="text-muted mb-0" style="font-size: 15px;">Advanced tools for data health and troubleshooting.</p>
@@ -912,33 +912,31 @@
             }
         }
         
-   function handleNavigation() {
-        // 1. Get the path from the window location
-        const path = window.location.pathname; 
+   / --- BULLETPROOF HASH ROUTER ---
+    function handleHashNavigation() {
+        const hash = window.location.hash;
         
-        // 2. Hide all content areas
+        // Hide all tabs
         document.querySelectorAll('.tab-content-area').forEach(el => {
             el.classList.remove('active');
             el.style.display = 'none';
         });
 
-        // 3. Simple Router Logic
-        let targetId = 'tab-overview';
-        if (path.includes('settings')) targetId = 'tab-settings';
-        if (path.includes('maintenance')) targetId = 'tab-maintenance';
+        // Determine target tab based on hash
+        let targetId = 'tab-overview'; // Default fallback
+        if (hash === '#/settings') targetId = 'tab-settings';
+        if (hash === '#/maintenance') targetId = 'tab-maintenance';
 
-        // 4. Show target
+        // Show the target tab
         const targetEl = document.getElementById(targetId);
         if (targetEl) {
-            targetEl.classList.add('active');
             targetEl.style.display = 'block';
+            setTimeout(() => targetEl.classList.add('active'), 10);
         }
     }
 
-    // Listen for history changes (Back button, etc)
-    window.addEventListener('popstate', handleNavigation);
-    // Listen for initial load
-    window.addEventListener('load', handleNavigation);
+    // Listen for clicks on the nav menu and back/forward buttons
+    window.addEventListener('hashchange', handleHashNavigation);
 
     // Turn dot green only if sync has run recently (within 24h)
     function updateStatusDot(dotId, timeText) {
@@ -1046,7 +1044,7 @@ document.addEventListener("DOMContentLoaded", function() {
     // --- C. Final Startup Logic ---
     toggleTagFields(); 
     if(CURRENT_SHOP_URL) fetchCompanies();
-    handleNavigation(); 
+    handleHashNavigation();
 });
 
 function toggleTagFields() {
