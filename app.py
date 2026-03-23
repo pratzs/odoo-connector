@@ -747,10 +747,9 @@ def app_uninstalled():
         print(f"Error handling uninstall for {shop_url}: {e}")
         return "Error", 500
 
-@app.route('/')
-@app.route('/settings')
-@app.route('/maintenance')
-@require_shopify_session
+@app.route('/', methods=['GET'])
+@app.route('/settings', methods=['GET'])
+@app.route('/maintenance', methods=['GET'])
 def home():
     shop_url = request.args.get('shop')
     if not shop_url: 
@@ -762,24 +761,18 @@ def home():
 
     # --- 1. BILLING CHECK ---
     is_free_store = shop_url in FREE_STORES
-
+    
     # We only run the billing logic if they are NOT a white-listed free store
     if not is_free_store and not shop.charge_id:
         try:
-            # FIX: Must activate session before calling any Shopify API.
-            # Without this, Shop.current() throws a 401 which was causing
-            # an infinite redirect loop (home -> create_billing -> home -> ...)
-            if not setup_shopify_session(shop_url):
-                # Token is invalid/expired — send them back through OAuth
-                return redirect(url_for('install', shop=shop_url))
-
             shopify_shop = shopify.Shop.current()
             raw_plan = shopify_shop.plan_name.lower()
-
+            
             # Development stores (affiliate/staff) are free
             is_dev = any(x in raw_plan for x in ['affiliate', 'staff', 'partner_test'])
-
+            
             if not is_dev:
+                # This triggers the tiered pricing logic we wrote in /billing/create
                 return redirect(url_for('create_billing', shop=shop_url))
         except Exception as e:
             print(f"Billing bypass error: {e}")
@@ -865,21 +858,12 @@ def home():
             config[s.key] = s.value
 
     clean_shop = shop_url.replace("https://", "").replace("http://", "").split('/')[0]
-
-    # --- DETERMINE ACTIVE TAB ---
-    if request.path == '/settings':
-        current_tab = 'tab-settings'
-    elif request.path == '/maintenance':
-        current_tab = 'tab-maintenance'
-    else:
-        current_tab = 'tab-overview'
-
     return render_template('dashboard.html', 
                            shop_url=shop_url, 
                            shop_origin=clean_shop, 
                            api_key=SHOPIFY_API_KEY, 
-                           config=config,
-                           current_tab=current_tab) # Pass it to Jinja
+                           config=config)
+
 
     
 @app.route('/live_logs')
