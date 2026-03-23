@@ -864,20 +864,13 @@ def home():
             config[s.key] = s.value
 
     clean_shop = shop_url.replace("https://", "").replace("http://", "").split('/')[0]
-    path = request.path
-    if 'settings' in path:
-        current_tab = 'tab-settings'
-    elif 'maintenance' in path:
-        current_tab = 'tab-maintenance'
-    else:
-        current_tab = 'tab-overview'
 
+    # Reverted to original logic: let the frontend JS handle tab switching
     return render_template('dashboard.html', 
                            shop_url=shop_url, 
                            shop_origin=clean_shop, 
                            api_key=SHOPIFY_API_KEY, 
-                           config=config,
-                           current_tab=current_tab)
+                           config=config)
 
     
 @app.route('/live_logs')
