@@ -1016,32 +1016,40 @@ def refresh_metafields_for_shop(shop_url):
         odoo_ids    = [m.odoo_product_id for m in maps]
         shopify_map = {m.odoo_product_id: m.shopify_variant_id for m in maps}
 
-        # 2. Bulk-fetch Odoo data we need (price + template ID for vendor code)
+        # 2. Bulk-fetch Odoo data (CHUNKED to prevent Render OOM crashes)
+        odoo_products = []
+        CHUNK_SIZE = 250
         try:
-            odoo_products = odoo.models.execute_kw(
-                odoo.db, odoo.uid, odoo.password,
-                'product.product', 'read', [odoo_ids],
-                {'fields': ['id', 'list_price', 'product_tmpl_id']}
-            )
+            for i in range(0, len(odoo_ids), CHUNK_SIZE):
+                chunk = odoo_ids[i:i + CHUNK_SIZE]
+                chunk_data = odoo.models.execute_kw(
+                    odoo.db, odoo.uid, odoo.password,
+                    'product.product', 'read', [chunk],
+                    {'fields': ['id', 'list_price', 'product_tmpl_id']}
+                )
+                if chunk_data:
+                    odoo_products.extend(chunk_data)
         except Exception as e:
             log_event('Metafield Refresh', 'Error', f"Odoo read failed: {e}", shop_url=shop_url)
             return 0, f"Odoo read failed: {e}"
 
-        # 3. Bulk-fetch vendor codes from product.supplierinfo
+        # 3. Bulk-fetch vendor codes from product.supplierinfo (CHUNKED)
         vendor_code_map = {}
         if sync_vendor:
             tmpl_ids = [p['product_tmpl_id'][0] for p in odoo_products if p.get('product_tmpl_id')]
             if tmpl_ids:
                 try:
-                    supplier_info = odoo.models.execute_kw(
-                        odoo.db, odoo.uid, odoo.password,
-                        'product.supplierinfo', 'search_read',
-                        [[['product_tmpl_id', 'in', tmpl_ids]]],
-                        {'fields': ['product_tmpl_id', 'product_code']}
-                    )
-                    for info in supplier_info:
-                        if info.get('product_code') and info.get('product_tmpl_id'):
-                            vendor_code_map[info['product_tmpl_id'][0]] = info['product_code']
+                    for i in range(0, len(tmpl_ids), CHUNK_SIZE):
+                        chunk = tmpl_ids[i:i + CHUNK_SIZE]
+                        supplier_info = odoo.models.execute_kw(
+                            odoo.db, odoo.uid, odoo.password,
+                            'product.supplierinfo', 'search_read',
+                            [[['product_tmpl_id', 'in', chunk]]],
+                            {'fields': ['product_tmpl_id', 'product_code']}
+                        )
+                        for info in supplier_info:
+                            if info.get('product_code') and info.get('product_tmpl_id'):
+                                vendor_code_map[info['product_tmpl_id'][0]] = info['product_code']
                 except Exception as e:
                     log_event('Metafield Refresh', 'Warning', f"Vendor code fetch error: {e}", shop_url=shop_url)
 
