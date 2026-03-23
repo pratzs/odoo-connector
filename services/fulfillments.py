@@ -36,7 +36,7 @@ def sync_odoo_fulfillments(shop_url):
             return
 
         if not pickings:
-            log_event('Fulfillment', 'Info', "Job Complete: No new fulfilled orders found.", shop_url=shop_url)
+           # log_event('Fulfillment', 'Info', "Job Complete: No new fulfilled orders found.", shop_url=shop_url)
             return
 
         synced_count = 0
@@ -45,12 +45,6 @@ def sync_odoo_fulfillments(shop_url):
             order_name = pick['origin'].replace('ONLINE_', '').strip()
             tracking_number = pick.get('carrier_tracking_ref')
             carrier_name = pick['carrier_id'][1] if pick.get('carrier_id') else 'Other'
-
-            if not tracking_number:
-                log_event('Fulfillment', 'Info',
-                    f"Skipped {order_name}: No tracking number on picking {pick['name']}",
-                    shop_url=shop_url)
-                continue
 
             try:
                 # ── 2. Find the Shopify Order ───────────────────────────
@@ -68,7 +62,6 @@ def sync_odoo_fulfillments(shop_url):
                     continue
 
                 # ── 4. Fetch FulfillmentOrders for this Order ───────────
-                # This is the new required approach from Shopify API 2022-07+
                 response = shopify.FulfillmentOrder.find(order_id=order.id)
 
                 # Filter to only open/in_progress fulfillment orders
@@ -84,8 +77,6 @@ def sync_odoo_fulfillments(shop_url):
                     continue
 
                 # ── 5. Create Fulfillment via FulfillmentOrder API ──────
-                # Build the line_items_by_fulfillment_order list
-                # (tells Shopify which fulfillment order IDs we are fulfilling)
                 fulfillment_order_line_items = [
                     {"fulfillment_order_id": fo.id}
                     for fo in open_fulfillment_orders
@@ -93,10 +84,14 @@ def sync_odoo_fulfillments(shop_url):
 
                 fulfillment = shopify.Fulfillment()
                 fulfillment.line_items_by_fulfillment_order = fulfillment_order_line_items
-                fulfillment.tracking_info = {
-                    "number": tracking_number,
-                    "company": carrier_name,
-                }
+                
+                # Only attach tracking info if a tracking number actually exists
+                if tracking_number:
+                    fulfillment.tracking_info = {
+                        "number": tracking_number,
+                        "company": carrier_name,
+                    }
+                    
                 fulfillment.notify_customer = True  # Sends Shopify shipping email
 
                 fulfillment.save()
