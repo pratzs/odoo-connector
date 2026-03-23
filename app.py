@@ -15,6 +15,7 @@ import xmlrpc.client
 import ssl
 import gc
 import smtplib
+import pytz
 from urllib.parse import urlparse, parse_qs
 from flask import Flask, request, jsonify, render_template, session, url_for, render_template_string, redirect
 from contextlib import redirect_stdout
@@ -1344,6 +1345,18 @@ def trigger_master_sync():
     
     return jsonify({"message": f"Started Sync for {shop_url} (Job ID: {job.get_id()})"})
 
+@app.route('/sync/products/full_catalog', methods=['POST'])
+@require_shopify_session
+def trigger_full_catalog_sync():
+    shop_url = request.args.get('shop') 
+    if not shop_url: return jsonify({"message": "Error: Missing shop parameter"}), 400
+
+    from services.products import sync_all_products_absolute_master
+    # SLOW LANE (This is a massive job!)
+    job = q_default.enqueue(sync_all_products_absolute_master, shop_url, job_timeout=3600)
+    
+    return jsonify({"message": f"Full Catalog Resync Queued. This will take a while. (Job: {job.get_id()})"})
+
 @app.route('/sync/customers/master', methods=['POST'])
 @require_shopify_session
 def trigger_customer_master_sync():
@@ -1873,7 +1886,25 @@ def run_schedule():
                     q_default.enqueue(sync_products_master, shop_url, job_timeout=3600)
                     conn.setex(f"last_prod_sync_{shop_url}", 86400, "done")
 
-            # --- C. GLOBAL MAINTENANCE ---
+            # --- C. MONTHLY FULL CATALOG SYNC (1st of Month, Midnight NZT) ---
+                try:
+                    nz_tz = pytz.timezone('Pacific/Auckland')
+                    nz_time = datetime.now(nz_tz)
+                    
+                    # Check if it is the 1st day of the month AND the hour is 0 (12:00 AM)
+                    if nz_time.day == 1 and nz_time.hour == 0:
+                        month_key = f"full_sync_{nz_time.year}_{nz_time.month}_{shop_url}"
+                        if not conn.get(month_key):
+                            from services.products import sync_all_products_absolute_master
+                            q_default.enqueue(sync_all_products_absolute_master, shop_url, job_timeout=3600)
+                            
+                            # Lock for 31 days so it absolutely cannot run again this month
+                            conn.setex(month_key, 86400 * 31, "done") 
+                            log_event('System', 'Info', f"Automated Monthly Full Catalog Sync Triggered at Midnight NZT.", shop_url=shop_url)
+                except Exception as e:
+                    print(f"Monthly Sync Scheduler Error: {e}")
+
+            # --- D. GLOBAL MAINTENANCE ---
             
             # 7. Cleanup Logs (Once per day)
             if not conn.get("last_log_cleanup"):
