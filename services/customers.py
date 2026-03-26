@@ -191,15 +191,29 @@ def sync_customers_master(shop_url):
             for p in odoo_customers:
                 parent_info = p.get('parent_id')
 
-                # Skip the group parent company itself (e.g. "CSB Group 3 Ltd")
-                is_group_parent = any(g in p.get('name', '').lower() for g in group_whitelist)
-                if is_group_parent and not parent_info:
-                    continue
+               # RULE 1: Skip the group parent company itself (e.g. "CSB Groups 3 Ltd" record)
+                # Only skip if the name is an EXACT match to a whitelisted group name
+                if group_whitelist and not parent_info:
+                    is_group_parent = any(
+                        p.get('name', '').strip().lower() == g.strip().lower() 
+                        for g in group_whitelist
+                    )
+                    if is_group_parent:
+                        log_event('Customer Sync', 'Info', 
+                            f"Skipping group parent: {p.get('name')} (not a customer contact)", 
+                            shop_url=shop_url)
+                        continue
 
+                # RULE 2: If this contact has a parent company, only sync it if the parent
+                # is in the whitelist (franchise/site contacts only)
                 if parent_info and group_whitelist:
                     parent_name = parent_info[1]
-                    is_whitelisted = any(g in parent_name.lower() for g in group_whitelist)
-                    if not is_whitelisted: continue
+                    is_whitelisted = any(g.strip().lower() in parent_name.lower() for g in group_whitelist)
+                    if not is_whitelisted:
+                        continue
+                
+                # RULE 3: Independent businesses (no parent, not a group parent) → ALWAYS sync
+                # No filter applied here — every standalone Odoo company gets a Shopify account
 
                 # --- 1. NAMES ---
                 shopify_first_name = p.get('name')
@@ -284,6 +298,9 @@ def sync_customers_master(shop_url):
                         log_event('Customer Sync', 'Warning', f"B2B Link Error for {email}: {b2b_error}", shop_url=shop_url)
 
                     synced_count += 1
+                    log_event('Customer Sync', 'Success', 
+                        f"Synced customer: {p.get('name')} ({email})", 
+                        shop_url=shop_url)
 
                 except Exception as e:
                     log_event('Customer Sync', 'Error', f"Failed {email}: {e}", shop_url=shop_url)
@@ -360,13 +377,29 @@ def sync_all_customers_absolute_master(shop_url):
             for p in odoo_customers:
                 parent_info = p.get('parent_id')
 
-                is_group_parent = any(g in p.get('name', '').lower() for g in group_whitelist)
-                if is_group_parent and not parent_info: continue
-
-                if parent_info:
+                # RULE 1: Skip the group parent company itself (e.g. "CSB Groups 3 Ltd" record)
+                # Only skip if the name is an EXACT match to a whitelisted group name
+                if group_whitelist and not parent_info:
+                    is_group_parent = any(
+                        p.get('name', '').strip().lower() == g.strip().lower() 
+                        for g in group_whitelist
+                    )
+                    if is_group_parent:
+                        log_event('Customer Sync', 'Info', 
+                            f"Skipping group parent: {p.get('name')} (not a customer contact)", 
+                            shop_url=shop_url)
+                        continue
+                
+                # RULE 2: If this contact has a parent company, only sync it if the parent
+                # is in the whitelist (franchise/site contacts only)
+                if parent_info and group_whitelist:
                     parent_name = parent_info[1]
-                    is_whitelisted = any(g in parent_name.lower() for g in group_whitelist)
-                    if not is_whitelisted: continue
+                    is_whitelisted = any(g.strip().lower() in parent_name.lower() for g in group_whitelist)
+                    if not is_whitelisted:
+                        continue
+
+# RULE 3: Independent businesses (no parent, not a group parent) → ALWAYS sync
+# No filter applied here — every standalone Odoo company gets a Shopify account
 
                 shopify_first_name = p.get('name')
                 shopify_last_name = "" 
@@ -448,6 +481,9 @@ def sync_all_customers_absolute_master(shop_url):
                         log_event('Customer Sync', 'Warning', f"Heavy B2B Link Error for {email}: {b2b_error}", shop_url=shop_url)
 
                     synced_count += 1
+                    log_event('Customer Sync', 'Success', 
+                        f"Synced customer: {p.get('name')} ({email})", 
+                        shop_url=shop_url)
 
                 except Exception as e:
                     log_event('Customer Sync', 'Error', f"Heavy Sync Failed {email}: {e}", shop_url=shop_url)
