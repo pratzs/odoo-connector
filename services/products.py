@@ -113,6 +113,19 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): return
         
+        # Cache currency in Redis for 1 hour — avoids 1 API call per batch
+        from utils import conn as redis_conn
+        currency_key = f"shopify_currency_{shop_url}"
+        cached_currency = redis_conn.get(currency_key)
+        if cached_currency:
+            currency = cached_currency.decode('utf-8')
+        else:
+            try:
+                currency = shopify.Shop.current().currency
+                redis_conn.setex(currency_key, 3600, currency)
+            except Exception:
+                currency = 'NZD'  # Safe fallback
+
         cfg = {
             'title': get_config('prod_sync_title', True, shop_url=shop_url),
             'price': get_config('prod_sync_price', True, shop_url=shop_url),
@@ -126,7 +139,7 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
             'auto_publish': get_config('prod_auto_publish', False, shop_url=shop_url),
             'meta_original_price': get_config('prod_sync_meta_original_price', False, shop_url=shop_url),
             'meta_vendor_code': get_config('prod_sync_meta_vendor_code', False, shop_url=shop_url),
-            'currency': shopify.Shop.current().currency
+            'currency': currency
         }
 
         # --- A. PREFETCH ODOO DATA ---
@@ -201,26 +214,62 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
         # --- C. PROCESS LOOP ---
         stats = {'created': 0, 'updated': 0, 'archived': 0, 'skipped': 0}
 
+        # --- BULK SKU LOOKUP (1 GraphQL call for entire batch instead of 1 per product) ---
+        bulk_shopify_cache = {}
+        batch_skus_for_lookup = [str(p.get('default_code')).strip() for p in products if p.get('default_code')]
+
+        if batch_skus_for_lookup:
+            try:
+                # Build a single GraphQL query with OR conditions for all SKUs in batch
+                sku_query = " OR ".join([f"sku:'{s}'" for s in batch_skus_for_lookup])
+                gql = """
+                {
+                  productVariants(first: 100, query: "%s") {
+                    edges {
+                      node {
+                        sku
+                        product { legacyResourceId }
+                      }
+                    }
+                  }
+                }
+                """ % sku_query.replace('"', '\\"')
+
+                client = shopify.GraphQL()
+                result = json.loads(client.execute(gql))
+                edges = result.get('data', {}).get('productVariants', {}).get('edges', [])
+
+                for edge in edges:
+                    node = edge.get('node', {})
+                    v_sku = node.get('sku', '').strip()
+                    product_id = node.get('product', {}).get('legacyResourceId')
+                    if v_sku and product_id and v_sku in batch_skus_for_lookup:
+                        try:
+                            sp = shopify.Product.find(int(product_id))
+                            bulk_shopify_cache[v_sku] = sp
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"Bulk SKU lookup error: {e}")
+                # Falls back to per-product lookup below
+
         for p in products:
             try:
-                # --- OPTIMIZATION: TARGETED LOOKUP ---
-                # Instead of a massive cache, we find JUST this product.
                 sku = str(p.get('default_code')).strip()
-                single_item_cache = {}
 
-                if sku:
-                    # 1. Try to find ID via our helper (uses GraphQL or Search)
+                # Use bulk cache result — fall back to individual lookup only if missing
+                single_item_cache = {}
+                if sku and sku in bulk_shopify_cache:
+                    single_item_cache[sku] = bulk_shopify_cache[sku]
+                elif sku:
+                    # Fallback for any SKU missed by bulk query
                     shopify_id = find_shopify_product_by_sku(sku, shop_url=shop_url)
-                    
                     if shopify_id:
                         try:
-                            # 2. Fetch the specific product object
-                            sp_product = shopify.Product.find(shopify_id)
-                            single_item_cache[sku] = sp_product
-                        except:
+                            single_item_cache[sku] = shopify.Product.find(shopify_id)
+                        except Exception:
                             pass
 
-                # Pass the single-item cache to your existing processor
                 res = process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db_map_dict, single_item_cache)
                 
                 if 'archived' in res: stats['archived'] += 1
