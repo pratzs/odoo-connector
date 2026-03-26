@@ -237,6 +237,20 @@ def _sync_single_customer(p, fields, shop_url, odoo):
 
         c.save()
 
+        # Check if Shopify actually accepted the save
+        if c.errors and c.errors.full_messages():
+            log_event('Customer Sync', 'Error',
+                f"Shopify rejected {email}: {c.errors.full_messages()}",
+                shop_url=shop_url)
+            return False
+
+        # Guard: if c.id is missing, save silently failed
+        if not c.id:
+            log_event('Customer Sync', 'Error',
+                f"Shopify save returned no ID for {email} — likely a duplicate or validation error.",
+                shop_url=shop_url)
+            return False
+
         # Save mapping
         if not CustomerMap.query.filter_by(shopify_customer_id=str(c.id), shop_url=shop_url).first():
             db.session.add(CustomerMap(
