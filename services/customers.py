@@ -212,7 +212,10 @@ def _sync_single_customer(p, fields, shop_url, odoo):
         c.first_name = fields['first_name']
         c.last_name = fields['last_name']
         c.note = fields['note']
-        c.phone = fields['phone']
+        # Sanitise phone — remove spaces, keep only +, digits, hyphens
+        raw_phone = fields['phone']
+        import re
+        c.phone = re.sub(r'[^\d+\-]', '', raw_phone) if raw_phone else ''
         c.verified_email = True
 
         address_data = {
