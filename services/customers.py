@@ -220,22 +220,29 @@ def _sync_single_customer(p, fields, shop_url, odoo):
         c.first_name = fields['first_name']
         c.last_name = fields['last_name']
         c.note = fields['note']
+        # Use extracted clean email (handles "Name <email>" Odoo format)
+        c.email = fields['email']
         # Sanitise phone — remove spaces, keep only +, digits, hyphens
         c.phone = re.sub(r'[^\d+\-]', '', fields['phone']) if fields['phone'] else ''
         c.verified_email = True
 
-        address_data = {
-            'address1': fields['street'],
-            'city': fields['city'],
-            'zip': fields['zip'],
-            'country': fields['address_country'],  # Full name e.g. "New Zealand" — Shopify accepts this
-            'company': fields['shopify_company'],
-            'phone': fields['phone'],
-            'first_name': fields['first_name'],
-            'last_name': fields['last_name'],
-            'default': True
-        }
-        c.addresses = [shopify.Address(address_data)]
+        # Only attach address if we have at least a street — empty addresses cause Shopify to reject new customers
+        if fields['street']:
+            sanitized_phone = re.sub(r'[^\d+\-]', '', fields['phone']) if fields['phone'] else ''
+            address_data = {
+                'address1': fields['street'],
+                'city': fields['city'],
+                'zip': fields['zip'],
+                'country': fields['address_country'],
+                'company': fields['shopify_company'],
+                'phone': sanitized_phone,
+                'first_name': fields['first_name'],
+                'last_name': fields['last_name'],
+                'default': True
+            }
+            c.addresses = [shopify.Address(address_data)]
+        else:
+            address_data = {}  # No address — avoids Shopify rejecting new customers with empty fields
 
         tags_str = getattr(c, 'tags', '')
         current_tags = [t.strip() for t in tags_str.split(',')] if tags_str else []
