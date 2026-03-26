@@ -455,6 +455,22 @@
                         <div class="section-header">🔐 B2B Login Settings</div>
                         <div class="row">
                             <div class="col-md-6">
+                                <label class="form-label-sm">Custom Storefront Domain
+                                    <span class="text-muted fw-normal" style="font-size:11px;">
+                                        — e.g. worthyproducts.nz (without https://)
+                                    </span>
+                                </label>
+                                <input type="text"
+                                       class="form-control"
+                                       id="customStorefrontDomain"
+                                       placeholder="e.g. worthyproducts.nz"
+                                       value="{{ config.custom_storefront_domain or '' }}">
+                                <div class="text-muted mt-1" style="font-size:12px;">
+                                    Used to allow your custom domain to call the B2B login API.
+                                </div>
+                            </div>
+
+                            <div class="col-md-6">
                                 <label class="form-label-sm">Store Contact Email
                                     <span class="text-muted fw-normal" style="font-size:11px;">
                                         — shown as Reply-To in password setup emails sent to your customers
@@ -1044,7 +1060,7 @@ document.addEventListener("DOMContentLoaded", function() {
     setCheck('custSyncVat', SAVED_SETTINGS.cust_sync_vat);
     setCheck('custSyncSalesRep', SAVED_SETTINGS.cust_sync_salesrep);
 
-    setVal('smtpHost', SAVED_SETTINGS.smtp_host || '');
+    setVal('customStorefrontDomain', SAVED_SETTINGS.custom_storefront_domain || '');
     setVal('smtpPort', SAVED_SETTINGS.smtp_port || '465');
     setVal('smtpUser', SAVED_SETTINGS.smtp_user || '');
     // Never pre-fill password for security
@@ -1194,6 +1210,7 @@ function saveSettings() {
         alert_threshold: parseInt(document.getElementById('alertThreshold').value) || 50,
 
         // B2B Email SMTP Setup 
+        custom_storefront_domain: document.getElementById('customStorefrontDomain').value.trim(),
         smtp_host: document.getElementById('smtpHost').value.trim(),
         smtp_port: document.getElementById('smtpPort').value,
         smtp_user: document.getElementById('smtpUser').value.trim(),
