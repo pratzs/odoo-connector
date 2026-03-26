@@ -188,7 +188,7 @@ def sync_customers_master(shop_url):
                 if is_group_parent and not parent_info:
                     continue
 
-                if parent_info:
+                if parent_info and group_whitelist:
                     parent_name = parent_info[1]
                     is_whitelisted = any(g in parent_name.lower() for g in group_whitelist)
                     if not is_whitelisted: continue
