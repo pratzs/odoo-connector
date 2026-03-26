@@ -197,10 +197,20 @@ class OdooClient:
         data = self.models.execute_kw(self.db, self.uid, self.password, 'product.public.category', 'read', [category_ids[0]], {'fields': ['name']})
         return data[0]['name'] if data else None
 
-    def get_tag_names(self, tag_ids):
-        if not tag_ids: return []
-        data = self.models.execute_kw(self.db, self.uid, self.password, 'product.tag', 'read', [tag_ids], {'fields': ['name']})
+    def get_tag_names(self, tag_ids, model='res.partner.category'):
+    """
+    Returns tag names for the given IDs.
+    Defaults to res.partner.category (customer tags).
+    Pass model='product.tag' for product tags.
+    """
+    if not tag_ids: return []
+    try:
+        data = self.models.execute_kw(self.db, self.uid, self.password,
+            model, 'read', [tag_ids], {'fields': ['name']})
         return [t['name'] for t in data]
+    except Exception as e:
+        print(f"Tag fetch error ({model}): {e}")
+        return []
 
     def get_product_image(self, product_id):
         data = self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'read', [product_id], {'fields': ['image_1920']})
