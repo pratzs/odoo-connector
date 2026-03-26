@@ -1887,10 +1887,10 @@ def run_schedule():
                 
                # 5. Master Customer Sync
                 if not conn.get(f"last_cust_sync_{shop_url}"):
-                    # SLOW LANE
-                    q_default.enqueue(sync_customers_master, shop_url, job_timeout=1200)
-                    conn.setex(f"last_cust_sync_{shop_url}", 43200, "done")  # Every 12 hours (twice daily)
-
+                # SLOW LANE
+                q_default.enqueue(sync_customers_master, shop_url, job_timeout=3600)
+                conn.setex(f"last_cust_sync_{shop_url}", 43200, "done")  # Every 12 hours (twice daily)
+               
                 # 6. Master Product Sync
                 if not conn.get(f"last_prod_sync_{shop_url}"):
                     # SLOW LANE
