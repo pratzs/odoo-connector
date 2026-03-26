@@ -235,7 +235,12 @@ def _sync_single_customer(p, fields, shop_url, odoo):
         if fields['metafields']:
             c.metafields = fields['metafields']
 
-        c.save()
+        save_result = c.save()
+
+        # Detailed debug log to catch silent failures
+        log_event('Customer Sync', 'Info',
+            f"Save result for {email}: result={save_result}, id={c.id}, errors={c.errors.full_messages() if c.errors else 'none'}",
+            shop_url=shop_url)
 
         # Check if Shopify actually accepted the save
         if c.errors and c.errors.full_messages():
