@@ -1373,8 +1373,6 @@ def trigger_full_customer_sync():
     if not shop_url: return jsonify({"message": "Error: Missing shop parameter"}), 400
 
     from services.customers import sync_all_customers_absolute_master
-    # SLOW LANE (Massive Job)
-    from app import q_default
     job = q_default.enqueue(sync_all_customers_absolute_master, shop_url, job_timeout=3600)
     
     return jsonify({"message": f"Full Customer Resync Queued. This will take a while. (Job: {job.get_id()})"})
@@ -1891,7 +1889,7 @@ def run_schedule():
                 if not conn.get(f"last_cust_sync_{shop_url}"):
                     # SLOW LANE
                     q_default.enqueue(sync_customers_master, shop_url, job_timeout=1200)
-                    conn.setex(f"last_cust_sync_{shop_url}", 86400, "done")
+                    conn.setex(f"last_cust_sync_{shop_url}", 43200, "done")  # Every 12 hours (twice daily)
 
                 # 6. Master Product Sync
                 if not conn.get(f"last_prod_sync_{shop_url}"):
