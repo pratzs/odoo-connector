@@ -304,6 +304,11 @@ def sync_customers_master(shop_url):
         except Exception:
             last_run = '2000-01-01 00:00:00'
 
+        # CRITICAL: Save timestamp NOW before processing starts.
+        # If the worker is killed halfway, next run still moves forward
+        # instead of reprocessing thousands of customers again.
+        set_config('last_customer_sync_time', current_run_time, shop_url=shop_url)
+
         domain = [
             ('write_date', '>', last_run),
             ('active', '=', True),
@@ -369,10 +374,8 @@ def sync_customers_master(shop_url):
             offset += limit
             log_event('Customer Sync', 'Info', f"Processed batch {offset}...", shop_url=shop_url)
 
-        set_config('last_customer_sync_time', current_run_time, shop_url=shop_url)
         log_event('Customer Sync', 'Success',
             f"Sync Complete. Processed {synced_count}/{total_found} customers.", shop_url=shop_url)
-
 
 # =====================================================
 # HEAVY SYNC — full catalog, no time filter
