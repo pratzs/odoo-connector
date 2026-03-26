@@ -1,5 +1,6 @@
 import shopify
 import json
+import re
 from datetime import datetime, timedelta
 from models import db, Shop, CustomerMap
 from utils import get_config, log_event, set_config, get_odoo_connection, setup_shopify_session
@@ -155,8 +156,15 @@ def _build_customer_fields(p, group_whitelist, sync_vat, sync_salesrep, odoo):
         staff_note = f"Franchise Site | Odoo ID: {p['id']}"
         context_tags = ["Franchise", "Site"]
 
-    raw_email = p.get('email')
-    email = raw_email if (raw_email and "@" in raw_email) else f"no-email-{p['id']}@pos.local"
+    raw_email = p.get('email') or ''
+    # Extract email from "Name <email>" or ": Name <email>" formats stored in Odoo
+    email_match = re.search(r'[\w._%+\-]+@[\w.\-]+\.[a-zA-Z]{2,}', raw_email)
+    if email_match:
+        email = email_match.group(0).lower()
+    elif raw_email and '@' in raw_email:
+        email = raw_email.strip().lower()
+    else:
+        email = f"no-email-{p['id']}@pos.local"
 
     # Metafields
     metafields = []
@@ -213,16 +221,14 @@ def _sync_single_customer(p, fields, shop_url, odoo):
         c.last_name = fields['last_name']
         c.note = fields['note']
         # Sanitise phone — remove spaces, keep only +, digits, hyphens
-        raw_phone = fields['phone']
-        import re
-        c.phone = re.sub(r'[^\d+\-]', '', raw_phone) if raw_phone else ''
+        c.phone = re.sub(r'[^\d+\-]', '', fields['phone']) if fields['phone'] else ''
         c.verified_email = True
 
         address_data = {
             'address1': fields['street'],
             'city': fields['city'],
             'zip': fields['zip'],
-            'country_code': fields['address_country'],
+            'country': fields['address_country'],  # Full name e.g. "New Zealand" — Shopify accepts this
             'company': fields['shopify_company'],
             'phone': fields['phone'],
             'first_name': fields['first_name'],
@@ -238,26 +244,7 @@ def _sync_single_customer(p, fields, shop_url, odoo):
         if fields['metafields']:
             c.metafields = fields['metafields']
 
-        save_result = c.save()
-
-        # Detailed debug log to catch silent failures
-        log_event('Customer Sync', 'Info',
-            f"Save result for {email}: result={save_result}, id={c.id}, errors={c.errors.full_messages() if c.errors else 'none'}",
-            shop_url=shop_url)
-
-        # Check if Shopify actually accepted the save
-        if c.errors and c.errors.full_messages():
-            log_event('Customer Sync', 'Error',
-                f"Shopify rejected {email}: {c.errors.full_messages()}",
-                shop_url=shop_url)
-            return False
-
-        # Guard: if c.id is missing, save silently failed
-        if not c.id:
-            log_event('Customer Sync', 'Error',
-                f"Shopify save returned no ID for {email} — likely a duplicate or validation error.",
-                shop_url=shop_url)
-            return False
+        c.save()
 
         # Save mapping
         if not CustomerMap.query.filter_by(shopify_customer_id=str(c.id), shop_url=shop_url).first():
