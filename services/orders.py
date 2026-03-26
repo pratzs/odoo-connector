@@ -39,7 +39,7 @@ def process_order_data(data, odoo_client, shop_url):
 
        # --- GUARD 1: SQL DATABASE CHECK ---
         try:
-            exists = ProcessedOrder.query.get((shopify_id, shop_url))
+            exists = db.session.get(ProcessedOrder, (shopify_id, shop_url))
             if exists:
                 return True, "Skipped: Found in Local Lock (Already Processed)"
         except: pass
