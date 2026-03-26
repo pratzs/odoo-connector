@@ -1826,103 +1826,101 @@ def cleanup_old_logs():
             print(f"Maintenance Error: {e}")
 
 # --- SCHEDULER LOGIC (Runs in Clock Process) ---
+
+def _run_shop_schedule(shop_url):
+    """
+    Runs all scheduled tasks for a single shop.
+    Isolated so one shop crashing doesn't affect other shops.
+    """
+    # LOG FLUSHER (Every 10 mins)
+    if not conn.get(f"last_log_flush_{shop_url}"):
+        try:
+            count_key = f"log_buffer_products_{shop_url}"
+            pending_count = conn.get(count_key)
+            if pending_count and int(pending_count) > 0:
+                log_event('Product', 'Success',
+                    f"Webhook Batch: Updated {int(pending_count)} products in the last 10 minutes.",
+                    shop_url=shop_url)
+                conn.delete(count_key)
+            conn.setex(f"last_log_flush_{shop_url}", 600, "done")
+        except Exception as e:
+            print(f"Log Flush Error for {shop_url}: {e}")
+
+    # 1. Inventory Sync (Every 30 mins)
+    if not conn.get(f"last_inv_{shop_url}"):
+        q_critical.enqueue(scheduled_inventory_sync, shop_url, job_timeout=3600)
+        conn.setex(f"last_inv_{shop_url}", 1800, "done")
+        print(f"⏰ Triggered Inventory Sync for {shop_url}")
+
+    # 2. Fulfillment Sync (Every hour)
+    if not conn.get(f"last_ful_{shop_url}"):
+        q_critical.enqueue(sync_odoo_fulfillments, shop_url, job_timeout=600)
+        conn.setex(f"last_ful_{shop_url}", 3600, "done")
+
+    # 3. Cancellation Sync (Every 5 mins)
+    if not conn.get(f"last_cancel_{shop_url}"):
+        q_critical.enqueue(sync_odoo_cancellations, shop_url, job_timeout=600)
+        conn.setex(f"last_cancel_{shop_url}", 300, "done")
+
+    # 4. Return Sync (Every hour)
+    if not conn.get(f"last_ret_sync_{shop_url}"):
+        q_critical.enqueue(sync_odoo_returns, shop_url, job_timeout=600)
+        conn.setex(f"last_ret_sync_{shop_url}", 3600, "done")
+
+    # 5. Customer Sync (Every 12 hours)
+    if not conn.get(f"last_cust_sync_{shop_url}"):
+        q_default.enqueue(sync_customers_master, shop_url, job_timeout=3600)
+        conn.setex(f"last_cust_sync_{shop_url}", 43200, "done")
+
+    # 6. Product Sync (Every 24 hours)
+    if not conn.get(f"last_prod_sync_{shop_url}"):
+        q_default.enqueue(sync_products_master, shop_url, job_timeout=3600)
+        conn.setex(f"last_prod_sync_{shop_url}", 86400, "done")
+
+    # 7. Monthly Full Catalog Sync (1st of month, midnight NZT)
+    try:
+        nz_tz = pytz.timezone('Pacific/Auckland')
+        nz_time = datetime.now(nz_tz)
+        if nz_time.day == 1 and nz_time.hour == 0:
+            month_key = f"full_sync_{nz_time.year}_{nz_time.month}_{shop_url}"
+            if not conn.get(month_key):
+                from services.products import sync_all_products_absolute_master
+                q_default.enqueue(sync_all_products_absolute_master, shop_url, job_timeout=3600)
+                conn.setex(month_key, 86400 * 31, "done")
+                log_event('System', 'Info',
+                    "Automated Monthly Full Catalog Sync Triggered at Midnight NZT.",
+                    shop_url=shop_url)
+    except Exception as e:
+        print(f"Monthly Sync Error for {shop_url}: {e}")
+
+
 def run_schedule():
     """
     Robust Scheduler: Uses Redis keys to track job timing.
-    Includes Log Flusher (10m Interval) to aggregate webhook logs.
+    Each shop runs in isolation — one crash cannot affect others.
     """
     print("🕒 Scheduler Started")
-    
+
     while True:
-        with app.app_context():
-            # 1. Fetch all active shops
-            active_shops = Shop.query.filter_by(is_active=True).all()
-            
-            for shop in active_shops:
-                shop_url = shop.shop_url
-                
-                # --- LOG FLUSHER (Runs every 10 mins = 600s) ---
-                if not conn.get(f"last_log_flush_{shop_url}"):
+        try:
+            with app.app_context():
+                # 1. Per-shop tasks
+                active_shops = Shop.query.filter_by(is_active=True).all()
+                for shop in active_shops:
                     try:
-                        count_key = f"log_buffer_products_{shop_url}"
-                        pending_count = conn.get(count_key)
-                        
-                        if pending_count and int(pending_count) > 0:
-                            log_event('Product', 'Success', f"Webhook Batch: Updated {int(pending_count)} products in the last 10 minutes.", shop_url=shop_url)
-                            conn.delete(count_key)
-                        
-                        conn.setex(f"last_log_flush_{shop_url}", 600, "done")
-                        
+                        _run_shop_schedule(shop.shop_url)
                     except Exception as e:
-                        print(f"Log Flush Error: {e}")
+                        print(f"Scheduler Error for {shop.shop_url}: {e}")
 
-                # --- A. HIGH FREQUENCY TASKS ---
-                
-                # 1. Inventory Sync (Every 30 mins)
-                if not conn.get(f"last_inv_{shop_url}"):
-                    # CRITICAL LANE (Fast)
-                    q_critical.enqueue(scheduled_inventory_sync, shop_url, job_timeout=3600)
-                    conn.setex(f"last_inv_{shop_url}", 1800, "done") 
-                    print(f"⏰ Triggered Inventory Sync for {shop_url}")
+                # 2. Global maintenance — log cleanup (once per day)
+                if not conn.get("last_log_cleanup"):
+                    cleanup_old_logs()
+                    conn.setex("last_log_cleanup", 86400, "done")
 
-                # 2. Fulfillment Sync
-                if not conn.get(f"last_ful_{shop_url}"):
-                    # CRITICAL LANE
-                    q_critical.enqueue(sync_odoo_fulfillments, shop_url, job_timeout=600)
-                    conn.setex(f"last_ful_{shop_url}", 3600, "done")
-                    
-                # 3. Cancellation Sync
-                if not conn.get(f"last_cancel_{shop_url}"):
-                    # CRITICAL LANE
-                    q_critical.enqueue(sync_odoo_cancellations, shop_url, job_timeout=600)
-                    conn.setex(f"last_cancel_{shop_url}", 300, "done")
+        except Exception as e:
+            # Catch DB connection errors etc. so the clock process never dies
+            print(f"Scheduler outer loop error: {e}")
 
-                # 4. Return Sync
-                if not conn.get(f"last_ret_sync_{shop_url}"):
-                    # CRITICAL LANE
-                    q_critical.enqueue(sync_odoo_returns, shop_url, job_timeout=600)
-                    conn.setex(f"last_ret_sync_{shop_url}", 3600, "done")
-
-                # --- B. DAILY TASKS (24 Hours = 86400s) ---
-                
-               # 5. Master Customer Sync
-                if not conn.get(f"last_cust_sync_{shop_url}"):
-                    # SLOW LANE
-                    q_default.enqueue(sync_customers_master, shop_url, job_timeout=3600)
-                    conn.setex(f"last_cust_sync_{shop_url}", 43200, "done")  # Every 12 hours (twice daily)
-               
-                # 6. Master Product Sync
-                if not conn.get(f"last_prod_sync_{shop_url}"):
-                    # SLOW LANE
-                    q_default.enqueue(sync_products_master, shop_url, job_timeout=3600)
-                    conn.setex(f"last_prod_sync_{shop_url}", 86400, "done")
-
-            # --- C. MONTHLY FULL CATALOG SYNC (1st of Month, Midnight NZT) ---
-                try:
-                    nz_tz = pytz.timezone('Pacific/Auckland')
-                    nz_time = datetime.now(nz_tz)
-                    
-                    # Check if it is the 1st day of the month AND the hour is 0 (12:00 AM)
-                    if nz_time.day == 1 and nz_time.hour == 0:
-                        month_key = f"full_sync_{nz_time.year}_{nz_time.month}_{shop_url}"
-                        if not conn.get(month_key):
-                            from services.products import sync_all_products_absolute_master
-                            q_default.enqueue(sync_all_products_absolute_master, shop_url, job_timeout=3600)
-                            
-                            # Lock for 31 days so it absolutely cannot run again this month
-                            conn.setex(month_key, 86400 * 31, "done") 
-                            log_event('System', 'Info', f"Automated Monthly Full Catalog Sync Triggered at Midnight NZT.", shop_url=shop_url)
-                except Exception as e:
-                    print(f"Monthly Sync Scheduler Error: {e}")
-
-            # --- D. GLOBAL MAINTENANCE ---
-            
-            # 7. Cleanup Logs (Once per day)
-            if not conn.get("last_log_cleanup"):
-                cleanup_old_logs()
-                conn.setex("last_log_cleanup", 86400, "done") 
-
-        # Heartbeat sleep
         time.sleep(10)
 
 def sync_images_only_manual(shop_url):
