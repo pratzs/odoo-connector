@@ -141,8 +141,16 @@ def sync_customers_master(shop_url):
         group_whitelist = [g.strip().lower() for g in raw_groups.split(',') if g.strip()]
 
         # 4. TIMESTAMP & DOMAIN
-        last_run = get_config('last_customer_sync_time', '2000-01-01 00:00:00', shop_url=shop_url)
+        last_run_raw = get_config('last_customer_sync_time', '2000-01-01 00:00:00', shop_url=shop_url)
         current_run_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Safety buffer: always look back 2 extra hours to catch customers
+        # created just before the previous sync completed
+        try:
+            last_run_dt = datetime.strptime(last_run_raw, '%Y-%m-%d %H:%M:%S') - timedelta(hours=24)
+            last_run = last_run_dt.strftime('%Y-%m-%d %H:%M:%S')
+        except:
+            last_run = '2000-01-01 00:00:00'
 
         domain = [
             ('write_date', '>', last_run), 
