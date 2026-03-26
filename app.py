@@ -1283,35 +1283,6 @@ def run_initial_category_import():
     return jsonify({"message": "Category Sync Job Queued"})
 
 
-# --- 1. NEW HELPER: Background Job for Products ---
-# def background_product_sync(shop_url, product_data):
-#     """
-#     Runs inside the Worker Process. 
-#     UPDATED: Aggregates success logs to Redis instead of spamming the DB.
-#     """
-#     with app.app_context():
-#         # Connect
-#         odoo = get_odoo_connection(shop_url)
-#         if not odoo:
-#             log_event('Product', 'Error', "Auto Sync Failed: No Odoo Connection.", shop_url=shop_url)
-#             return
-
-#         product_title = product_data.get('title', 'Unknown')
-#         try:
-#             # Sync Logic
-#             process_product_data(product_data, odoo, shop_url=shop_url)
-            
-#             # --- AGGREGATION LOGIC ---
-#             # Key format: log_buffer_products_{shop_url}
-#             redis_key = f"log_buffer_products_{shop_url}"
-#             conn.incr(redis_key)
-#             # -------------------------
-            
-#         except Exception as e:
-#             # We still log errors immediately because they are important
-#             log_event('Product', 'Error', f"Webhook Failed for '{product_title}': {str(e)}", shop_url=shop_url)
-
-
 @app.route('/sync/products/force_catchup', methods=['POST'])
 @require_shopify_session
 def trigger_force_catchup():
@@ -1322,15 +1293,6 @@ def trigger_force_catchup():
     from services.products import sync_missing_new_products
     job = q_default.enqueue(sync_missing_new_products, shop_url, job_timeout=3600)
     return jsonify({"message": f"Map Repair queued — scanning all products for missing IDs (Job: {job.get_id()})"})
-
-def background_product_sync(shop_url, product_data):
-    """
-    Runs inside the Worker Process. 
-    DISABLED: Odoo is Master. We ignore incoming Shopify product data.
-    """
-    # Simply return without doing anything. 
-    # This keeps the worker queue fast and clean.
-    return
 
 
 # --- 3. UPDATED ROUTE: Master Sync ---
