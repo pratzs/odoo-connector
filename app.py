@@ -156,10 +156,10 @@ app.secret_key = os.getenv('FLASK_SECRET_KEY')
 @app.after_request
 def apply_multipass_cors(response):
     if request.path.startswith('/multipass/'):
-        response.headers['Access-Control-Allow-Origin']  = '*'
-        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-        response.headers['Access-Control-Max-Age']       = '600'
+        origin = request.headers.get('Origin', '')
+        if _is_allowed_origin(origin):
+            response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Vary'] = 'Origin'
     return response
 
 database_url = os.getenv('DATABASE_URL', 'sqlite:///local.db')
@@ -2408,10 +2408,41 @@ def _clear_rate_limit(identifier):
 #  MULTIPASS LOGIN ROUTES
 # ==========================================
 
+def _is_allowed_origin(origin):
+    """
+    Checks if the request origin belongs to a known active shop.
+    Supports both myshopify.com domains and custom storefront domains.
+    """
+    if not origin:
+        return False
+    try:
+        # Strip protocol to get bare domain
+        bare_origin = origin.replace('https://', '').replace('http://', '').rstrip('/')
+
+        # Check against all active shops in DB
+        active_shops = Shop.query.filter_by(is_active=True).all()
+        for shop in active_shops:
+            # Match myshopify domain directly
+            if shop.shop_url and bare_origin == shop.shop_url:
+                return True
+            # Match any custom domain configured for this shop
+            custom_domain = get_config('custom_storefront_domain', None, shop_url=shop.shop_url)
+            if custom_domain:
+                bare_custom = custom_domain.replace('https://', '').replace('http://', '').rstrip('/')
+                if bare_origin == bare_custom or bare_origin == f"www.{bare_custom}":
+                    return True
+        return False
+    except Exception:
+        return False
+
+
 def _multipass_cors(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
+    origin = request.headers.get('Origin', '')
+    if _is_allowed_origin(origin):
+        response.headers['Access-Control-Allow-Origin'] = origin
     response.headers['Access-Control-Allow-Methods'] = 'POST, GET, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    response.headers['Vary'] = 'Origin'
     return response
 
 @app.route('/multipass/login', methods=['POST', 'OPTIONS'])
