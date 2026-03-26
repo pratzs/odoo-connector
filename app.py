@@ -2368,6 +2368,43 @@ def clear_failed_jobs():
     return jsonify({'success': True, 'message': f'Cleared {total_cleared} failed jobs (both queues).'})
 
 # ==========================================
+#  RATE LIMITING HELPER (Redis-based)
+# ==========================================
+def _check_rate_limit(identifier, max_attempts=5, window_seconds=900):
+    """
+    Blocks an IP or identifier after max_attempts failures within window_seconds.
+    Returns (allowed: bool, remaining: int)
+    Window default: 15 minutes (900s)
+    """
+    key = f"rate_limit:{identifier}"
+    try:
+        attempts = conn.get(key)
+        count = int(attempts) if attempts else 0
+        if count >= max_attempts:
+            return False, 0
+        return True, max_attempts - count
+    except Exception:
+        return True, max_attempts  # Fail open — don't block if Redis is down
+
+def _record_failed_attempt(identifier, window_seconds=900):
+    """Increments the failure counter for an identifier."""
+    key = f"rate_limit:{identifier}"
+    try:
+        pipe = conn.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, window_seconds)
+        pipe.execute()
+    except Exception:
+        pass
+
+def _clear_rate_limit(identifier):
+    """Clears the failure counter on successful login."""
+    try:
+        conn.delete(f"rate_limit:{identifier}")
+    except Exception:
+        pass
+        
+# ==========================================
 #  MULTIPASS LOGIN ROUTES
 # ==========================================
 
@@ -2381,19 +2418,40 @@ def _multipass_cors(response):
 def multipass_login():
     if request.method == 'OPTIONS':
         return _multipass_cors(jsonify({}))
+
     data = request.get_json(silent=True) or request.form
-    shop_url   = data.get('shop_url') or data.get('shop')
-    odoo_id    = data.get('odoo_id', '').strip()
-    password   = data.get('password', '')
+    shop_url = data.get('shop_url') or data.get('shop')
+    odoo_id  = data.get('odoo_id', '').strip()
+    password = data.get('password', '')
+
     if not shop_url:
         return _multipass_cors(jsonify({'success': False, 'error': 'Missing shop_url'})), 400
+
+    # Rate limiting — keyed by IP + odoo_id to prevent brute force
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr or 'unknown').split(',')[0].strip()
+    rate_key = f"{client_ip}:{odoo_id}"
+    allowed, remaining = _check_rate_limit(rate_key)
+
+    if not allowed:
+        log_event('Multipass', 'Warning',
+            f"Rate limit hit for Odoo ID {odoo_id} from {client_ip}",
+            shop_url=shop_url)
+        return _multipass_cors(jsonify({
+            'success': False,
+            'error': 'Too many failed attempts. Please wait 15 minutes and try again.'
+        })), 429
+
     try:
         from services.multipass import do_multipass_login
         success, result = do_multipass_login(odoo_id, password, shop_url)
+
         if success:
+            _clear_rate_limit(rate_key)  # Reset counter on success
             return _multipass_cors(jsonify({'success': True, 'redirect_url': result}))
         else:
+            _record_failed_attempt(rate_key)  # Increment counter on failure
             return _multipass_cors(jsonify({'success': False, 'error': result}))
+
     except Exception as e:
         log_event('Multipass', 'Error', f"Login route error: {e}", shop_url=shop_url)
         return _multipass_cors(jsonify({'success': False, 'error': 'Unexpected error. Please try again.'})), 500
