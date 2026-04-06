@@ -1477,6 +1477,43 @@ def import_selected_orders():
 
     return jsonify({"message": f"Batch Complete. Synced: {synced}"})
 
+@app.route('/sync/orders/sync_by_name', methods=['POST'])
+@require_shopify_session
+def sync_order_by_name():
+    data = request.json
+    order_name = data.get('order_name', '').strip()
+    shop_url = data.get('shop_url')
+
+    if not order_name:
+        return jsonify({"message": "Error: No order number provided"}), 400
+
+    # Ensure it has the # prefix
+    if not order_name.startswith('#'):
+        order_name = f"#{order_name}"
+
+    if not setup_shopify_session(shop_url):
+        return jsonify({"message": "Auth Failed"}), 401
+
+    odoo = get_odoo_connection(shop_url)
+    if not odoo:
+        return jsonify({"message": "Odoo connection failed"}), 500
+
+    try:
+        orders = shopify.Order.find(name=order_name, status='any')
+        if not orders:
+            return jsonify({"message": f"Order {order_name} not found in Shopify"})
+        
+        order = orders[0]
+        result = process_order_data(order.to_dict(), odoo, shop_url=shop_url)
+        success = result[0] if isinstance(result, tuple) else result
+        msg = result[1] if isinstance(result, tuple) else ("Synced" if success else "Failed")
+        return jsonify({"message": f"Order {order_name}: {msg}"})
+
+    except Exception as e:
+        log_event('System', 'Error', f"Manual sync failed for {order_name}: {e}", shop_url=shop_url)
+        return jsonify({"message": f"Error: {str(e)}"}), 500
+
+
 
 @app.route('/sync/status')
 def get_sync_status():
