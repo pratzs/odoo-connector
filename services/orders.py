@@ -80,7 +80,7 @@ def process_order_data(data, odoo_client, shop_url):
             
             if not partner:
                 # NEW CUSTOMER: Only create if the email does not exist in Odoo at all
-                company_name = bill_addr.get('company', '').strip()
+                company_name = (bill_addr.get('company') or '').strip()
                 b2b_data = data.get('company')
                 if b2b_data and isinstance(b2b_data, dict) and b2b_data.get('name'):
                     company_name = b2b_data.get('name').strip()
