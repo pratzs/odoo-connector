@@ -149,17 +149,14 @@ class OdooClient:
         ]
         if company_id:
             # Correctly structure the OR condition for Company
-            domain.append('|')
-            domain.append(['product_tmpl_id.company_id', '=', int(company_id)])
-            domain.append(['product_tmpl_id.company_id', '=', False])
-
+            domain.append(['company_id', '=', int(company_id)])
             
         ids = self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search', [domain])
         return ids[0] if ids else None
 
     def check_product_exists_by_sku(self, sku, company_id=None):
         domain = [['default_code', '=', sku], '|', ['active', '=', True], ['active', '=', False]]
-        if company_id: domain.extend(['|', ['product_tmpl_id.company_id', '=', int(company_id)], ['product_tmpl_id.company_id', '=', False]])
+        if company_id: domain.append(['company_id', '=', int(company_id)])
         ids = self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search', [domain])
         return ids[0] if ids else None
 
