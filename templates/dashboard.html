@@ -746,6 +746,13 @@
                     <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body">
+                    <div class="d-flex gap-2 mb-3">
+                        <input type="text" id="manualOrderInput" class="form-control"
+                               placeholder="Order # e.g. 4159" style="max-width: 200px;">
+                        <button class="btn btn-primary" onclick="syncOrderByName()">Fetch & Sync</button>
+                        <span id="manualSyncResult" class="align-self-center text-muted small"></span>
+                    </div>
+
                     <div class="table-responsive">
                         <table class="table table-hover table-sm">
                             <thead>
@@ -1294,6 +1301,22 @@ function runBatchImport() {
         if(modal) modal.hide(); showToast(data.message); setTimeout(() => location.reload(), 2000);
     });
 }
+
+        function syncOrderByName() {
+    const name = document.getElementById('manualOrderInput').value.trim();
+    const result = document.getElementById('manualSyncResult');
+    if (!name) { result.textContent = 'Enter an order number first.'; return; }
+    result.textContent = 'Syncing...';
+    fetch('/sync/orders/sync_by_name', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ order_name: name, shop_url: CURRENT_SHOP_URL })
+    })
+    .then(r => r.json())
+    .then(data => { result.textContent = data.message; })
+    .catch(() => { result.textContent = 'Network error'; });
+}
+
 
         // --- UNMAPPED PRODUCTS MODAL ---
 const unmappedModalElement = document.getElementById('unmappedModal');
