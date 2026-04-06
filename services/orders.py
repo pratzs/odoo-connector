@@ -163,13 +163,14 @@ def process_order_data(data, odoo_client, shop_url):
                     is_unit_variant = True
 
                 product_id = None
+                ctx = {'allowed_company_ids': [int(company_id)], 'company_id': int(company_id)} if company_id else {}
                 p_domain = [['default_code', '=', sku]]
                 if company_id:
                     p_domain += ['|', ['product_tmpl_id.company_id', '=', False], ['product_tmpl_id.company_id', '=', int(company_id)]]
                 
                 try:
                     p_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                        'product.product', 'search', [p_domain], {'limit': 1})
+                        'product.product', 'search', [p_domain], {'limit': 1, 'context': ctx})
                     if p_ids: product_id = p_ids[0]
                 except: pass
 
@@ -180,7 +181,7 @@ def process_order_data(data, odoo_client, shop_url):
                             if company_id: new_p['company_id'] = int(company_id)
                             odoo.create_product(new_p)
                             p_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                                'product.product', 'search', [p_domain], {'limit': 1})
+                                'product.product', 'search', [p_domain], {'limit': 1, 'context': ctx})
                             if p_ids: product_id = p_ids[0]
                         except: pass
 
@@ -192,12 +193,13 @@ def process_order_data(data, odoo_client, shop_url):
                         base_domain += ['|', ['product_tmpl_id.company_id', '=', False], ['product_tmpl_id.company_id', '=', int(company_id)]]
                     try:
                         p_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                            'product.product', 'search', [base_domain], {'limit': 1})
+                            'product.product', 'search', [base_domain], {'limit': 1, 'context': ctx})
                         if p_ids:
                             product_id = p_ids[0]
                             sku = base_sku
                             is_unit_variant = True
                     except: pass
+
 
                 
                 if product_id:
