@@ -142,15 +142,13 @@ class OdooClient:
 
     # --- PRODUCT METHODS ---
 
-    def search_product_by_sku(self, sku, company_id=None):
+        def search_product_by_sku(self, sku, company_id=None):
         domain = [
             ['default_code', '=', sku], 
             ['active', '=', True]
         ]
         if company_id:
-            # Correctly structure the OR condition for Company
             domain.append(['company_id', '=', int(company_id)])
-            
         ids = self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search', [domain])
         return ids[0] if ids else None
 
@@ -159,6 +157,7 @@ class OdooClient:
         if company_id: domain.append(['company_id', '=', int(company_id)])
         ids = self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search', [domain])
         return ids[0] if ids else None
+
 
     def search_product_by_name(self, name, company_id=None):
         domain = [['name', 'ilike', name], ['active', '=', True]]
