@@ -127,9 +127,6 @@ def process_order_data(data, odoo_client, shop_url):
             shipping_id = main_partner_id
             if ship_addr:
                 try:
-                    # This function checks Odoo for a child address matching the street/city.
-                    # If it exists, it uses it. If it doesn't, it creates a new "Delivery Address" 
-                    # under the parent customer so your records stay clean!
                     del_id = odoo.find_or_create_child_address(main_partner_id, ship_addr, type='delivery')
                     if del_id: 
                         shipping_id = del_id
@@ -151,7 +148,9 @@ def process_order_data(data, odoo_client, shop_url):
             except Exception as e:
                 print(f"UOM Lookup Error: {e}")
 
-                        lines = []
+            ctx = {'allowed_company_ids': [int(company_id)], 'company_id': int(company_id)} if company_id else {}
+
+            lines = []
             for item in data.get('line_items', []):
                 raw_sku = item.get('sku')
                 if not raw_sku: continue
@@ -163,11 +162,10 @@ def process_order_data(data, odoo_client, shop_url):
                     is_unit_variant = True
 
                 product_id = None
-                ctx = {'allowed_company_ids': [int(company_id)], 'company_id': int(company_id)} if company_id else {}
                 p_domain = [['default_code', '=', sku]]
                 if company_id:
                     p_domain += [['company_id', '=', int(company_id)]]
-
+                
                 try:
                     p_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                         'product.product', 'search', [p_domain], {'limit': 1, 'context': ctx})
@@ -200,7 +198,6 @@ def process_order_data(data, odoo_client, shop_url):
                             is_unit_variant = True
                     except: pass
 
-                
                 if product_id:
                     price = float(item.get('price', 0))
                     qty = int(item.get('quantity', 1))
@@ -224,22 +221,19 @@ def process_order_data(data, odoo_client, shop_url):
                 if cost >= 0:
                     s_title = ship_line.get('title', 'Shipping')
                     
-                    # ✅ FIX 2: Strict Company-Compatible Search for Shipping
                     sp_id = None
-                    # Try Name First
                     s_domain = [['name', '=', s_title]]
-                    if company_id: s_domain += ['|', ['company_id', '=', False], ['company_id', '=', int(company_id)]]
+                    if company_id: s_domain += [['company_id', '=', int(company_id)]]
                     try:
-                        s_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search', [s_domain], {'limit': 1})
+                        s_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search', [s_domain], {'limit': 1, 'context': ctx})
                         if s_ids: sp_id = s_ids[0]
                     except: pass
 
-                    # Try SHIP_FEE SKU Second
                     if not sp_id:
                         s_sku_domain = [['default_code', '=', 'SHIP_FEE']]
-                        if company_id: s_sku_domain += ['|', ['company_id', '=', False], ['company_id', '=', int(company_id)]]
+                        if company_id: s_sku_domain += [['company_id', '=', int(company_id)]]
                         try:
-                            s_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search', [s_sku_domain], {'limit': 1})
+                            s_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search', [s_sku_domain], {'limit': 1, 'context': ctx})
                             if s_ids: sp_id = s_ids[0]
                         except: pass
 
@@ -248,16 +242,13 @@ def process_order_data(data, odoo_client, shop_url):
                             sv = {'name': s_title, 'type': 'service', 'list_price': 0.0, 'default_code': 'SHIP_FEE'}
                             if company_id: sv['company_id'] = int(company_id)
                             odoo.create_product(sv)
-                            
-                            # Re-search strictly
-                            s_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search', [s_sku_domain], {'limit': 1})
+                            s_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search', [s_sku_domain], {'limit': 1, 'context': ctx})
                             if s_ids: sp_id = s_ids[0]
                         except: pass
 
                     if sp_id: lines.append((0, 0, {'product_id': sp_id, 'product_uom_qty': 1, 'price_unit': cost, 'name': s_title, 'discount': 0.0}))
 
             if not lines:
-                # Release the DB lock so it can be retried later
                 try:
                     lock = ProcessedOrder.query.get((shopify_id, shop_url))
                     if lock:
