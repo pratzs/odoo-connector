@@ -1367,7 +1367,7 @@ def manual_order_fetch():
     
     # 2. Fetch Recent Shopify Orders
     try:
-        orders = shopify.Order.find(limit=20, status='any')
+        orders = shopify.Order.find(limit=50, status='any')
     except Exception as e:
         return jsonify({"orders": [], "error": f"API Error: {str(e)}"})
     
