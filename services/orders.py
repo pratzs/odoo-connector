@@ -151,7 +151,7 @@ def process_order_data(data, odoo_client, shop_url):
             except Exception as e:
                 print(f"UOM Lookup Error: {e}")
 
-            lines = []
+                        lines = []
             for item in data.get('line_items', []):
                 raw_sku = item.get('sku')
                 if not raw_sku: continue
@@ -166,8 +166,8 @@ def process_order_data(data, odoo_client, shop_url):
                 ctx = {'allowed_company_ids': [int(company_id)], 'company_id': int(company_id)} if company_id else {}
                 p_domain = [['default_code', '=', sku]]
                 if company_id:
-                    p_domain += ['|', ['product_tmpl_id.company_id', '=', False], ['product_tmpl_id.company_id', '=', int(company_id)]]
-                
+                    p_domain += [['company_id', '=', int(company_id)]]
+
                 try:
                     p_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                         'product.product', 'search', [p_domain], {'limit': 1, 'context': ctx})
@@ -185,12 +185,12 @@ def process_order_data(data, odoo_client, shop_url):
                             if p_ids: product_id = p_ids[0]
                         except: pass
 
-                # ✅ NEW: If still not found, try stripping the pack suffix (e.g. OBBA24C-6perpack -> OBBA24C)
+                # If still not found, try stripping the pack suffix (e.g. OBBA24C-6perpack -> OBBA24C)
                 if not product_id and '-' in raw_sku and not is_unit_variant:
                     base_sku = raw_sku.rsplit('-', 1)[0]
                     base_domain = [['default_code', '=', base_sku]]
                     if company_id:
-                        base_domain += ['|', ['product_tmpl_id.company_id', '=', False], ['product_tmpl_id.company_id', '=', int(company_id)]]
+                        base_domain += [['company_id', '=', int(company_id)]]
                     try:
                         p_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                             'product.product', 'search', [base_domain], {'limit': 1, 'context': ctx})
@@ -199,7 +199,6 @@ def process_order_data(data, odoo_client, shop_url):
                             sku = base_sku
                             is_unit_variant = True
                     except: pass
-
 
                 
                 if product_id:
