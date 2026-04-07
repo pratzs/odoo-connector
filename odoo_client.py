@@ -142,9 +142,9 @@ class OdooClient:
 
     # --- PRODUCT METHODS ---
 
-        def search_product_by_sku(self, sku, company_id=None):
+    def search_product_by_sku(self, sku, company_id=None):
         domain = [
-            ['default_code', '=', sku], 
+            ['default_code', '=', sku],
             ['active', '=', True]
         ]
         if company_id:
@@ -154,10 +154,10 @@ class OdooClient:
 
     def check_product_exists_by_sku(self, sku, company_id=None):
         domain = [['default_code', '=', sku], '|', ['active', '=', True], ['active', '=', False]]
-        if company_id: domain.append(['company_id', '=', int(company_id)])
+        if company_id:
+            domain.append(['company_id', '=', int(company_id)])
         ids = self.models.execute_kw(self.db, self.uid, self.password, 'product.product', 'search', [domain])
         return ids[0] if ids else None
-
 
     def search_product_by_name(self, name, company_id=None):
         domain = [['name', 'ilike', name], ['active', '=', True]]
