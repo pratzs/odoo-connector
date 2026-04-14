@@ -1168,9 +1168,79 @@ def trigger_fix_variants():
     return jsonify({"message": "Strict Variant Repair Queued."})
 
 
+@app.route('/maintenance/reset_webhooks', methods=['GET'])
+@require_shopify_session
+def reset_webhooks():
+    """
+    NUCLEAR RESET: Deletes ALL existing webhooks then recreates them fresh.
+    Use this when Shopify has paused/failed delivery on existing subscriptions.
+    """
+    shop_url = request.args.get('shop')
+    if not setup_shopify_session(shop_url):
+        return jsonify({"error": "Auth failed"}), 401
+
+    app_host = os.getenv('HOST')
+    if not app_host:
+        return jsonify({"error": "HOST env var missing"}), 500
+
+    target_address = f"{app_host}/webhooks/shopify"
+
+    required_topics = [
+        'orders/create',
+        'orders/updated',
+        'orders/paid',
+        'orders/cancelled',
+        'products/create',
+        'refunds/create',
+        'inventory_levels/update'
+    ]
+
+    deleted = []
+    created = []
+    errors = []
+
+    # Step 1: Delete ALL existing webhooks
+    try:
+        existing_hooks = shopify.Webhook.find()
+        for hook in existing_hooks:
+            try:
+                deleted.append(f"{hook.topic} → {hook.address}")
+                hook.destroy()
+            except Exception as e:
+                errors.append(f"Delete error {hook.topic}: {str(e)}")
+    except Exception as e:
+        errors.append(f"Fetch error: {str(e)}")
+
+    # Step 2: Recreate all required webhooks fresh
+    for topic in required_topics:
+        new_hook = shopify.Webhook()
+        new_hook.topic = topic
+        new_hook.address = target_address
+        new_hook.format = 'json'
+        try:
+            if new_hook.save():
+                created.append(f"✅ {topic} → {target_address}")
+            else:
+                errors.append(f"❌ Failed {topic}: {new_hook.errors.full_messages()}")
+        except Exception as e:
+            errors.append(f"❌ Error {topic}: {str(e)}")
+
+    return jsonify({
+        "message": "Webhook Reset Complete",
+        "deleted": deleted,
+        "created": created,
+        "errors": errors,
+        "target_address": target_address
+    })
+
+
 @app.route('/maintenance/register_webhooks', methods=['GET'])
 @require_shopify_session
 def register_webhooks_manual():
+    """
+    Force delete-and-recreate all required webhooks.
+    No longer skips existing — always destroys and recreates to clear Shopify paused state.
+    """
     shop_url = request.args.get('shop')
     if not setup_shopify_session(shop_url):
         return jsonify({"error": "Auth failed"}), 401
@@ -1184,35 +1254,142 @@ def register_webhooks_manual():
     required_topics = [
         'orders/create',
         'orders/updated',
+        'orders/paid',
         'orders/cancelled',
         'products/create',
         'refunds/create',
-        # 'products/update',
-        'inventory_levels/update' 
+        'inventory_levels/update'
     ]
 
     results = []
     existing_hooks = shopify.Webhook.find()
 
     for topic in required_topics:
-        match = next((h for h in existing_hooks if h.topic == topic and h.address == target_address), None)
-        
-        if not match:
-            new_hook = shopify.Webhook()
-            new_hook.topic = topic
-            new_hook.address = target_address
-            new_hook.format = 'json'
+        # Always destroy existing and recreate — clears any Shopify paused/failed state
+        match = next((h for h in existing_hooks if h.topic == topic), None)
+        if match:
             try:
-                if new_hook.save():
-                    results.append(f"✅ Created {topic}")
-                else:
-                    results.append(f"❌ Failed {topic}: {new_hook.errors.full_messages()}")
+                match.destroy()
+                results.append(f"🗑️ Deleted old {topic}")
             except Exception as e:
-                results.append(f"❌ Error {topic}: {str(e)}")
-        else:
-            results.append(f"⏭️ Exists {topic}")
+                results.append(f"⚠️ Could not delete {topic}: {str(e)}")
+
+        new_hook = shopify.Webhook()
+        new_hook.topic = topic
+        new_hook.address = target_address
+        new_hook.format = 'json'
+        try:
+            if new_hook.save():
+                results.append(f"✅ Created {topic} → {target_address}")
+            else:
+                results.append(f"❌ Failed {topic}: {new_hook.errors.full_messages()}")
+        except Exception as e:
+            results.append(f"❌ Error {topic}: {str(e)}")
 
     return jsonify({"message": "Webhook Registration Complete", "details": results})
+
+
+@app.route('/maintenance/force_schedule', methods=['GET'])
+@require_shopify_session
+def force_schedule():
+    """
+    Force-fires all scheduled sync jobs immediately for a shop, bypassing Redis TTL keys.
+    Use when inventory/products/customers are stuck and not syncing.
+    """
+    shop_url = request.args.get('shop')
+    if not shop_url:
+        return jsonify({"error": "Missing shop parameter"}), 400
+
+    queued = []
+    errors = []
+
+    try:
+        # Clear stuck Redis TTL keys so scheduler picks them up again too
+        keys_to_clear = [
+            f"last_inv_{shop_url}",
+            f"last_ful_{shop_url}",
+            f"last_cancel_{shop_url}",
+            f"last_ret_sync_{shop_url}",
+            f"last_cust_sync_{shop_url}",
+            f"last_prod_sync_{shop_url}",
+            f"last_log_flush_{shop_url}",
+        ]
+        for key in keys_to_clear:
+            conn.delete(key)
+
+        # Enqueue all sync jobs directly to critical queue
+        q_critical.enqueue(scheduled_inventory_sync, shop_url, job_timeout=3600)
+        queued.append("✅ Inventory Sync")
+
+        q_critical.enqueue(sync_odoo_cancellations, shop_url, job_timeout=600)
+        queued.append("✅ Cancellation Sync")
+
+        q_critical.enqueue(sync_odoo_fulfillments, shop_url, job_timeout=600)
+        queued.append("✅ Fulfillment Sync")
+
+        q_critical.enqueue(sync_odoo_returns, shop_url, job_timeout=600)
+        queued.append("✅ Returns Sync")
+
+        q_default.enqueue(sync_customers_master, shop_url, job_timeout=3600)
+        queued.append("✅ Customer Sync")
+
+        q_default.enqueue(sync_products_master, shop_url, job_timeout=3600)
+        queued.append("✅ Product Sync")
+
+    except Exception as e:
+        errors.append(f"Error: {str(e)}")
+
+    return jsonify({
+        "message": "Force Schedule Complete — all jobs enqueued",
+        "queued": queued,
+        "redis_keys_cleared": keys_to_clear,
+        "errors": errors
+    })
+
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """
+    Quick health check: Redis, queue depths, worker status, scheduled job timing.
+    """
+    shop_url = request.args.get('shop', '')
+    status = {}
+
+    # Redis
+    try:
+        conn.ping()
+        status['redis'] = '✅ Connected'
+        q_crit_len = len(q_critical)
+        q_def_len = len(q_default)
+        status['queue_critical_depth'] = q_crit_len
+        status['queue_default_depth'] = q_def_len
+        status['queue_critical_failed'] = q_critical.failed_job_registry.count
+        status['queue_default_failed'] = q_default.failed_job_registry.count
+    except Exception as e:
+        status['redis'] = f'❌ Error: {str(e)}'
+
+    # Scheduled job TTL status for shop
+    if shop_url:
+        def ttl(key):
+            v = conn.ttl(key)
+            if v == -2: return "key missing (will run next cycle)"
+            if v == -1: return "no expiry set (stuck!)"
+            return f"{v}s remaining"
+
+        status['schedule_status'] = {
+            'inventory':    ttl(f"last_inv_{shop_url}"),
+            'fulfillment':  ttl(f"last_ful_{shop_url}"),
+            'cancellation': ttl(f"last_cancel_{shop_url}"),
+            'returns':      ttl(f"last_ret_sync_{shop_url}"),
+            'customers':    ttl(f"last_cust_sync_{shop_url}"),
+            'products':     ttl(f"last_prod_sync_{shop_url}"),
+        }
+
+    # Webhook endpoint reachable
+    status['webhook_url'] = f"{os.getenv('HOST', 'HOST_NOT_SET')}/webhooks/shopify"
+    status['web_service'] = '✅ Up'
+
+    return jsonify(status)
 
 
 @app.route('/maintenance/clear_product_map', methods=['GET', 'POST'])
