@@ -1287,9 +1287,14 @@ function triggerAction(url, method='GET') {
     const finalUrl = `${url}${separator}shop=${CURRENT_SHOP_URL}`;
     showToast("Request sent...");
     fetch(finalUrl, { method: method })
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok && r.status !== 200) {
+                return r.text().then(t => { throw new Error(t.substring(0, 120)); });
+            }
+            return r.json();
+        })
         .then(data => showToast(data.message || data.error))
-        .catch(e => showToast("Network Error"));
+        .catch(e => showToast("Error: " + (e.message || "Could not reach server")));
 }
 
 function openOrderImportModal() {

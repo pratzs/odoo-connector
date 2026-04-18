@@ -1263,7 +1263,10 @@ def register_webhooks_manual():
     ]
 
     results = []
-    existing_hooks = shopify.Webhook.find()
+    try:
+        existing_hooks = shopify.Webhook.find()
+    except Exception as e:
+        return jsonify({"error": f"Could not fetch webhooks from Shopify: {str(e)}"}), 500
 
     for topic in required_topics:
         # Always destroy existing and recreate — clears any Shopify paused/failed state
