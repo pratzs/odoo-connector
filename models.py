@@ -90,6 +90,19 @@ class ProcessedOrder(db.Model):
     shop_url   = db.Column(db.String(255), primary_key=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
+class SyncHealth(db.Model):
+    __tablename__ = 'sync_health'
+    __table_args__ = (
+        db.UniqueConstraint('shop_url', 'entity', name='uq_sync_health'),
+    )
+    id                  = db.Column(db.Integer, primary_key=True)
+    shop_url            = db.Column(db.String(255), index=True, nullable=False)
+    entity              = db.Column(db.String(50), nullable=False)
+    last_success_at     = db.Column(db.DateTime, nullable=True)
+    last_attempt_at     = db.Column(db.DateTime, nullable=True)
+    consecutive_failures = db.Column(db.Integer, default=0)
+    last_error          = db.Column(db.Text, nullable=True)
+
 class FailedSyncOrder(db.Model):
     __tablename__ = 'failed_sync_orders'
     __table_args__ = (

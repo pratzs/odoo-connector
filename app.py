@@ -27,7 +27,7 @@ from sqlalchemy import text
 from email.message import EmailMessage
 from rq import Retry
 # --- CUSTOM MODULES ---
-from models import db, ProductMap, SyncLog, AppSetting, CustomerMap, ProcessedOrder, Shop, FailedSyncOrder
+from models import db, ProductMap, SyncLog, AppSetting, CustomerMap, ProcessedOrder, Shop, FailedSyncOrder, SyncHealth
 from odoo_client import OdooClient
 # from security_utils import require_shopify_session 
 # --- UTILS (Merged & Clean) ---
@@ -535,8 +535,8 @@ def perform_inventory_sync(shop_url):
 def scheduled_inventory_sync(shop_url):
     with app.app_context():
         # FIX: Just call the function. It handles its own logging now.
-        perform_inventory_sync(shop_url) 
-        
+        perform_inventory_sync(shop_url)
+
         try:
             shop = Shop.query.filter_by(shop_url=shop_url).first()
             if shop:
@@ -544,6 +544,139 @@ def scheduled_inventory_sync(shop_url):
                 db.session.commit()
         except Exception as e:
             print(f"Error updating inventory timestamp: {e}")
+
+
+# =========================================================
+# SYNC HEALTH TRACKING
+# =========================================================
+
+# How often each entity is expected to run (seconds).
+# Used by monitor to detect stale entities and re-trigger.
+ENTITY_INTERVALS = {
+    'inventory':    1800,   # 30 min
+    'fulfillment':  3600,   # 1 hour
+    'cancellation':  300,   # 5 min
+    'return':       3600,   # 1 hour
+    'customer':    43200,   # 12 hours
+    'product':     86400,   # 24 hours
+}
+
+# How long to wait before the monitor considers an entity "stuck" (2x normal interval)
+ENTITY_STALE_MULTIPLIER = 2
+
+
+def _update_sync_health(shop_url, entity, success, error=None):
+    """Update the SyncHealth row for this shop+entity. Safe to call from any worker."""
+    try:
+        row = SyncHealth.query.filter_by(shop_url=shop_url, entity=entity).first()
+        if not row:
+            row = SyncHealth(shop_url=shop_url, entity=entity)
+            db.session.add(row)
+        row.last_attempt_at = datetime.utcnow()
+        if success:
+            row.last_success_at = datetime.utcnow()
+            row.consecutive_failures = 0
+            row.last_error = None
+        else:
+            row.consecutive_failures = (row.consecutive_failures or 0) + 1
+            row.last_error = str(error)[:500] if error else None
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        print(f"SyncHealth update error ({entity}, {shop_url}): {e}")
+
+
+def _run_with_health(entity, shop_url, fn):
+    """
+    Calls fn(shop_url) inside an app context, updates SyncHealth on outcome.
+    Raises on failure so RQ Retry activates.
+    """
+    with app.app_context():
+        try:
+            fn(shop_url)
+            _update_sync_health(shop_url, entity, success=True)
+        except Exception as e:
+            _update_sync_health(shop_url, entity, success=False, error=e)
+            raise  # re-raise so RQ retries
+
+
+# --- Per-entity wrapper jobs (called by scheduler / force_schedule) ---
+
+def run_inventory_sync(shop_url):
+    _run_with_health('inventory', shop_url, perform_inventory_sync)
+
+
+def run_fulfillment_sync(shop_url):
+    _run_with_health('fulfillment', shop_url, sync_odoo_fulfillments)
+
+
+def run_cancellation_sync(shop_url):
+    _run_with_health('cancellation', shop_url, sync_odoo_cancellations)
+
+
+def run_return_sync(shop_url):
+    _run_with_health('return', shop_url, sync_odoo_returns)
+
+
+def run_customer_sync(shop_url):
+    _run_with_health('customer', shop_url, sync_customers_master)
+
+
+def run_product_sync(shop_url):
+    _run_with_health('product', shop_url, sync_products_master)
+
+
+def sync_health_monitor(shop_url):
+    """
+    Final safety net: checks that every entity was ATTEMPTED within 2× its expected interval.
+    Uses last_attempt_at (not last_success_at) because most service functions swallow exceptions
+    internally — so "no exception raised" doesn't mean "succeeded".
+    If an entity has not even been attempted in 2× its interval (scheduler missed it, worker died, etc.)
+    the monitor re-enqueues it.
+    """
+    with app.app_context():
+        now = datetime.utcnow()
+        for entity, interval in ENTITY_INTERVALS.items():
+            stale_threshold = interval * ENTITY_STALE_MULTIPLIER
+            try:
+                row = SyncHealth.query.filter_by(shop_url=shop_url, entity=entity).first()
+
+                # No record at all → entity has never run, trigger it
+                if not row or not row.last_attempt_at:
+                    _enqueue_entity(entity, shop_url)
+                    log_event('Monitor', 'Warning',
+                        f"[Monitor] {entity} has never been attempted for {shop_url} — triggering now.",
+                        shop_url=shop_url)
+                    continue
+
+                seconds_since_attempt = (now - row.last_attempt_at).total_seconds()
+                if seconds_since_attempt > stale_threshold:
+                    _enqueue_entity(entity, shop_url)
+                    log_event('Monitor', 'Warning',
+                        f"[Monitor] {entity} stale ({int(seconds_since_attempt/60)}m since last attempt) — re-enqueuing.",
+                        shop_url=shop_url)
+
+            except Exception as e:
+                print(f"Health monitor check error ({entity}, {shop_url}): {e}")
+
+
+def _enqueue_entity(entity, shop_url):
+    """Maps an entity name to its wrapper function and enqueues it."""
+    retry_fast = Retry(max=3, interval=[300, 900, 1800])   # 5m, 15m, 30m
+    retry_slow = Retry(max=3, interval=[600, 1800, 3600])  # 10m, 30m, 1h
+
+    mapping = {
+        'inventory':    (q_critical, run_inventory_sync,    600,  retry_fast),
+        'fulfillment':  (q_critical, run_fulfillment_sync,  600,  retry_fast),
+        'cancellation': (q_critical, run_cancellation_sync, 600,  retry_fast),
+        'return':       (q_critical, run_return_sync,       600,  retry_fast),
+        'customer':     (q_default,  run_customer_sync,     3600, retry_slow),
+        'product':      (q_default,  run_product_sync,      3600, retry_slow),
+    }
+    if entity not in mapping:
+        return
+    queue, fn, timeout, retry = mapping[entity]
+    queue.enqueue(fn, shop_url, job_timeout=timeout, retry=retry)
 
 # ==========================================
 # SHOPIFY OAUTH ROUTES
@@ -1320,28 +1453,34 @@ def force_schedule():
             f"last_failed_order_retry_{shop_url}",
             f"last_order_poll_{shop_url}",
             f"last_webhook_check_{shop_url}",
+            f"last_health_monitor_{shop_url}",
         ]
         for key in keys_to_clear:
             conn.delete(key)
 
-        # Enqueue all sync jobs directly to critical queue
-        q_critical.enqueue(scheduled_inventory_sync, shop_url, job_timeout=3600)
+        retry_fast = Retry(max=3, interval=[300, 900, 1800])
+        retry_slow = Retry(max=3, interval=[600, 1800, 3600])
+
+        q_critical.enqueue(run_inventory_sync, shop_url, job_timeout=3600, retry=retry_fast)
         queued.append("✅ Inventory Sync")
 
-        q_critical.enqueue(sync_odoo_cancellations, shop_url, job_timeout=600)
+        q_critical.enqueue(run_cancellation_sync, shop_url, job_timeout=600, retry=retry_fast)
         queued.append("✅ Cancellation Sync")
 
-        q_critical.enqueue(sync_odoo_fulfillments, shop_url, job_timeout=600)
+        q_critical.enqueue(run_fulfillment_sync, shop_url, job_timeout=600, retry=retry_fast)
         queued.append("✅ Fulfillment Sync")
 
-        q_critical.enqueue(sync_odoo_returns, shop_url, job_timeout=600)
+        q_critical.enqueue(run_return_sync, shop_url, job_timeout=600, retry=retry_fast)
         queued.append("✅ Returns Sync")
 
-        q_default.enqueue(sync_customers_master, shop_url, job_timeout=3600)
+        q_default.enqueue(run_customer_sync, shop_url, job_timeout=3600, retry=retry_slow)
         queued.append("✅ Customer Sync")
 
-        q_default.enqueue(sync_products_master, shop_url, job_timeout=3600)
+        q_default.enqueue(run_product_sync, shop_url, job_timeout=3600, retry=retry_slow)
         queued.append("✅ Product Sync")
+
+        q_default.enqueue(sync_health_monitor, shop_url, job_timeout=120)
+        queued.append("✅ Health Monitor")
 
     except Exception as e:
         errors.append(f"Error: {str(e)}")
@@ -2174,35 +2313,38 @@ def _run_shop_schedule(shop_url):
         except Exception as e:
             print(f"Log Flush Error for {shop_url}: {e}")
 
+    retry_fast = Retry(max=3, interval=[300, 900, 1800])   # 5m, 15m, 30m
+    retry_slow = Retry(max=3, interval=[600, 1800, 3600])  # 10m, 30m, 1h
+
     # 1. Inventory Sync (Every 30 mins)
     if not conn.get(f"last_inv_{shop_url}"):
-        q_critical.enqueue(scheduled_inventory_sync, shop_url, job_timeout=3600)
+        q_critical.enqueue(run_inventory_sync, shop_url, job_timeout=3600, retry=retry_fast)
         conn.setex(f"last_inv_{shop_url}", 1800, "done")
         print(f"⏰ Triggered Inventory Sync for {shop_url}")
 
     # 2. Fulfillment Sync (Every hour)
     if not conn.get(f"last_ful_{shop_url}"):
-        q_critical.enqueue(sync_odoo_fulfillments, shop_url, job_timeout=600)
+        q_critical.enqueue(run_fulfillment_sync, shop_url, job_timeout=600, retry=retry_fast)
         conn.setex(f"last_ful_{shop_url}", 3600, "done")
 
     # 3. Cancellation Sync (Every 5 mins)
     if not conn.get(f"last_cancel_{shop_url}"):
-        q_critical.enqueue(sync_odoo_cancellations, shop_url, job_timeout=600)
+        q_critical.enqueue(run_cancellation_sync, shop_url, job_timeout=600, retry=retry_fast)
         conn.setex(f"last_cancel_{shop_url}", 300, "done")
 
     # 4. Return Sync (Every hour)
     if not conn.get(f"last_ret_sync_{shop_url}"):
-        q_critical.enqueue(sync_odoo_returns, shop_url, job_timeout=600)
+        q_critical.enqueue(run_return_sync, shop_url, job_timeout=600, retry=retry_fast)
         conn.setex(f"last_ret_sync_{shop_url}", 3600, "done")
 
     # 5. Customer Sync (Every 12 hours)
     if not conn.get(f"last_cust_sync_{shop_url}"):
-        q_default.enqueue(sync_customers_master, shop_url, job_timeout=3600)
+        q_default.enqueue(run_customer_sync, shop_url, job_timeout=3600, retry=retry_slow)
         conn.setex(f"last_cust_sync_{shop_url}", 43200, "done")
 
     # 6. Product Sync (Every 24 hours)
     if not conn.get(f"last_prod_sync_{shop_url}"):
-        q_default.enqueue(sync_products_master, shop_url, job_timeout=3600)
+        q_default.enqueue(run_product_sync, shop_url, job_timeout=3600, retry=retry_slow)
         conn.setex(f"last_prod_sync_{shop_url}", 86400, "done")
 
     # 7. Monthly Full Catalog Sync (1st of month, midnight NZT)
@@ -2235,6 +2377,11 @@ def _run_shop_schedule(shop_url):
     if not conn.get(f"last_webhook_check_{shop_url}"):
         q_default.enqueue(check_and_repair_webhooks, shop_url, job_timeout=300)
         conn.setex(f"last_webhook_check_{shop_url}", 3600, "done")
+
+    # 11. Sync health monitor (every 2 hours) — re-triggers any stale entity
+    if not conn.get(f"last_health_monitor_{shop_url}"):
+        q_default.enqueue(sync_health_monitor, shop_url, job_timeout=120)
+        conn.setex(f"last_health_monitor_{shop_url}", 7200, "done")
 
 
 def run_schedule():
