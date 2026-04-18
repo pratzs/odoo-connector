@@ -1840,13 +1840,11 @@ def sync_order_by_name():
 
 @app.route('/sync/status')
 def get_sync_status():
+    # Legacy endpoint — now delegates to the unified dashboard status API
     from utils import q_default
-    
-    # Get counts from the Redis queue
-    queued_count = q_default.count  # Tasks waiting to start
-    started_jobs = q_default.started_job_registry.count # Tasks currently running
-    failed_count = q_default.failed_job_registry.count # Tasks that crashed
-    
+    queued_count = q_default.count
+    started_jobs = q_default.started_job_registry.count
+    failed_count = q_default.failed_job_registry.count
     return jsonify({
         "status": "Online",
         "pending_batches": queued_count,
@@ -1854,6 +1852,91 @@ def get_sync_status():
         "failed_tasks": failed_count,
         "queue_name": q_default.name
     })
+
+
+@app.route('/api/dashboard/status')
+@require_shopify_session
+def api_dashboard_status():
+    """
+    Single endpoint for all live dashboard data:
+    - Queue counts (both queues combined)
+    - SyncHealth per entity
+    - Redis TTL per entity (seconds until next scheduled run)
+    - System checks: Redis, workers, Shopify token, Odoo config
+    """
+    shop_url = request.args.get('shop')
+
+    result = {}
+
+    # --- 1. Queue counts (critical + default combined) ---
+    try:
+        pending = q_critical.count + q_default.count
+        active  = q_critical.started_job_registry.count + q_default.started_job_registry.count
+        failed  = q_critical.failed_job_registry.count  + q_default.failed_job_registry.count
+        result['queue'] = {'pending': pending, 'active': active, 'failed': failed}
+        result['redis_ok'] = True
+    except Exception as e:
+        result['queue'] = {'pending': 0, 'active': 0, 'failed': 0}
+        result['redis_ok'] = False
+        result['redis_error'] = str(e)
+
+    # --- 2. SyncHealth rows ---
+    ENTITY_KEY_MAP = {
+        'inventory':    f"last_inv_{shop_url}",
+        'fulfillment':  f"last_ful_{shop_url}",
+        'cancellation': f"last_cancel_{shop_url}",
+        'return':       f"last_ret_sync_{shop_url}",
+        'customer':     f"last_cust_sync_{shop_url}",
+        'product':      f"last_prod_sync_{shop_url}",
+    }
+    try:
+        now = datetime.utcnow()
+        health_rows = {}
+        rows = SyncHealth.query.filter_by(shop_url=shop_url).all()
+        row_map = {r.entity: r for r in rows}
+
+        for entity, interval in ENTITY_INTERVALS.items():
+            row = row_map.get(entity)
+            ttl_val = conn.ttl(ENTITY_KEY_MAP[entity])
+            # ttl_val: -2 = key gone (will run next cycle), -1 = no expiry (stuck), >=0 = seconds remaining
+            next_run_secs = ttl_val if ttl_val >= 0 else 0
+
+            health_rows[entity] = {
+                'interval_secs': interval,
+                'last_attempt':  row.last_attempt_at.strftime('%Y-%m-%d %H:%M:%S') if row and row.last_attempt_at else None,
+                'last_success':  row.last_success_at.strftime('%Y-%m-%d %H:%M:%S') if row and row.last_success_at else None,
+                'failures':      row.consecutive_failures if row else 0,
+                'last_error':    (row.last_error[:120] if row and row.last_error else None),
+                'next_run_secs': next_run_secs,
+                'ttl_missing':   (ttl_val == -2),  # key gone = runs on next scheduler tick
+                'ttl_stuck':     (ttl_val == -1),
+                # Staleness: seconds since last attempt vs 2x interval
+                'stale_secs':    int((now - row.last_attempt_at).total_seconds()) if row and row.last_attempt_at else None,
+                'stale_threshold': interval * 2,
+            }
+        result['health'] = health_rows
+    except Exception as e:
+        result['health'] = {}
+        result['health_error'] = str(e)
+
+    # --- 3. System checks ---
+    try:
+        shop = Shop.query.filter_by(shop_url=shop_url).first()
+        result['system'] = {
+            'shopify_ok':   bool(shop and shop.access_token),
+            'odoo_ok':      bool(shop and shop.odoo_url and shop.odoo_username),
+            'odoo_url':     shop.odoo_url if shop else None,
+        }
+    except Exception as e:
+        result['system'] = {'shopify_ok': False, 'odoo_ok': False}
+
+    # --- 4. Failed orders needing retry ---
+    try:
+        result['failed_orders'] = FailedSyncOrder.query.filter_by(shop_url=shop_url).count()
+    except:
+        result['failed_orders'] = 0
+
+    return jsonify(result)
 
 
 def background_refund_sync(shop_url, refund_data):

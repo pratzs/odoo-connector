@@ -171,51 +171,55 @@
 
     <div class="row">
         <div class="col-md-4">
+    <!-- SYNC QUEUE STATUS CARD -->
     <div class="card p-3 mb-3 border-0 shadow-sm" style="background: #f9fafb; border: 1px solid var(--p-border) !important;">
-    <div class="section-header d-flex justify-content-between align-items-center">
-        <span>🚀 Sync Queue Status</span>
-        <div id="queue-pulse" class="spinner-grow spinner-grow-sm text-success" role="status" style="display:none;"></div>
-    </div>
-    
-    <div class="row text-center g-0 mt-2">
-        <div class="col-4 border-end" onclick="openJobModal('pending')" style="cursor: pointer;">
-            <h4 class="fw-bold mb-0 text-decoration-underline text-secondary" id="pending-count">0</h4>
-            <small class="text-muted" style="font-size: 10px; text-transform: uppercase;">Pending</small>
+        <div class="section-header d-flex justify-content-between align-items-center mb-2">
+            <span>🚀 Sync Queue</span>
+            <span id="queue-last-updated" class="text-muted" style="font-size: 10px;"></span>
         </div>
-
-        <div class="col-4 border-end" onclick="openJobModal('active')" style="cursor: pointer;">
-            <h4 class="fw-bold mb-0 text-primary text-decoration-underline" id="active-workers">0</h4>
-            <small class="text-muted" style="font-size: 10px; text-transform: uppercase;">Active</small>
+        <div class="row text-center g-0">
+            <div class="col-4 border-end" onclick="openJobModal('pending')" style="cursor: pointer;">
+                <h4 class="fw-bold mb-0 text-secondary" id="pending-count">—</h4>
+                <small class="text-muted" style="font-size: 10px; text-transform: uppercase;">Pending</small>
+            </div>
+            <div class="col-4 border-end" onclick="openJobModal('active')" style="cursor: pointer;">
+                <h4 class="fw-bold mb-0 text-primary" id="active-workers">—</h4>
+                <small class="text-muted" style="font-size: 10px; text-transform: uppercase;">Active</small>
+            </div>
+            <div class="col-4" onclick="openJobModal('failed')" style="cursor: pointer;">
+                <h4 class="fw-bold mb-0 text-danger" id="failed-tasks">—</h4>
+                <small class="text-muted" style="font-size: 10px; text-transform: uppercase;">Failed</small>
+            </div>
         </div>
-
-        <div class="col-4" onclick="openJobModal('failed')" style="cursor: pointer;">
-            <h4 class="fw-bold mb-0 text-danger text-decoration-underline" id="failed-tasks">0</h4>
-            <small class="text-muted" style="font-size: 10px; text-transform: uppercase;">Failed</small>
+        <div id="failed-orders-banner" class="mt-2 d-none">
+            <div class="alert alert-warning py-1 px-2 mb-0" style="font-size: 11px;">
+                <i class="bi bi-exclamation-triangle-fill me-1"></i>
+                <span id="failed-orders-text"></span>
+            </div>
+        </div>
+        <div class="mt-2">
+            <button onclick="refreshDashboardStatus()" class="btn btn-sm btn-secondary w-100 py-1" style="font-size: 11px;">
+                <i class="bi bi-arrow-clockwise"></i> Refresh
+            </button>
         </div>
     </div>
 
-    <div class="mt-3">
-        <button onclick="updateSyncStatus()" class="btn btn-sm btn-secondary w-100 py-1" style="font-size: 11px;">
-            <i class="bi bi-arrow-clockwise"></i> Refresh Status
-        </button>
-    </div>
-</div>
-
-    <div class="card p-3">
+    <!-- SYSTEM STATUS CARD -->
+    <div class="card p-3 mb-3">
         <div class="section-header">System Status</div>
+        <div class="d-flex justify-content-between mb-2 align-items-center">
+            <span class="text-muted" style="font-size:13px;">Shopify</span>
+            <span class="badge-status" id="sys-shopify">—</span>
+        </div>
+        <div class="d-flex justify-content-between mb-2 align-items-center">
+            <span class="text-muted" style="font-size:13px;">Odoo</span>
+            <span class="badge-status" id="sys-odoo">—</span>
+        </div>
         <div class="d-flex justify-content-between mb-3 align-items-center">
-            <span class="text-muted">Shopify Connection</span>
-            <span class="badge-status badge-success">Active</span>
+            <span class="text-muted" style="font-size:13px;">Queue Workers</span>
+            <span class="badge-status" id="sys-workers">—</span>
         </div>
-        <div class="d-flex justify-content-between align-items-center">
-            <span class="text-muted">Odoo Connection</span>
-            {% if config.odoo_url %}
-                <span class="badge-status badge-success">Active</span>
-            {% else %}
-                <span class="badge-status badge-danger">Not Connected</span>
-            {% endif %}
-        </div>
-        <div class="mb-4">
+        <div class="mb-3">
             {% if config.is_free_store %}
                 <span class="badge" style="background-color: #e3fbe3; color: #008060; border: 1px solid #aee9d1; padding: 6px 12px; border-radius: 16px; font-weight: 600;">
                     <i class="bi bi-patch-check-fill"></i> Lifetime Free
@@ -238,6 +242,17 @@
             <a href="/install?shop={{ shop_url }}" class="btn btn-secondary text-start text-muted" style="font-size: 12px;">
                 <i class="bi bi-shield-lock me-1"></i> Re-Authenticate
             </a>
+        </div>
+    </div>
+
+    <!-- HEALTH MONITOR CARD -->
+    <div class="card p-3 mb-3">
+        <div class="section-header d-flex justify-content-between align-items-center mb-2">
+            <span>🩺 Health Monitor</span>
+            <span class="text-muted" style="font-size:10px;">Auto-refreshes every 30s</span>
+        </div>
+        <div id="health-monitor-rows">
+            <div class="text-center text-muted py-3" style="font-size:12px;"><span class="spinner-border spinner-border-sm me-1"></span> Loading...</div>
         </div>
     </div>
 
@@ -1432,35 +1447,123 @@ function openUnmappedModal() {
 const selectAll = document.getElementById('selectAllOrders');
 if(selectAll) selectAll.addEventListener('change', function() { document.querySelectorAll('.order-select').forEach(cb => cb.checked = this.checked); });
 
-        // --- SYNC QUEUE LIVE UPDATES ---
-function updateSyncStatus() {
-    const pulse = document.getElementById('queue-pulse');
-    if(pulse) pulse.style.display = 'inline-block';
+        // --- UNIFIED DASHBOARD STATUS ---
+function fmtAgo(isoStr) {
+    if (!isoStr) return '—';
+    const diff = Math.floor((Date.now() - new Date(isoStr + 'Z')) / 1000);
+    if (diff < 60)   return diff + 's ago';
+    if (diff < 3600) return Math.floor(diff/60) + 'm ago';
+    if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
+    return Math.floor(diff/86400) + 'd ago';
+}
+function fmtCountdown(secs) {
+    if (secs <= 0) return 'now';
+    if (secs < 60) return secs + 's';
+    if (secs < 3600) return Math.floor(secs/60) + 'm';
+    return Math.floor(secs/3600) + 'h ' + Math.floor((secs%3600)/60) + 'm';
+}
+function entityLabel(key) {
+    return {inventory:'Inventory',fulfillment:'Fulfillments',cancellation:'Cancellations','return':'Returns',customer:'Customers',product:'Products'}[key] || key;
+}
 
-    fetch(`/sync/status?shop=${CURRENT_SHOP_URL}`)
-        .then(response => response.json())
+function refreshDashboardStatus() {
+    fetch(`/api/dashboard/status?shop=${CURRENT_SHOP_URL}`)
+        .then(r => r.json())
         .then(data => {
-            // Update the numbers in the new card
+            const now = new Date();
+
+            // --- Queue counts ---
+            const q = data.queue || {};
             const pendingEl = document.getElementById('pending-count');
-            const activeEl = document.getElementById('active-workers');
-            const failedEl = document.getElementById('failed-tasks');
+            const activeEl  = document.getElementById('active-workers');
+            const failedEl  = document.getElementById('failed-tasks');
+            if (pendingEl) pendingEl.innerText = q.pending ?? '0';
+            if (activeEl)  activeEl.innerText  = q.active  ?? '0';
+            if (failedEl) {
+                failedEl.innerText = q.failed ?? '0';
+                failedEl.className = 'fw-bold mb-0 ' + (q.failed > 0 ? 'text-danger' : 'text-success');
+            }
+            const ts = document.getElementById('queue-last-updated');
+            if (ts) ts.innerText = 'Updated ' + now.toLocaleTimeString();
 
-            if(pendingEl) pendingEl.innerText = data.pending_batches || 0;
-            if(activeEl) activeEl.innerText = data.active_workers || 0;
-            if(failedEl) failedEl.innerText = data.failed_tasks || 0;
+            // --- Failed orders banner ---
+            const foBanner = document.getElementById('failed-orders-banner');
+            const foText   = document.getElementById('failed-orders-text');
+            if (foBanner && foText) {
+                if (data.failed_orders > 0) {
+                    foText.innerText = data.failed_orders + ' order(s) in retry queue — will re-attempt hourly';
+                    foBanner.classList.remove('d-none');
+                } else {
+                    foBanner.classList.add('d-none');
+                }
+            }
 
-            // Hide the pulse indicator after a small delay
-            setTimeout(() => { if(pulse) pulse.style.display = 'none'; }, 800);
+            // --- System status badges ---
+            function setBadge(id, ok, label) {
+                const el = document.getElementById(id);
+                if (!el) return;
+                el.textContent = label;
+                el.className = 'badge-status ' + (ok ? 'badge-success' : 'badge-danger');
+            }
+            const sys = data.system || {};
+            setBadge('sys-shopify', sys.shopify_ok, sys.shopify_ok ? 'Connected' : 'Token Missing');
+            setBadge('sys-odoo',    sys.odoo_ok,    sys.odoo_ok    ? 'Configured' : 'Not Configured');
+            const workersOk = (q.active >= 0 && data.redis_ok);
+            setBadge('sys-workers', workersOk, workersOk ? (q.active > 0 ? q.active + ' running' : 'Idle') : 'Offline');
+
+            // --- Health monitor rows ---
+            const container = document.getElementById('health-monitor-rows');
+            if (!container || !data.health) return;
+            const health = data.health;
+            let html = '';
+            for (const [entity, h] of Object.entries(health)) {
+                // Determine status colour
+                let dot, statusText;
+                const staleSecs = h.stale_secs;
+                if (staleSecs === null) {
+                    dot = '#adb5bd'; statusText = 'Never run';
+                } else if (h.failures > 0) {
+                    dot = '#d82c0d'; statusText = h.failures + ' fail' + (h.failures>1?'s':'');
+                } else if (staleSecs > h.stale_threshold) {
+                    dot = '#d82c0d'; statusText = 'Overdue';
+                } else if (staleSecs > h.stale_threshold * 0.75) {
+                    dot = '#ffc453'; statusText = 'Stale';
+                } else {
+                    dot = '#008060'; statusText = 'OK';
+                }
+                // Next run label
+                let nextRun;
+                if (h.ttl_missing) nextRun = '<span class="text-warning" style="font-size:10px;">queued</span>';
+                else if (h.ttl_stuck) nextRun = '<span class="text-danger" style="font-size:10px;">stuck!</span>';
+                else nextRun = '<span style="font-size:10px; color:#6d7175;">in ' + fmtCountdown(h.next_run_secs) + '</span>';
+
+                const errTip = h.last_error ? ` title="${h.last_error.replace(/"/g,"'")}"` : '';
+                html += `<div class="d-flex align-items-center justify-content-between py-1" style="border-bottom: 1px solid #f0f0f0;">
+                    <div class="d-flex align-items-center gap-2">
+                        <div style="width:8px;height:8px;border-radius:50%;background:${dot};flex-shrink:0;"${errTip}></div>
+                        <span style="font-size:12px;font-weight:600;">${entityLabel(entity)}</span>
+                    </div>
+                    <div class="text-end">
+                        <span style="font-size:10px;color:#6d7175;">${fmtAgo(h.last_attempt)} · ${nextRun}</span>
+                        <br><span style="font-size:10px;color:${dot};">${statusText}</span>
+                    </div>
+                </div>`;
+            }
+            container.innerHTML = html || '<div class="text-muted small text-center py-2">No health data yet — runs after first sync.</div>';
         })
         .catch(err => {
-            console.error('Queue Status Error:', err);
-            if(pulse) pulse.style.display = 'none';
+            console.error('Dashboard status error:', err);
+            const ts = document.getElementById('queue-last-updated');
+            if (ts) ts.innerText = 'Error fetching status';
         });
 }
 
-// Start the timer for automatic updates every 15 seconds
-updateSyncStatus();
-setInterval(updateSyncStatus, 15000);
+// Keep legacy updateSyncStatus alias so existing references still work
+function updateSyncStatus() { refreshDashboardStatus(); }
+
+// Start immediately, then every 30 seconds
+refreshDashboardStatus();
+setInterval(refreshDashboardStatus, 30000);
 
 function openJobModal(status) {
     // 1. Set Title & Headers
