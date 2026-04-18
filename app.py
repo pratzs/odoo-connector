@@ -197,7 +197,7 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     "pool_pre_ping": True,      # <--- Checks if connection is alive before using it
     "pool_recycle": 300,        # <--- Refreshes connection every 5 minutes
     "pool_timeout": 30,
-    "pool_size": 3,   # Use Supabase pooler URL (port 6543) in DATABASE_URL env var to avoid connection limits
+    "pool_size": 3,   # Sized for Supabase PgBouncer transaction mode (pooler already in DATABASE_URL)
     "max_overflow": 5,
     "connect_args": {
         "sslmode": "require",
