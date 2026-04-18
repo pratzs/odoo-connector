@@ -152,6 +152,22 @@ app = Flask(__name__)
 
 app.secret_key = os.getenv('FLASK_SECRET_KEY')
 
+# --- SENTRY ERROR TRACKING ---
+import sentry_sdk
+from sentry_sdk.integrations.flask import FlaskIntegration
+from sentry_sdk.integrations.rq import RqIntegration
+_sentry_dsn = os.getenv('SENTRY_DSN')
+if _sentry_dsn:
+    sentry_sdk.init(
+        dsn=_sentry_dsn,
+        integrations=[FlaskIntegration(), RqIntegration()],
+        traces_sample_rate=0.1,
+        send_default_pii=False,
+    )
+
+MAX_FAILED_ORDER_ATTEMPTS = 50  # Cap for FailedSyncOrder retry loop
+WEBHOOK_RATE_LIMIT = 100        # Max webhook calls per minute per shop
+
 # --- CONFIGURATION ---
 @app.after_request
 def apply_multipass_cors(response):
@@ -181,8 +197,8 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     "pool_pre_ping": True,      # <--- Checks if connection is alive before using it
     "pool_recycle": 300,        # <--- Refreshes connection every 5 minutes
     "pool_timeout": 30,
-    "pool_size": 10,
-    "max_overflow": 20,
+    "pool_size": 3,   # Use Supabase pooler URL (port 6543) in DATABASE_URL env var to avoid connection limits
+    "max_overflow": 5,
     "connect_args": {
         "sslmode": "require",
         "keepalives": 1,
@@ -532,20 +548,6 @@ def perform_inventory_sync(shop_url):
         log_event('Inventory', 'Success', f"Sync Complete. Checked {total_shopify} active items. Updated {updates} products.", shop_url=shop_url)
 
 
-def scheduled_inventory_sync(shop_url):
-    with app.app_context():
-        # FIX: Just call the function. It handles its own logging now.
-        perform_inventory_sync(shop_url)
-
-        try:
-            shop = Shop.query.filter_by(shop_url=shop_url).first()
-            if shop:
-                shop.last_inventory_sync_success = datetime.utcnow()
-                db.session.commit()
-        except Exception as e:
-            print(f"Error updating inventory timestamp: {e}")
-
-
 # =========================================================
 # SYNC HEALTH TRACKING
 # =========================================================
@@ -604,6 +606,15 @@ def _run_with_health(entity, shop_url, fn):
 
 def run_inventory_sync(shop_url):
     _run_with_health('inventory', shop_url, perform_inventory_sync)
+    # Update dashboard timestamp on success (previously done by scheduled_inventory_sync)
+    with app.app_context():
+        try:
+            shop = Shop.query.filter_by(shop_url=shop_url).first()
+            if shop:
+                shop.last_inventory_sync_success = datetime.utcnow()
+                db.session.commit()
+        except Exception:
+            pass
 
 
 def run_fulfillment_sync(shop_url):
@@ -658,6 +669,16 @@ def sync_health_monitor(shop_url):
 
             except Exception as e:
                 print(f"Health monitor check error ({entity}, {shop_url}): {e}")
+
+        # Alert if too many failed orders are piling up
+        try:
+            failed_count = FailedSyncOrder.query.filter_by(shop_url=shop_url).count()
+            if failed_count >= 3:
+                log_event('Monitor', 'Warning',
+                    f"[Monitor] {failed_count} order(s) in failed retry queue. Check logs for details.",
+                    shop_url=shop_url)
+        except Exception as e:
+            print(f"Failed order pile-up check error: {e}")
 
 
 def _enqueue_entity(entity, shop_url):
@@ -808,6 +829,14 @@ def shopify_webhook():
 
     if not shop_url or not data:
         return "Missing data", 400
+
+    # Rate limit: max WEBHOOK_RATE_LIMIT webhooks per shop per minute
+    rate_key = f"wh_rate_{shop_url}"
+    wh_count = conn.incr(rate_key)
+    if wh_count == 1:
+        conn.expire(rate_key, 60)
+    if wh_count > WEBHOOK_RATE_LIMIT:
+        return "Rate limited", 429
 
     # SAFETY CHECK: Explicitly block product updates to prevent loops
     if topic == 'products/update':
@@ -1493,7 +1522,14 @@ def force_schedule():
     })
 
 
+@app.route('/ping')
+def ping():
+    """Render health check — must stay fast and unauthenticated."""
+    return 'pong', 200
+
+
 @app.route('/health', methods=['GET'])
+@require_shopify_session
 def health_check():
     """
     Quick health check: Redis, queue depths, worker status, scheduled job timing.
@@ -2344,23 +2380,28 @@ def check_and_repair_webhooks(shop_url):
 def retry_failed_orders(shop_url):
     """
     Hourly job: re-enqueues orders from FailedSyncOrder until they succeed.
-    On success, background_order_sync removes the ProcessedOrder lock so the
-    order actually goes through; on failure again, order_sync_failed re-saves it.
+    Orders exceeding MAX_FAILED_ORDER_ATTEMPTS are flagged and an alert email is sent.
     """
     with app.app_context():
         pending = FailedSyncOrder.query.filter_by(shop_url=shop_url).all()
         if not pending:
             return
-        log_event('Order', 'Info', f"Hourly retry: re-enqueueing {len(pending)} failed order(s).", shop_url=shop_url)
+
+        log_event('Order', 'Info', f"Hourly retry: processing {len(pending)} failed order(s).", shop_url=shop_url)
+
+        capped = []
         for failed in pending:
+            # Cap: if exceeded max attempts, stop retrying and alert
+            if failed.attempt_count >= MAX_FAILED_ORDER_ATTEMPTS:
+                capped.append(failed)
+                continue
+
             try:
                 order_data = json.loads(failed.order_data)
-                # Clear the DB lock so the order can be re-processed
                 lock = ProcessedOrder.query.filter_by(shopify_id=failed.shopify_id, shop_url=shop_url).first()
                 if lock:
                     db.session.delete(lock)
                     db.session.commit()
-                # Remove from failed table — re-added by on_failure if it fails again
                 db.session.delete(failed)
                 db.session.commit()
                 q_critical.enqueue(
@@ -2375,6 +2416,37 @@ def retry_failed_orders(shop_url):
                 log_event('Order', 'Error',
                     f"Hourly retry could not re-enqueue order {failed.shopify_id}: {e}",
                     shop_url=shop_url)
+
+        if capped:
+            order_names = ', '.join(f.shopify_id for f in capped)
+            log_event('Order', 'Error',
+                f"ALERT: {len(capped)} order(s) exceeded {MAX_FAILED_ORDER_ATTEMPTS} retry attempts and need manual investigation: {order_names}",
+                shop_url=shop_url)
+            # Send alert email if configured
+            try:
+                alert_email = get_config('alert_email', shop_url=shop_url)
+                if alert_email:
+                    from utils import send_inventory_alert
+                    # Reuse email infrastructure with a custom message
+                    import smtplib
+                    from email.message import EmailMessage
+                    msg = EmailMessage()
+                    msg['Subject'] = f"[{shop_url}] ⚠️ Orders Need Manual Sync"
+                    msg['From'] = "hello@tripsterdevelopers.com"
+                    msg['To'] = alert_email
+                    msg.set_content(
+                        f"The following Shopify orders have exceeded {MAX_FAILED_ORDER_ATTEMPTS} "
+                        f"automatic retry attempts and could not be synced to Odoo:\n\n"
+                        + '\n'.join(f"• Order ID {f.shopify_id} — last error: {f.last_error}" for f in capped)
+                        + "\n\nPlease check the order data in Shopify and Odoo and sync manually from the dashboard."
+                    )
+                    smtp_password = os.getenv('SMTP_PASSWORD')
+                    if smtp_password:
+                        with smtplib.SMTP_SSL("premium74.web-hosting.com", 465) as smtp:
+                            smtp.login("hello@tripsterdevelopers.com", smtp_password)
+                            smtp.send_message(msg)
+            except Exception as email_err:
+                print(f"Failed to send capped-order alert: {email_err}")
 
 
 def _run_shop_schedule(shop_url):

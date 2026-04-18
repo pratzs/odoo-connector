@@ -15,7 +15,7 @@ def sync_odoo_fulfillments(shop_url):
     with app.app_context():
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url):
-            return
+            raise RuntimeError("Connection failed: could not reach Odoo or Shopify")
 
         # ── 1. Fetch Done Outgoing Shipments from Odoo ─────────────────
         cutoff = datetime.utcnow() - timedelta(minutes=120)

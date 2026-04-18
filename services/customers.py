@@ -294,8 +294,7 @@ def sync_customers_master(shop_url):
     with app.app_context():
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url):
-            log_event('Customer Sync', 'Error', "Connection Error — aborting.", shop_url=shop_url)
-            return
+            raise RuntimeError("Connection failed: could not reach Odoo or Shopify")
 
         direction = get_config('cust_direction', 'bidirectional', shop_url=shop_url)
         if direction == 'shopify_to_odoo':

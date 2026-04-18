@@ -11,8 +11,8 @@ def sync_odoo_cancellations(shop_url):
     
     with app.app_context():
         odoo = get_odoo_connection(shop_url)
-        if not odoo or not setup_shopify_session(shop_url): 
-            return
+        if not odoo or not setup_shopify_session(shop_url):
+            raise RuntimeError("Connection failed: could not reach Odoo or Shopify")
 
         # Look back 7 days
         cutoff = datetime.utcnow() - timedelta(days=7)

@@ -25,9 +25,10 @@ def sync_products_master(shop_url):
     with app.app_context():
         shop = Shop.query.filter_by(shop_url=shop_url).first()
         if not shop: return
-        
+
         odoo = get_odoo_connection(shop_url)
-        if not odoo: return
+        if not odoo:
+            raise RuntimeError("Connection failed: could not reach Odoo")
 
         company_id = shop.odoo_company_id
         if not company_id: return
