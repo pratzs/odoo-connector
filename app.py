@@ -27,7 +27,7 @@ from sqlalchemy import text
 from email.message import EmailMessage
 from rq import Retry
 # --- CUSTOM MODULES ---
-from models import db, ProductMap, SyncLog, AppSetting, CustomerMap, ProcessedOrder, Shop
+from models import db, ProductMap, SyncLog, AppSetting, CustomerMap, ProcessedOrder, Shop, FailedSyncOrder
 from odoo_client import OdooClient
 # from security_utils import require_shopify_session 
 # --- UTILS (Merged & Clean) ---
@@ -683,10 +683,11 @@ def shopify_webhook():
     # 1. Handle Orders (Create, Pay, Update) -> CRITICAL QUEUE
     if topic in ['orders/create', 'orders/updated', 'orders/paid']:
         q_critical.enqueue(
-            background_order_sync, 
-            shop_url, 
+            background_order_sync,
+            shop_url,
             data,
-            retry=Retry(max=5, interval=[60, 120, 240, 600, 1200])
+            retry=Retry(max=5, interval=[60, 120, 240, 600, 1200]),
+            on_failure=order_sync_failed,
         )
         return "Order Received", 200
 
@@ -1719,43 +1720,69 @@ def background_refund_sync(shop_url, refund_data):
             log_event('Refund', 'Error', message, shop_url=shop_url)
             
 
+def order_sync_failed(job, connection, type, value, traceback):
+    """
+    RQ calls this after a job exhausts all retries.
+    Saves the order to FailedSyncOrder so the hourly retry job can pick it up.
+    """
+    with app.app_context():
+        try:
+            shop_url   = job.args[0]
+            order_data = job.args[1]
+            shopify_id = str(order_data.get('id', ''))
+            order_name = order_data.get('name', shopify_id)
+
+            existing = FailedSyncOrder.query.filter_by(shop_url=shop_url, shopify_id=shopify_id).first()
+            if existing:
+                existing.last_attempt_at = datetime.utcnow()
+                existing.attempt_count  += 1
+                existing.last_error      = str(value)
+            else:
+                db.session.add(FailedSyncOrder(
+                    shop_url=shop_url,
+                    shopify_id=shopify_id,
+                    order_data=json.dumps(order_data),
+                    last_error=str(value),
+                ))
+            db.session.commit()
+            log_event('Order', 'Warning',
+                f"Order {order_name} queued for hourly retry after all attempts failed.",
+                shop_url=shop_url)
+        except Exception as e:
+            db.session.rollback()
+            print(f"order_sync_failed callback error: {e}")
+
+
 def background_order_sync(shop_url, order_data):
     """
     Runs inside the Worker Process.
+    Raises on failure so RQ's Retry mechanism activates.
     """
     with app.app_context():
-        # 1. Connect
         odoo = get_odoo_connection(shop_url)
         if not odoo:
             log_event('Order', 'Error', "Auto Sync Failed: Could not connect to Odoo.", shop_url=shop_url)
-            return
+            raise RuntimeError("Could not connect to Odoo")
 
-        # 2. Sync with CRASH PROTECTION
-        try:
-            # FIX: Passed shop_url explicitly so get_config works inside the helper
-            result = process_order_data(order_data, odoo, shop_url=shop_url)
-            
-            # Handle tuple return (success, message) vs boolean (True/False)
-            if isinstance(result, tuple):
-                success, msg = result
-            else:
-                success, msg = result, "Processed"
-            
-            # 3. Log Result
-            if success:
-                 if "Synced" in msg:
-                     log_event('Order', 'Success', f"Auto Sync: {msg}", shop_url=shop_url)
-                     
-                     current_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-                     set_config('last_order_sync_success', current_time, shop_url=shop_url)
-                     
-                 elif "Skipped" in msg:
-                     pass 
-            else:
-                 log_event('Order', 'Error', f"Auto Sync Failed: {msg}", shop_url=shop_url)
+        result = process_order_data(order_data, odoo, shop_url=shop_url)
 
-        except Exception as e:
-            log_event('Order', 'Error', f"Worker Crash: {str(e)}", shop_url=shop_url)
+        if isinstance(result, tuple):
+            success, msg = result
+        else:
+            success, msg = result, "Processed"
+
+        if success:
+            if "Synced" in msg:
+                log_event('Order', 'Success', f"Auto Sync: {msg}", shop_url=shop_url)
+                set_config('last_order_sync_success',
+                           datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+                           shop_url=shop_url)
+        else:
+            # Permanent skip — no point retrying
+            if "Cancelled" in msg:
+                return
+            log_event('Order', 'Error', f"Auto Sync Failed: {msg}", shop_url=shop_url)
+            raise RuntimeError(msg)
     
 
 
@@ -2003,6 +2030,42 @@ def cleanup_old_logs():
 
 # --- SCHEDULER LOGIC (Runs in Clock Process) ---
 
+def retry_failed_orders(shop_url):
+    """
+    Hourly job: re-enqueues orders from FailedSyncOrder until they succeed.
+    On success, background_order_sync removes the ProcessedOrder lock so the
+    order actually goes through; on failure again, order_sync_failed re-saves it.
+    """
+    with app.app_context():
+        pending = FailedSyncOrder.query.filter_by(shop_url=shop_url).all()
+        if not pending:
+            return
+        log_event('Order', 'Info', f"Hourly retry: re-enqueueing {len(pending)} failed order(s).", shop_url=shop_url)
+        for failed in pending:
+            try:
+                order_data = json.loads(failed.order_data)
+                # Clear the DB lock so the order can be re-processed
+                lock = ProcessedOrder.query.filter_by(shopify_id=failed.shopify_id, shop_url=shop_url).first()
+                if lock:
+                    db.session.delete(lock)
+                    db.session.commit()
+                # Remove from failed table — re-added by on_failure if it fails again
+                db.session.delete(failed)
+                db.session.commit()
+                q_critical.enqueue(
+                    background_order_sync,
+                    shop_url,
+                    order_data,
+                    retry=Retry(max=5, interval=[60, 120, 240, 600, 1200]),
+                    on_failure=order_sync_failed,
+                )
+            except Exception as e:
+                db.session.rollback()
+                log_event('Order', 'Error',
+                    f"Hourly retry could not re-enqueue order {failed.shopify_id}: {e}",
+                    shop_url=shop_url)
+
+
 def _run_shop_schedule(shop_url):
     """
     Runs all scheduled tasks for a single shop.
@@ -2068,6 +2131,11 @@ def _run_shop_schedule(shop_url):
                     shop_url=shop_url)
     except Exception as e:
         print(f"Monthly Sync Error for {shop_url}: {e}")
+
+    # 8. Hourly retry of permanently failed orders
+    if not conn.get(f"last_failed_order_retry_{shop_url}"):
+        q_critical.enqueue(retry_failed_orders, shop_url, job_timeout=1800)
+        conn.setex(f"last_failed_order_retry_{shop_url}", 3600, "done")
 
 
 def run_schedule():

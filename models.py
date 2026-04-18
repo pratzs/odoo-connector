@@ -89,3 +89,16 @@ class ProcessedOrder(db.Model):
     shopify_id = db.Column(db.String(50), primary_key=True)
     shop_url   = db.Column(db.String(255), primary_key=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class FailedSyncOrder(db.Model):
+    __tablename__ = 'failed_sync_orders'
+    __table_args__ = (
+        db.UniqueConstraint('shop_url', 'shopify_id', name='uq_failed_sync_order'),
+    )
+    id              = db.Column(db.Integer, primary_key=True)
+    shop_url        = db.Column(db.String(255), index=True, nullable=False)
+    shopify_id      = db.Column(db.String(50), nullable=False)
+    order_data      = db.Column(db.Text, nullable=False)
+    last_attempt_at = db.Column(db.DateTime, default=datetime.utcnow)
+    attempt_count   = db.Column(db.Integer, default=0)
+    last_error      = db.Column(db.Text)
