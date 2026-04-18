@@ -635,7 +635,7 @@
                 <p class="text-muted mb-4 small">Use these tools with caution to fix data corruption.</p>
 
                 <div class="d-grid gap-3">
-                    <button onclick="if(confirm('This will delete and recreate all Shopify webhooks. Orders will resume syncing after this. Continue?')) triggerAction('/maintenance/reset_webhooks', 'POST')" class="btn btn-primary text-start p-3">
+                    <button onclick="if(confirm('This will delete and recreate all Shopify webhooks. Orders will resume syncing after this. Continue?')) triggerAction('/maintenance/reset_webhooks', 'GET')" class="btn btn-primary text-start p-3">
                         <div class="d-flex justify-content-between align-items-center">
                             <div>
                                 <strong>🔁 Reset Webhooks (Fix Order Sync)</strong><br>
@@ -645,7 +645,7 @@
                         </div>
                     </button>
 
-                    <button onclick="if(confirm('This will force all scheduled jobs (inventory, orders, fulfillments, etc.) to run right now. Continue?')) triggerAction('/maintenance/force_schedule', 'POST')" class="btn btn-primary text-start p-3">
+                    <button onclick="if(confirm('This will force all scheduled jobs (inventory, orders, fulfillments, etc.) to run right now. Continue?')) triggerAction('/maintenance/force_schedule', 'GET')" class="btn btn-primary text-start p-3">
                         <div class="d-flex justify-content-between align-items-center">
                             <div>
                                 <strong>⚡ Force Run All Scheduled Jobs</strong><br>
