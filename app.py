@@ -1317,6 +1317,9 @@ def force_schedule():
             f"last_cust_sync_{shop_url}",
             f"last_prod_sync_{shop_url}",
             f"last_log_flush_{shop_url}",
+            f"last_failed_order_retry_{shop_url}",
+            f"last_order_poll_{shop_url}",
+            f"last_webhook_check_{shop_url}",
         ]
         for key in keys_to_clear:
             conn.delete(key)
@@ -2033,6 +2036,89 @@ def cleanup_old_logs():
 
 # --- SCHEDULER LOGIC (Runs in Clock Process) ---
 
+def poll_missed_orders(shop_url):
+    """
+    Every 30 mins: fetches last 48 hours of Shopify orders and enqueues any
+    not yet in ProcessedOrder. Catches orders missed due to webhook failures.
+    """
+    with app.app_context():
+        if not setup_shopify_session(shop_url):
+            log_event('Order', 'Error', "Order poll: Shopify auth failed.", shop_url=shop_url)
+            return
+
+        odoo = get_odoo_connection(shop_url)
+        if not odoo:
+            return
+
+        try:
+            from datetime import timedelta
+            since = (datetime.utcnow() - timedelta(hours=48)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            orders = shopify.Order.find(status='any', created_at_min=since, limit=250)
+
+            new_count = 0
+            for order in orders:
+                shopify_id = str(order.id)
+                already_done = ProcessedOrder.query.filter_by(shopify_id=shopify_id, shop_url=shop_url).first()
+                already_failed = FailedSyncOrder.query.filter_by(shopify_id=shopify_id, shop_url=shop_url).first()
+                if not already_done and not already_failed:
+                    q_critical.enqueue(
+                        background_order_sync,
+                        shop_url,
+                        order.to_dict(),
+                        retry=Retry(max=5, interval=[60, 120, 240, 600, 1200]),
+                        on_failure=order_sync_failed,
+                    )
+                    new_count += 1
+
+            if new_count > 0:
+                log_event('Order', 'Info',
+                    f"Order poll: found and enqueued {new_count} unsynced order(s).",
+                    shop_url=shop_url)
+        except Exception as e:
+            log_event('Order', 'Error', f"Order poll error: {e}", shop_url=shop_url)
+
+
+def check_and_repair_webhooks(shop_url):
+    """
+    Hourly: verifies all required webhooks exist in Shopify.
+    Recreates any missing ones automatically — no human needed.
+    """
+    with app.app_context():
+        if not setup_shopify_session(shop_url):
+            return
+
+        required_topics = [
+            'orders/create', 'orders/updated', 'orders/paid', 'orders/cancelled',
+            'products/create', 'refunds/create', 'inventory_levels/update',
+        ]
+        app_host = os.getenv('HOST')
+        if not app_host:
+            return
+        target_address = f"{app_host}/webhooks/shopify"
+
+        try:
+            existing = shopify.Webhook.find()
+            existing_topics = {h.topic for h in existing}
+            missing = [t for t in required_topics if t not in existing_topics]
+
+            if missing:
+                log_event('System', 'Warning',
+                    f"Auto-repair: {len(missing)} missing webhook(s) detected, recreating now.",
+                    shop_url=shop_url)
+                for topic in missing:
+                    hook = shopify.Webhook()
+                    hook.topic = topic
+                    hook.address = target_address
+                    hook.format = 'json'
+                    try:
+                        hook.save()
+                        log_event('System', 'Info', f"Auto-repair: recreated {topic}.", shop_url=shop_url)
+                    except Exception as e:
+                        log_event('System', 'Error', f"Auto-repair webhook {topic} failed: {e}", shop_url=shop_url)
+        except Exception as e:
+            log_event('System', 'Error', f"Webhook health check error: {e}", shop_url=shop_url)
+
+
 def retry_failed_orders(shop_url):
     """
     Hourly job: re-enqueues orders from FailedSyncOrder until they succeed.
@@ -2139,6 +2225,16 @@ def _run_shop_schedule(shop_url):
     if not conn.get(f"last_failed_order_retry_{shop_url}"):
         q_critical.enqueue(retry_failed_orders, shop_url, job_timeout=1800)
         conn.setex(f"last_failed_order_retry_{shop_url}", 3600, "done")
+
+    # 9. Poll Shopify for missed orders every 30 mins (webhook gap fallback)
+    if not conn.get(f"last_order_poll_{shop_url}"):
+        q_critical.enqueue(poll_missed_orders, shop_url, job_timeout=600)
+        conn.setex(f"last_order_poll_{shop_url}", 1800, "done")
+
+    # 10. Auto-repair missing webhooks every hour
+    if not conn.get(f"last_webhook_check_{shop_url}"):
+        q_default.enqueue(check_and_repair_webhooks, shop_url, job_timeout=300)
+        conn.setex(f"last_webhook_check_{shop_url}", 3600, "done")
 
 
 def run_schedule():
