@@ -112,9 +112,37 @@ def assign_customer_to_company(company_id, location_id, customer_id, shop_url):
 
 
 # =====================================================
+# EMAIL CONFLICT HELPER
+# =====================================================
+def _get_safe_shopify_email(real_email: str, odoo_id: int, shop_url: str) -> str:
+    """
+    Returns a Shopify-safe unique email for this customer.
+
+    If the real email is already used by a DIFFERENT Odoo customer on the
+    same shop, appends +{odoo_id} before the @ to create a unique alias.
+    The + alias delivers to the same inbox, is invisible to customers,
+    and keeps Shopify accounts distinct without changing anyone's real email.
+
+    CustomerMap always stores the real email regardless — this alias only
+    ever appears in Shopify's email field.
+    """
+    conflict = CustomerMap.query.filter(
+        CustomerMap.email == real_email.lower(),
+        CustomerMap.shop_url == shop_url,
+        CustomerMap.odoo_partner_id != odoo_id
+    ).first()
+
+    if conflict:
+        local, domain = real_email.lower().split('@', 1)
+        return f"{local}+{odoo_id}@{domain}"
+
+    return real_email.lower()
+
+
+# =====================================================
 # SHARED HELPER — builds Shopify customer fields
 # =====================================================
-def _build_customer_fields(p, group_whitelist, sync_vat, sync_salesrep, odoo):
+def _build_customer_fields(p, group_whitelist, sync_vat, sync_salesrep, odoo, shop_url=None):
     """
     Returns a dict of fields to apply to a Shopify customer object,
     or None if this customer should be skipped.
@@ -160,11 +188,18 @@ def _build_customer_fields(p, group_whitelist, sync_vat, sync_salesrep, odoo):
     # Extract email from "Name <email>" or ": Name <email>" formats stored in Odoo
     email_match = re.search(r'[\w._%+\-]+@[\w.\-]+\.[a-zA-Z]{2,}', raw_email)
     if email_match:
-        email = email_match.group(0).lower()
+        real_email = email_match.group(0).lower()
     elif raw_email and '@' in raw_email:
-        email = raw_email.strip().lower()
+        real_email = raw_email.strip().lower()
     else:
-        email = f"no-email-{p['id']}@pos.local"
+        real_email = f"no-email-{p['id']}@pos.local"
+
+    # Use + alias in Shopify if another customer shares this email
+    # CustomerMap always stores real_email — alias only lives in Shopify
+    if shop_url and 'pos.local' not in real_email:
+        email = _get_safe_shopify_email(real_email, p['id'], shop_url)
+    else:
+        email = real_email
 
     # Metafields
     metafields = []
@@ -186,7 +221,8 @@ def _build_customer_fields(p, group_whitelist, sync_vat, sync_salesrep, odoo):
     odoo_tags = odoo.get_tag_names(p.get('category_id', []))
 
     return {
-        'email': email,
+        'email': email,             # Shopify account email (may be + alias)
+        'real_email': real_email,   # Real email — goes to CustomerMap for comms
         'first_name': shopify_first_name,
         'last_name': shopify_last_name,
         'note': staff_note,
@@ -253,13 +289,14 @@ def _sync_single_customer(p, fields, shop_url, odoo):
 
         c.save()
 
-        # Save mapping
+        # Save mapping — always store real_email (not the + alias) for comms
+        real_email = fields.get('real_email', email)
         if not CustomerMap.query.filter_by(shopify_customer_id=str(c.id), shop_url=shop_url).first():
             db.session.add(CustomerMap(
                 shop_url=shop_url,
                 shopify_customer_id=str(c.id),
                 odoo_partner_id=p['id'],
-                email=email
+                email=real_email
             ))
             db.session.commit()
 
@@ -366,7 +403,7 @@ def sync_customers_master(shop_url):
                 break
 
             for p in odoo_customers:
-                cust_fields, skip_reason = _build_customer_fields(p, group_whitelist, sync_vat, sync_salesrep, odoo)
+                cust_fields, skip_reason = _build_customer_fields(p, group_whitelist, sync_vat, sync_salesrep, odoo, shop_url)
 
                 if cust_fields is None:
                     if skip_reason and skip_reason.startswith('group_parent:'):
@@ -460,7 +497,7 @@ def sync_all_customers_absolute_master(shop_url):
                 break
 
             for p in odoo_customers:
-                cust_fields, skip_reason = _build_customer_fields(p, group_whitelist, sync_vat, sync_salesrep, odoo)
+                cust_fields, skip_reason = _build_customer_fields(p, group_whitelist, sync_vat, sync_salesrep, odoo, shop_url)
 
                 if cust_fields is None:
                     if skip_reason and skip_reason.startswith('group_parent:'):

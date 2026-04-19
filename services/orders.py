@@ -71,8 +71,32 @@ def process_order_data(data, odoo_client, shop_url):
                 if existing_ids: return True, "Skipped: Order exists in Odoo."
             except: pass
 
-            # 1. Handle Customer (Strict Email Match - Odoo is Master for Name)
-            partner = odoo.search_partner_by_email(email)
+            # 1. Resolve Odoo partner — CustomerMap first, email fallback
+            # CustomerMap lookup avoids the synthetic/+ email mismatch problem:
+            # Shopify may have a + alias but Odoo only knows the real email.
+            partner = None
+            shopify_customer_id = str(data.get('customer', {}).get('id', ''))
+            if shopify_customer_id:
+                mapping = CustomerMap.query.filter_by(
+                    shopify_customer_id=shopify_customer_id,
+                    shop_url=shop_url
+                ).first()
+                if mapping:
+                    results = odoo.models.execute_kw(
+                        odoo.db, odoo.uid, odoo.password,
+                        'res.partner', 'search_read',
+                        [[['id', '=', mapping.odoo_partner_id]]],
+                        {'fields': ['id', 'name', 'email'], 'limit': 1}
+                    )
+                    if results:
+                        partner = results[0]
+                        log_event('Order', 'Info',
+                            f"Partner resolved via CustomerMap: {partner['name']} (Odoo ID {partner['id']})",
+                            shop_url=shop_url)
+
+            # Fallback: email search (B2C or customers not yet in CustomerMap)
+            if not partner:
+                partner = odoo.search_partner_by_email(email)
             
             cust_data = data.get('customer', {})
             bill_addr = data.get('billing_address') or data.get('shipping_address') or {}

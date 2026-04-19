@@ -211,10 +211,14 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
     customer = None
 
     if '@' in identifier:
-        customer = CustomerMap.query.filter_by(
+        matches = CustomerMap.query.filter_by(
             email=identifier.lower(),
             shop_url=shop_url
-        ).first()
+        ).all()
+        if len(matches) > 1:
+            # Shared email across multiple accounts — can't determine which store
+            return True, "Multiple accounts share this email. Please enter your Store ID instead."
+        customer = matches[0] if matches else None
     else:
         try:
             odoo_id_int = int(identifier)
