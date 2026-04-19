@@ -328,6 +328,7 @@ ngrok http 5000
 | 44 | **Zero failed jobs guarantee** | `_job_safe` decorator applied to all non-critical jobs (`sync_health_monitor`, `poll_missed_orders`, `check_and_repair_webhooks`, `retry_failed_orders`, `generate_daily_ai_report`) — catches all exceptions and logs to SyncLog without re-raising, so RQ never marks them failed |
 | 45 | **`clean_failed_jobs` cleanup** | Global job runs every 30 min — fetches any jobs that do reach the failed registry (critical sync jobs after exhausting all retries), logs them to SyncLog, and removes them so the RQ failed count is always zero |
 | 46 | **Fix AI report RQ path resolution (Sentry PYTHON-FLASK-3)** | `services/__init__.py` is empty so RQ's `import_attribute` could not resolve `services.ai_report` as a string path. Moved to `run_ai_report_job()` wrapper defined in `app.py` (always importable by workers) — enqueued by direct reference, no string path needed |
+| 47 | **Fix `clean_failed_jobs` same RQ string path error** | `'app.clean_failed_jobs'` string also failed for same reason — switched to direct function reference |
 
 ---
 
