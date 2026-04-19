@@ -323,6 +323,7 @@ ngrok http 5000
 | 39 | **N+1 query fix in inventory sync** | Sentry caught 6 separate `app_settings` queries per sync run; replaced with single bulk query — see Sentry Bug #2 below |
 | 40 | **Orders added to Health Monitor** | `background_order_sync` now writes to `SyncHealth` on success/failure; Orders row appears in dashboard health card with "webhook" label instead of a countdown (no fixed interval — fires on customer purchase) |
 | 41 | **AI Daily Health Report** | New `services/ai_report.py`; global daily job collects 24h data from all shops (SyncHealth, SyncLogs, FailedSyncOrder, ProcessedOrder, queue counts), sends to Claude Haiku API, emails plain-English summary to `REPORT_EMAIL` every 24 hours |
+| 42 | **Manual AI Report button in Tools** | `POST /maintenance/send_ai_report` added; "Send AI Health Report Now" button in Tools page enqueues the report immediately and resets the daily TTL so the auto-schedule is unaffected |
 
 ---
 
