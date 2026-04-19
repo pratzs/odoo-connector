@@ -1495,11 +1495,22 @@ def register_webhooks_manual():
     return jsonify({"message": "Webhook Registration Complete", "details": results})
 
 
+def run_ai_report_job():
+    """
+    RQ-safe wrapper for the AI daily report.
+    Defined in app.py so RQ workers can always resolve it — avoids the
+    services package attribute resolution issue with string-path enqueueing.
+    """
+    from services.ai_report import _run_report
+    with app.app_context():
+        _run_report()
+
+
 @app.route('/maintenance/send_ai_report', methods=['POST'])
 @require_shopify_session
 def send_ai_report_now():
     conn.delete("last_ai_daily_report")  # clear TTL so scheduler doesn't skip next auto-run
-    q_default.enqueue('services.ai_report.generate_daily_ai_report', job_timeout=120)
+    q_default.enqueue(run_ai_report_job, job_timeout=120)
     return jsonify({'message': 'AI health report queued — check your email in ~30 seconds.'})
 
 
@@ -2667,7 +2678,7 @@ def run_schedule():
 
                 # 4. Global — AI daily health report (once per day)
                 if not conn.get("last_ai_daily_report"):
-                    q_default.enqueue('services.ai_report.generate_daily_ai_report', job_timeout=120)
+                    q_default.enqueue(run_ai_report_job, job_timeout=120)
                     conn.setex("last_ai_daily_report", 86400, "done")
 
         except Exception as e:
