@@ -670,6 +670,16 @@
                         </div>
                     </button>
 
+                    <button onclick="if(confirm('This will generate and email the AI health report right now. Continue?')) triggerAction('/maintenance/send_ai_report', 'POST')" class="btn btn-secondary text-start p-3">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <strong>🤖 Send AI Health Report Now</strong><br>
+                                <small class="text-muted">Generates and emails the daily AI report immediately. Useful for testing or on-demand check-ins.</small>
+                            </div>
+                            <i class="bi bi-envelope text-muted"></i>
+                        </div>
+                    </button>
+
                     <button onclick="triggerAction('/maintenance/fix_variants', 'POST')" class="btn btn-secondary text-start p-3">
                         <div class="d-flex justify-content-between align-items-center">
                             <div>

@@ -1469,6 +1469,15 @@ def register_webhooks_manual():
     return jsonify({"message": "Webhook Registration Complete", "details": results})
 
 
+@app.route('/maintenance/send_ai_report', methods=['POST'])
+@require_shopify_session
+def send_ai_report_now():
+    from services.ai_report import generate_daily_ai_report
+    conn.delete("last_ai_daily_report")  # clear TTL so scheduler doesn't skip next auto-run
+    q_default.enqueue(generate_daily_ai_report, job_timeout=120)
+    return jsonify({'message': 'AI health report queued — check your email in ~30 seconds.'})
+
+
 @app.route('/maintenance/force_schedule', methods=['GET'])
 @require_shopify_session
 def force_schedule():
