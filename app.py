@@ -1964,6 +1964,21 @@ def api_dashboard_status():
                 'stale_secs':    int((now - row.last_attempt_at).total_seconds()) if row and row.last_attempt_at else None,
                 'stale_threshold': interval * 2,
             }
+        # Orders are webhook-driven — no interval, no TTL key; track health by failure count only
+        order_row = row_map.get('order')
+        health_rows['order'] = {
+            'interval_secs': None,
+            'last_attempt':  order_row.last_attempt_at.strftime('%Y-%m-%d %H:%M:%S') if order_row and order_row.last_attempt_at else None,
+            'last_success':  order_row.last_success_at.strftime('%Y-%m-%d %H:%M:%S') if order_row and order_row.last_success_at else None,
+            'failures':      order_row.consecutive_failures if order_row else 0,
+            'last_error':    (order_row.last_error[:120] if order_row and order_row.last_error else None),
+            'next_run_secs': None,
+            'ttl_missing':   False,
+            'ttl_stuck':     False,
+            'stale_secs':    None,
+            'stale_threshold': None,
+        }
+
         result['health'] = health_rows
     except Exception as e:
         result['health'] = {}
@@ -2055,11 +2070,13 @@ def background_order_sync(shop_url, order_data):
                 set_config('last_order_sync_success',
                            datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
                            shop_url=shop_url)
+                _update_sync_health(shop_url, 'order', success=True)
         else:
             # Permanent skip — no point retrying
             if "Cancelled" in msg:
                 return
             log_event('Order', 'Error', f"Auto Sync Failed: {msg}", shop_url=shop_url)
+            _update_sync_health(shop_url, 'order', success=False, error=RuntimeError(msg))
             raise RuntimeError(msg)
     
 

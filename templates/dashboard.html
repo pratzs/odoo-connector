@@ -1463,7 +1463,7 @@ function fmtCountdown(secs) {
     return Math.floor(secs/3600) + 'h ' + Math.floor((secs%3600)/60) + 'm';
 }
 function entityLabel(key) {
-    return {inventory:'Inventory',fulfillment:'Fulfillments',cancellation:'Cancellations','return':'Returns',customer:'Customers',product:'Products'}[key] || key;
+    return {inventory:'Inventory',fulfillment:'Fulfillments',cancellation:'Cancellations','return':'Returns',customer:'Customers',product:'Products',order:'Orders'}[key] || key;
 }
 
 function refreshDashboardStatus() {
@@ -1519,21 +1519,23 @@ function refreshDashboardStatus() {
             for (const [entity, h] of Object.entries(health)) {
                 // Determine status colour
                 let dot, statusText;
+                const isWebhook = h.interval_secs === null;
                 const staleSecs = h.stale_secs;
-                if (staleSecs === null) {
+                if (!h.last_attempt) {
                     dot = '#adb5bd'; statusText = 'Never run';
                 } else if (h.failures > 0) {
                     dot = '#d82c0d'; statusText = h.failures + ' fail' + (h.failures>1?'s':'');
-                } else if (staleSecs > h.stale_threshold) {
+                } else if (!isWebhook && staleSecs > h.stale_threshold) {
                     dot = '#d82c0d'; statusText = 'Overdue';
-                } else if (staleSecs > h.stale_threshold * 0.75) {
+                } else if (!isWebhook && staleSecs > h.stale_threshold * 0.75) {
                     dot = '#ffc453'; statusText = 'Stale';
                 } else {
                     dot = '#008060'; statusText = 'OK';
                 }
-                // Next run label
+                // Next run label — webhook-driven entities have no countdown
                 let nextRun;
-                if (h.ttl_missing) nextRun = '<span class="text-warning" style="font-size:10px;">queued</span>';
+                if (isWebhook) nextRun = '<span style="font-size:10px;color:#6d7175;">webhook</span>';
+                else if (h.ttl_missing) nextRun = '<span class="text-warning" style="font-size:10px;">queued</span>';
                 else if (h.ttl_stuck) nextRun = '<span class="text-danger" style="font-size:10px;">stuck!</span>';
                 else nextRun = '<span style="font-size:10px; color:#6d7175;">in ' + fmtCountdown(h.next_run_secs) + '</span>';
 
