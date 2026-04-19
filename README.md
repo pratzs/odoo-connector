@@ -324,6 +324,7 @@ ngrok http 5000
 | 40 | **Orders added to Health Monitor** | `background_order_sync` now writes to `SyncHealth` on success/failure; Orders row appears in dashboard health card with "webhook" label instead of a countdown (no fixed interval — fires on customer purchase) |
 | 41 | **AI Daily Health Report** | New `services/ai_report.py`; global daily job collects 24h data from all shops (SyncHealth, SyncLogs, FailedSyncOrder, ProcessedOrder, queue counts), sends to Claude Haiku API, emails plain-English summary to `REPORT_EMAIL` every 24 hours |
 | 42 | **Manual AI Report button in Tools** | `POST /maintenance/send_ai_report` added; "Send AI Health Report Now" button in Tools page enqueues the report immediately and resets the daily TTL so the auto-schedule is unaffected |
+| 43 | **Fix RQ serialization error on AI report job** | Changed enqueue call from direct function reference to string path `'services.ai_report.generate_daily_ai_report'` so RQ can reliably deserialize the job on retry without `ValueError: Invalid attribute name` |
 
 ---
 
