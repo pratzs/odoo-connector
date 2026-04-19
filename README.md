@@ -329,6 +329,9 @@ ngrok http 5000
 | 45 | **`clean_failed_jobs` cleanup** | Global job runs every 30 min — fetches any jobs that do reach the failed registry (critical sync jobs after exhausting all retries), logs them to SyncLog, and removes them so the RQ failed count is always zero |
 | 46 | **Fix AI report RQ path resolution (Sentry PYTHON-FLASK-3)** | `services/__init__.py` is empty so RQ's `import_attribute` could not resolve `services.ai_report` as a string path. Moved to `run_ai_report_job()` wrapper defined in `app.py` (always importable by workers) — enqueued by direct reference, no string path needed |
 | 47 | **Fix `clean_failed_jobs` same RQ string path error** | `'app.clean_failed_jobs'` string also failed for same reason — switched to direct function reference |
+| 48 | **N+1 fix in product sync** | Replaced 12 individual `get_config()` calls in `sync_products_master` with a single bulk `AppSetting` query — same pattern as inventory sync fix (entry #39) |
+| 49 | **Centralise SMTP config** | `SMTP_SERVER`, `SMTP_PORT`, `SMTP_FROM`, `SMTP_PASSWORD` defined once as module-level constants in `utils.py`; `ai_report.py` and `app.py` contact form now import from there — no more 5-file edits to change email provider |
+| 50 | **AI report errors now logged to DB** | Top-level exception in `generate_daily_ai_report` previously only `print()`ed; now also writes to `SyncLog` so failures are visible in the dashboard Live Logs tab |
 
 ---
 
