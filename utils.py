@@ -13,7 +13,13 @@ from contextlib import contextmanager
 
 # 1. SETUP REDIS & QUEUES
 redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
-conn = redis.from_url(redis_url)
+conn = redis.from_url(
+    redis_url,
+    health_check_interval=30,      # ping every 30s to keep idle connections alive
+    retry_on_timeout=True,
+    retry_on_error=[redis.exceptions.ConnectionError, redis.exceptions.TimeoutError],
+    socket_keepalive=True,
+)
 
 # q_default = Slow Lane (Products, Images, heavy stuff) -> Timeout: 2 Hours
 q_default = Queue('default', connection=conn, default_timeout=7200)

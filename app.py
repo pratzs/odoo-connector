@@ -340,17 +340,31 @@ def perform_inventory_sync(shop_url):
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): return
 
+        # Bulk-load all settings for this shop in one query to avoid N+1
+        _setting_keys = {'shopify_target_location_id', 'inventory_locations', 'inventory_field',
+                         'sync_zero_stock', 'alert_threshold', 'alert_email'}
+        _rows = AppSetting.query.filter(
+            AppSetting.shop_url == shop_url,
+            AppSetting.key.in_(_setting_keys)
+        ).all()
+        _cfg = {}
+        for r in _rows:
+            try:
+                _cfg[r.key] = json.loads(r.value)
+            except Exception:
+                _cfg[r.key] = r.value
+
         # --- AUTO-DETECT SHOPIFY LOCATION ---
         shopify_location_id = None
         try:
-            saved_id = get_config('shopify_target_location_id', None, shop_url=shop_url)
-            
+            saved_id = _cfg.get('shopify_target_location_id')
+
             if saved_id:
                 shopify_location_id = int(saved_id)
             else:
                 locs = shopify.Location.find()
                 active_locs = [l for l in locs if l.active]
-                
+
                 if active_locs:
                     shopify_location_id = active_locs[0].id
                     log_event('Inventory', 'Info', f"Auto-selected Shopify Location: {active_locs[0].name} (ID: {shopify_location_id})", shop_url=shop_url)
@@ -361,12 +375,12 @@ def perform_inventory_sync(shop_url):
             log_event('Inventory', 'Error', f"Failed to detect Shopify Location: {e}", shop_url=shop_url)
             return
 
-        # Load Configs
-        target_locations = get_config('inventory_locations', [], shop_url=shop_url)
-        target_field = get_config('inventory_field', 'qty_available', shop_url=shop_url)
-        sync_zero = get_config('sync_zero_stock', False, shop_url=shop_url)
-        alert_threshold = int(get_config('alert_threshold', 50, shop_url=shop_url))
-        alert_email = get_config('alert_email', None, shop_url=shop_url)
+        # Load Configs from pre-fetched dict
+        target_locations = _cfg.get('inventory_locations') or []
+        target_field     = _cfg.get('inventory_field') or 'qty_available'
+        sync_zero        = _cfg.get('sync_zero_stock') in (True, 'true')
+        alert_threshold  = int(_cfg.get('alert_threshold') or 50)
+        alert_email      = _cfg.get('alert_email')
 
         # 1. FETCH SHOPIFY VARIANTS (ACTIVE ONLY)
         shopify_variants = {} 
