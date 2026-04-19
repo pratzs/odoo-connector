@@ -232,6 +232,8 @@ Dashboard JS polls this endpoint every 30 seconds and renders color-coded dots (
 | `ENCRYPTION_KEY` | ✅ | Fernet key for encrypting Odoo passwords at rest |
 | `SMTP_PASSWORD` | ✅ | SMTP password for inventory alert emails |
 | `SENTRY_DSN` | ⚠️ | Sentry DSN for error tracking (optional but recommended) |
+| `ANTHROPIC_API_KEY` | ⚠️ | Claude API key — required for AI daily health report |
+| `REPORT_EMAIL` | ⚠️ | Email address to receive the daily AI health report |
 
 ---
 
@@ -320,6 +322,7 @@ ngrok http 5000
 | 38 | **Redis idle disconnect fix** | Sentry caught unhandled `ConnectionError` from Redis; fixed with `health_check_interval=30`, `socket_keepalive`, and `retry_on_error` — see Sentry Bug #1 below |
 | 39 | **N+1 query fix in inventory sync** | Sentry caught 6 separate `app_settings` queries per sync run; replaced with single bulk query — see Sentry Bug #2 below |
 | 40 | **Orders added to Health Monitor** | `background_order_sync` now writes to `SyncHealth` on success/failure; Orders row appears in dashboard health card with "webhook" label instead of a countdown (no fixed interval — fires on customer purchase) |
+| 41 | **AI Daily Health Report** | New `services/ai_report.py`; global daily job collects 24h data from all shops (SyncHealth, SyncLogs, FailedSyncOrder, ProcessedOrder, queue counts), sends to Claude Haiku API, emails plain-English summary to `REPORT_EMAIL` every 24 hours |
 
 ---
 

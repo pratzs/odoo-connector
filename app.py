@@ -2593,6 +2593,12 @@ def run_schedule():
                     cleanup_old_logs()
                     conn.setex("last_log_cleanup", 86400, "done")
 
+                # 3. Global — AI daily health report (once per day)
+                if not conn.get("last_ai_daily_report"):
+                    from services.ai_report import generate_daily_ai_report
+                    q_default.enqueue(generate_daily_ai_report, job_timeout=120)
+                    conn.setex("last_ai_daily_report", 86400, "done")
+
         except Exception as e:
             # Catch DB connection errors etc. so the clock process never dies
             print(f"Scheduler outer loop error: {e}")
