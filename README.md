@@ -16,6 +16,7 @@ A production-ready Flask application that keeps Odoo ERP and Shopify stores in r
 8. [Local Development](#local-development)
 9. [Render Deployment Guide](#render-deployment-guide)
 10. [Changelog](#changelog)
+11. [Sentry Bug Reports & Fixes](#sentry-bug-reports--fixes)
 
 ---
 
@@ -312,3 +313,77 @@ ngrok http 5000
 | 35 | **Webhook rate limiting** | Redis counter `wh_rate_{shop}` limits webhooks to 100/60s per shop; returns 429 on breach |
 | 36 | **FailedSyncOrder 50-attempt cap** | Orders exceeding 50 retry attempts trigger an SMTP email alert to the configured shop admin email |
 | 37 | **Failed order pile-up warning** | `sync_health_monitor` logs a warning if ≥3 failed orders are queued for any shop |
+| 38 | **Redis idle disconnect fix** | Sentry caught unhandled `ConnectionError` from Redis; fixed with `health_check_interval=30`, `socket_keepalive`, and `retry_on_error` — see Sentry Bug #1 below |
+| 39 | **N+1 query fix in inventory sync** | Sentry caught 6 separate `app_settings` queries per sync run; replaced with single bulk query — see Sentry Bug #2 below |
+
+---
+
+## Sentry Bug Reports & Fixes
+
+Sentry was added in entry #33. Within hours of going live it caught two real production bugs that would have been invisible without it.
+
+---
+
+### Bug #1 — `ConnectionError: Connection closed by server`
+**Sentry ID:** PYTHON-FLASK-2  
+**Severity:** Unhandled error (crashed the worker process)  
+**Discovered:** 2026-04-19, ~32 minutes after first deploy with Sentry enabled
+
+**What happened:**  
+Our app keeps a persistent connection open to Redis (the fast memory store used for job queues and rate limiting). When the app was idle for a few minutes — no jobs running, no webhooks coming in — the Redis server on Render quietly closed the connection from its side to free up resources. Our app had no idea. The next time a sync job tried to use Redis, it reached for a connection that no longer existed and crashed with an unhandled `ConnectionError`. Without Sentry, this would have shown up as a silent worker failure with no explanation.
+
+**Stack trace pointed to:** `redis._parsers.socket` → `_read_from_socket` — deep inside the Redis client library trying to read from a socket that was already closed (`fd=-1`).
+
+**Root cause:** `redis.from_url()` was called with no keepalive settings. Default behaviour is to hold connections open silently with no heartbeat — so when the server closes them, the client doesn't find out until it tries to use the dead socket.
+
+**Fix applied** (`utils.py`):
+```python
+conn = redis.from_url(
+    redis_url,
+    health_check_interval=30,   # ping Redis every 30s to keep connection alive
+    retry_on_timeout=True,
+    retry_on_error=[redis.exceptions.ConnectionError, redis.exceptions.TimeoutError],
+    socket_keepalive=True,
+)
+```
+
+**Prevention going forward:**  
+- `health_check_interval=30` sends a silent ping every 30 seconds — the server never sees a long silence and never drops the connection
+- `retry_on_error` means if a connection ever does die, the client reconnects automatically instead of crashing
+- This class of error will not appear in Sentry again
+
+---
+
+### Bug #2 — N+1 Query: `SELECT app_settings...`
+**Sentry ID:** PYTHON-FLASK-1  
+**Severity:** Performance issue (not a crash, but wasteful and worsens with scale)  
+**Discovered:** 2026-04-19, ~3 hours after first deploy with Sentry enabled  
+**Triggered by:** `app.run_inventory_sync`
+
+**What happened:**  
+Every time inventory sync ran (every 30 minutes), the function needed 6 configuration values for the shop: location ID, target locations, inventory field, zero-stock flag, alert threshold, and alert email. Each value was fetched by calling `get_config()` individually. `get_config()` runs a `SELECT` query against the `app_settings` database table every time it is called. So for each sync run, the app made **6 round trips to the database** when 1 would do.
+
+This is called an **N+1 query pattern** — instead of asking "give me everything I need in one go", the code asks N times. With one shop it's barely noticeable. With many shops running syncs constantly, it becomes significant load on the database.
+
+**Root cause:** `get_config()` is a convenience helper designed for one-off lookups. Using it 6 times in a row in a hot path was the wrong tool.
+
+**Fix applied** (`app.py`):
+```python
+# One query fetches all 6 keys at once
+_rows = AppSetting.query.filter(
+    AppSetting.shop_url == shop_url,
+    AppSetting.key.in_({'shopify_target_location_id', 'inventory_locations',
+                         'inventory_field', 'sync_zero_stock', 'alert_threshold', 'alert_email'})
+).all()
+_cfg = {r.key: (json.loads(r.value) if ... else r.value) for r in _rows}
+
+# All 6 values now read from memory — zero extra DB queries
+target_locations = _cfg.get('inventory_locations') or []
+target_field     = _cfg.get('inventory_field') or 'qty_available'
+# ... etc
+```
+
+**Prevention going forward:**  
+- Any sync function that needs multiple config values should bulk-load them in one query at the top, not call `get_config()` in sequence
+- `get_config()` is still fine for one-off single-key lookups (e.g. in webhook handlers)
+- Sentry's N+1 detector will flag any future recurrence of this pattern automatically
