@@ -127,19 +127,35 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
             except Exception:
                 currency = 'NZD'  # Safe fallback
 
+        # Bulk-load all product sync settings in one query — avoids N+1
+        _cfg_keys = {'prod_sync_title', 'prod_sync_price', 'prod_sync_cost', 'prod_sync_desc',
+                     'prod_sync_tags', 'prod_sync_images', 'prod_sync_vendor', 'prod_sync_barcode',
+                     'prod_auto_create', 'prod_auto_publish',
+                     'prod_sync_meta_original_price', 'prod_sync_meta_vendor_code'}
+        _rows = AppSetting.query.filter(
+            AppSetting.shop_url == shop_url,
+            AppSetting.key.in_(_cfg_keys)
+        ).all()
+        _raw = {}
+        for r in _rows:
+            try:
+                _raw[r.key] = json.loads(r.value)
+            except Exception:
+                _raw[r.key] = r.value
+
         cfg = {
-            'title': get_config('prod_sync_title', True, shop_url=shop_url),
-            'price': get_config('prod_sync_price', True, shop_url=shop_url),
-            'cost': get_config('prod_sync_cost', True, shop_url=shop_url),
-            'desc': get_config('prod_sync_desc', True, shop_url=shop_url),
-            'tags': get_config('prod_sync_tags', False, shop_url=shop_url),
-            'images': get_config('prod_sync_images', False, shop_url=shop_url),
-            'vendor': get_config('prod_sync_vendor', True, shop_url=shop_url),
-            'barcode': get_config('prod_sync_barcode', True, shop_url=shop_url),
-            'auto_create': get_config('prod_auto_create', False, shop_url=shop_url),
-            'auto_publish': get_config('prod_auto_publish', False, shop_url=shop_url),
-            'meta_original_price': get_config('prod_sync_meta_original_price', False, shop_url=shop_url),
-            'meta_vendor_code': get_config('prod_sync_meta_vendor_code', False, shop_url=shop_url),
+            'title':               _raw.get('prod_sync_title', True),
+            'price':               _raw.get('prod_sync_price', True),
+            'cost':                _raw.get('prod_sync_cost', True),
+            'desc':                _raw.get('prod_sync_desc', True),
+            'tags':                _raw.get('prod_sync_tags', False),
+            'images':              _raw.get('prod_sync_images', False),
+            'vendor':              _raw.get('prod_sync_vendor', True),
+            'barcode':             _raw.get('prod_sync_barcode', True),
+            'auto_create':         _raw.get('prod_auto_create', False),
+            'auto_publish':        _raw.get('prod_auto_publish', False),
+            'meta_original_price': _raw.get('prod_sync_meta_original_price', False),
+            'meta_vendor_code':    _raw.get('prod_sync_meta_vendor_code', False),
             'currency': currency
         }
 

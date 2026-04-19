@@ -3334,16 +3334,11 @@ def send_support_email():
         if not shop_url or not user_email or not message_body:
             return jsonify({'success': False, 'error': 'Missing required fields'}), 400
 
-        # 2. Email Configuration (Namecheap cPanel)
-        # ---------------------------------------------------------
-        SMTP_SERVER = "premium74.web-hosting.com"
-        SMTP_PORT = 465  # SSL Port
-        
-        SENDER_EMAIL = "hello@tripsterdevelopers.com"
-        SENDER_PASSWORD = os.getenv('SMTP_PASSWORD') 
-        
-        RECIPIENT_EMAIL = "hello@tripsterdevelopers.com"
-        # ---------------------------------------------------------
+        # 2. Email Configuration
+        from utils import SMTP_SERVER, SMTP_PORT, SMTP_FROM, SMTP_PASSWORD
+        SENDER_EMAIL    = SMTP_FROM
+        SENDER_PASSWORD = SMTP_PASSWORD
+        RECIPIENT_EMAIL = SMTP_FROM
 
         # 3. Format the Email Content
         full_subject = f"[{shop_url}] Support: {ticket_subject}"

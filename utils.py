@@ -11,6 +11,12 @@ from models import db, AppSetting, SyncLog, Shop
 from odoo_client import OdooClient
 from contextlib import contextmanager
 
+# SMTP config — single definition used across the app
+SMTP_SERVER    = "premium74.web-hosting.com"
+SMTP_PORT      = 465
+SMTP_FROM      = "hello@tripsterdevelopers.com"
+SMTP_PASSWORD  = os.getenv('SMTP_PASSWORD')
+
 # 1. SETUP REDIS & QUEUES
 redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
 conn = redis.from_url(
@@ -241,12 +247,6 @@ def send_inventory_alert(shop_url, email_address, discrepancies):
     if not discrepancies:
         return
 
-    # --- CONFIGURATION (Matches your app.py) ---
-    SMTP_SERVER = "premium74.web-hosting.com"
-    SMTP_PORT = 465
-    SENDER_EMAIL = "hello@tripsterdevelopers.com"
-    SENDER_PASSWORD = os.getenv('SMTP_PASSWORD')
-    # -------------------------------------------
 
     # Build the email content
     content = f"⚠️ Inventory Discrepancies Found for {shop_url}\n"
@@ -261,13 +261,13 @@ def send_inventory_alert(shop_url, email_address, discrepancies):
     msg = EmailMessage()
     msg.set_content(content)
     msg['Subject'] = f"[{shop_url}] Inventory Alert Report"
-    msg['From'] = SENDER_EMAIL
+    msg['From'] = SMTP_FROM
     msg['To'] = email_address
 
     # Send Email
     try:
         with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as smtp:
-            smtp.login(SENDER_EMAIL, SENDER_PASSWORD)
+            smtp.login(SMTP_FROM, SMTP_PASSWORD)
             smtp.send_message(msg)
         print(f"✅ Inventory Alert sent to {email_address}")
     except Exception as e:

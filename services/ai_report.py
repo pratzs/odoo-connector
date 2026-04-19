@@ -18,6 +18,13 @@ def generate_daily_ai_report():
             _run_report()
     except Exception as e:
         print(f"[AI Report] Suppressed top-level error: {e}")
+        try:
+            from app import app
+            from utils import log_event
+            with app.app_context():
+                log_event('AI Report', 'Error', f"Suppressed error: {str(e)[:200]}", shop_url='System')
+        except Exception:
+            pass
 
 
 def _run_report():
@@ -138,10 +145,9 @@ Be direct, specific, and keep the total under 200 words."""
 
 
 def _send_report_email(recipient, report_text, report_date):
-    SMTP_SERVER   = 'premium74.web-hosting.com'
-    SMTP_PORT     = 465
-    SENDER_EMAIL  = 'hello@tripsterdevelopers.com'
-    SENDER_PASSWORD = os.getenv('SMTP_PASSWORD')
+    from utils import SMTP_SERVER, SMTP_PORT, SMTP_FROM, SMTP_PASSWORD
+    SENDER_EMAIL    = SMTP_FROM
+    SENDER_PASSWORD = SMTP_PASSWORD
 
     html = f"""<html>
 <body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#333;">
