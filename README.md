@@ -332,6 +332,9 @@ ngrok http 5000
 | 48 | **N+1 fix in product sync** | Replaced 12 individual `get_config()` calls in `sync_products_master` with a single bulk `AppSetting` query — same pattern as inventory sync fix (entry #39) |
 | 49 | **Centralise SMTP config** | `SMTP_SERVER`, `SMTP_PORT`, `SMTP_FROM`, `SMTP_PASSWORD` defined once as module-level constants in `utils.py`; `ai_report.py` and `app.py` contact form now import from there — no more 5-file edits to change email provider |
 | 50 | **AI report errors now logged to DB** | Top-level exception in `generate_daily_ai_report` previously only `print()`ed; now also writes to `SyncLog` so failures are visible in the dashboard Live Logs tab |
+| 51 | **Phase 1: shared-email customer safety** | `_get_safe_shopify_email()` added to `customers.py` — if two Odoo customers share an email, the second gets `{local}+{odoo_id}@{domain}` as their Shopify account email; `CustomerMap` always stores the real email for comms |
+| 52 | **Multipass shared-email guard** | `request_password_setup` now detects multiple `CustomerMap` rows for the same email and returns a message directing the customer to use their Store ID instead |
+| 53 | **CustomerMap-first order routing** | `process_order_data` now resolves the Odoo partner by `shopify_customer_id` via `CustomerMap` before falling back to email search — prevents duplicate Odoo partners when Shopify email is a `+` alias |
 
 ---
 
