@@ -1472,9 +1472,8 @@ def register_webhooks_manual():
 @app.route('/maintenance/send_ai_report', methods=['POST'])
 @require_shopify_session
 def send_ai_report_now():
-    from services.ai_report import generate_daily_ai_report
     conn.delete("last_ai_daily_report")  # clear TTL so scheduler doesn't skip next auto-run
-    q_default.enqueue(generate_daily_ai_report, job_timeout=120)
+    q_default.enqueue('services.ai_report.generate_daily_ai_report', job_timeout=120)
     return jsonify({'message': 'AI health report queued — check your email in ~30 seconds.'})
 
 
@@ -2604,8 +2603,7 @@ def run_schedule():
 
                 # 3. Global — AI daily health report (once per day)
                 if not conn.get("last_ai_daily_report"):
-                    from services.ai_report import generate_daily_ai_report
-                    q_default.enqueue(generate_daily_ai_report, job_timeout=120)
+                    q_default.enqueue('services.ai_report.generate_daily_ai_report', job_timeout=120)
                     conn.setex("last_ai_daily_report", 86400, "done")
 
         except Exception as e:
