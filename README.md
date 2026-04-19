@@ -169,6 +169,10 @@ Runs every 2 hours per shop. For each entity, compares `last_attempt_at` to `now
 - If stale (not attempted in 2× normal interval) → re-enqueues immediately
 - If `FailedSyncOrder` count ≥ 3 → logs a warning event
 
+### Order Health (Webhook-Driven)
+
+Orders are event-driven (fire when a customer buys), not scheduled, so they have no fixed interval. `background_order_sync` writes to `SyncHealth` with entity `order` on every attempt. The dashboard shows an **Orders** row with a `webhook` label instead of a countdown — dot colour is based purely on `consecutive_failures` (green = all good, red = failures present).
+
 ### Dashboard Health Card
 
 `GET /api/dashboard/status` returns JSON with:
@@ -315,6 +319,7 @@ ngrok http 5000
 | 37 | **Failed order pile-up warning** | `sync_health_monitor` logs a warning if ≥3 failed orders are queued for any shop |
 | 38 | **Redis idle disconnect fix** | Sentry caught unhandled `ConnectionError` from Redis; fixed with `health_check_interval=30`, `socket_keepalive`, and `retry_on_error` — see Sentry Bug #1 below |
 | 39 | **N+1 query fix in inventory sync** | Sentry caught 6 separate `app_settings` queries per sync run; replaced with single bulk query — see Sentry Bug #2 below |
+| 40 | **Orders added to Health Monitor** | `background_order_sync` now writes to `SyncHealth` on success/failure; Orders row appears in dashboard health card with "webhook" label instead of a countdown (no fixed interval — fires on customer purchase) |
 
 ---
 
