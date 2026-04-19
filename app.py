@@ -651,6 +651,32 @@ def run_product_sync(shop_url):
     _run_with_health('product', shop_url, sync_products_master)
 
 
+def _job_safe(fn):
+    """
+    Decorator for non-critical background jobs.
+    Catches all unhandled exceptions so the job always exits cleanly from RQ's
+    perspective — it gets logged to SyncLog but never lands in the failed registry.
+    Do NOT use on sync jobs that rely on RQ's retry mechanism (they must raise).
+    """
+    import functools
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            shop_url = args[0] if args else 'System'
+            print(f"[SafeJob] {fn.__name__} suppressed error: {e}")
+            try:
+                with app.app_context():
+                    log_event(fn.__name__, 'Error',
+                              f"Suppressed job error: {str(e)[:200]}",
+                              shop_url=shop_url)
+            except Exception:
+                pass
+    return wrapper
+
+
+@_job_safe
 def sync_health_monitor(shop_url):
     """
     Final safety net: checks that every entity was ATTEMPTED within 2× its expected interval.
@@ -2319,6 +2345,36 @@ def test_odoo_health():
 
 
 
+def clean_failed_jobs():
+    """
+    Runs every 30 min. Belt-and-suspenders for critical sync jobs that exhaust
+    all retries. Logs each failed job to SyncLog then removes it from the
+    failed registry so the queue always stays clean.
+    """
+    try:
+        from rq.job import Job
+        for registry, label in [
+            (q_critical.failed_job_registry, 'critical'),
+            (q_default.failed_job_registry, 'default'),
+        ]:
+            for job_id in registry.get_job_ids():
+                try:
+                    job = Job.fetch(job_id, connection=conn)
+                    shop_url = job.args[0] if job.args else 'System'
+                    func_name = job.func_name.split('.')[-1] if job.func_name else 'unknown'
+                    error_msg = str(job.exc_info)[:200] if job.exc_info else 'No details'
+                    with app.app_context():
+                        log_event(func_name, 'Error',
+                                  f"[{label}] Job exhausted all retries: {error_msg}",
+                                  shop_url=shop_url)
+                    registry.remove(job, delete_job=True)
+                    print(f"[CleanFailedJobs] Removed and logged failed job {job_id} ({func_name})")
+                except Exception as e:
+                    print(f"[CleanFailedJobs] Could not process job {job_id}: {e}")
+    except Exception as e:
+        print(f"[CleanFailedJobs] Outer error: {e}")
+
+
 # 1. Define Cleanup Function FIRST
 def cleanup_old_logs():
     """Deletes logs older than 14 days to keep DB light."""
@@ -2333,6 +2389,7 @@ def cleanup_old_logs():
 
 # --- SCHEDULER LOGIC (Runs in Clock Process) ---
 
+@_job_safe
 def poll_missed_orders(shop_url):
     """
     Every 30 mins: fetches last 48 hours of Shopify orders and enqueues any
@@ -2375,6 +2432,7 @@ def poll_missed_orders(shop_url):
             log_event('Order', 'Error', f"Order poll error: {e}", shop_url=shop_url)
 
 
+@_job_safe
 def check_and_repair_webhooks(shop_url):
     """
     Hourly: verifies all required webhooks exist in Shopify.
@@ -2416,6 +2474,7 @@ def check_and_repair_webhooks(shop_url):
             log_event('System', 'Error', f"Webhook health check error: {e}", shop_url=shop_url)
 
 
+@_job_safe
 def retry_failed_orders(shop_url):
     """
     Hourly job: re-enqueues orders from FailedSyncOrder until they succeed.
@@ -2601,7 +2660,12 @@ def run_schedule():
                     cleanup_old_logs()
                     conn.setex("last_log_cleanup", 86400, "done")
 
-                # 3. Global — AI daily health report (once per day)
+                # 3. Global — clean RQ failed registries every 30 min
+                if not conn.get("last_failed_job_cleanup"):
+                    q_default.enqueue('app.clean_failed_jobs', job_timeout=60)
+                    conn.setex("last_failed_job_cleanup", 1800, "done")
+
+                # 4. Global — AI daily health report (once per day)
                 if not conn.get("last_ai_daily_report"):
                     q_default.enqueue('services.ai_report.generate_daily_ai_report', job_timeout=120)
                     conn.setex("last_ai_daily_report", 86400, "done")

@@ -10,10 +10,14 @@ def generate_daily_ai_report():
     Global daily job (not per-shop).
     Collects 24h health data across every active shop, asks Claude Haiku
     for a plain-English summary, and emails it to REPORT_EMAIL.
+    Catches all exceptions so this job never lands in RQ's failed registry.
     """
-    from app import app
-    with app.app_context():
-        _run_report()
+    try:
+        from app import app
+        with app.app_context():
+            _run_report()
+    except Exception as e:
+        print(f"[AI Report] Suppressed top-level error: {e}")
 
 
 def _run_report():
