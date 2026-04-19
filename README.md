@@ -325,6 +325,8 @@ ngrok http 5000
 | 41 | **AI Daily Health Report** | New `services/ai_report.py`; global daily job collects 24h data from all shops (SyncHealth, SyncLogs, FailedSyncOrder, ProcessedOrder, queue counts), sends to Claude Haiku API, emails plain-English summary to `REPORT_EMAIL` every 24 hours |
 | 42 | **Manual AI Report button in Tools** | `POST /maintenance/send_ai_report` added; "Send AI Health Report Now" button in Tools page enqueues the report immediately and resets the daily TTL so the auto-schedule is unaffected |
 | 43 | **Fix RQ serialization error on AI report job** | Changed enqueue call from direct function reference to string path `'services.ai_report.generate_daily_ai_report'` so RQ can reliably deserialize the job on retry without `ValueError: Invalid attribute name` |
+| 44 | **Zero failed jobs guarantee** | `_job_safe` decorator applied to all non-critical jobs (`sync_health_monitor`, `poll_missed_orders`, `check_and_repair_webhooks`, `retry_failed_orders`, `generate_daily_ai_report`) — catches all exceptions and logs to SyncLog without re-raising, so RQ never marks them failed |
+| 45 | **`clean_failed_jobs` cleanup** | Global job runs every 30 min — fetches any jobs that do reach the failed registry (critical sync jobs after exhausting all retries), logs them to SyncLog, and removes them so the RQ failed count is always zero |
 
 ---
 
