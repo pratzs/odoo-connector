@@ -2673,7 +2673,7 @@ def run_schedule():
 
                 # 3. Global — clean RQ failed registries every 30 min
                 if not conn.get("last_failed_job_cleanup"):
-                    q_default.enqueue('app.clean_failed_jobs', job_timeout=60)
+                    q_default.enqueue(clean_failed_jobs, job_timeout=60)
                     conn.setex("last_failed_job_cleanup", 1800, "done")
 
                 # 4. Global — AI daily health report (once per day)
