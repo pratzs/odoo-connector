@@ -17,6 +17,7 @@ A production-ready Flask application that keeps Odoo ERP and Shopify stores in r
 9. [Render Deployment Guide](#render-deployment-guide)
 10. [Changelog](#changelog)
 11. [Sentry Bug Reports & Fixes](#sentry-bug-reports--fixes)
+12. [Project Scope & Roadmap](SCOPE.md)
 
 ---
 
