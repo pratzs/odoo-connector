@@ -637,30 +637,67 @@ def _archive_odoo_products_in_shopify(shop_url, odoo, cutoff_str=None, full=Fals
         a handful of products are typically archived per cycle.
 
     Full mode   (full=True):
-        Fetches ALL currently active Odoo product IDs, then compares against
-        ProductMap to find any entries no longer active in Odoo and archives
-        the corresponding Shopify product. Use this for the one-time migration
-        of products archived before this feature existed.
+        Compares all ProductMap entries against currently active Odoo IDs.
+        Any Shopify product mapped to a now-inactive Odoo product gets archived.
+        Use for the one-time migration of products archived before this feature.
+
+    SKU REUSE SAFETY:
+        Before archiving any Shopify product, the function checks the product's
+        primary variant SKU against a live set of all active Odoo SKUs. If the
+        SKU is still active in Odoo (meaning a NEW product was created with the
+        same SKU after the old one was archived), the Shopify product is left
+        alone. This prevents false-archiving when SKUs are recycled.
+        If the active-SKU safety set cannot be built, the function aborts
+        entirely — never archives without verified safety data.
     """
     company_id = get_config('odoo_company_id', shop_url=shop_url)
     archived_count = 0
 
-    if full:
-        # ── 1. All active Odoo IDs ──────────────────────────────────────────
-        domain = [['active', '=', True], ['type', 'in', ['product', 'consu']]]
-        if company_id:
-            domain += ['|', ['company_id', '=', int(company_id)], ['company_id', '=', False]]
-        try:
-            active_odoo_ids = set(odoo.models.execute_kw(
-                odoo.db, odoo.uid, odoo.password,
-                'product.product', 'search', [domain]
-            ))
-        except Exception as e:
-            log_event('Product Sync', 'Error', f"Archive full-check failed (Odoo): {e}", shop_url=shop_url)
-            return 0
+    # ── STEP 0: Build active-SKU safety guard (mandatory) ───────────────────
+    # We fetch BOTH active Odoo IDs and active Odoo SKUs in one query.
+    # Every archive candidate is checked against active_sku_set before touching
+    # Shopify. If we cannot build this set, we abort — never risk false archives.
+    active_domain = [['active', '=', True], ['type', 'in', ['product', 'consu']]]
+    if company_id:
+        active_domain += ['|', ['company_id', '=', int(company_id)], ['company_id', '=', False]]
 
-        # ── 2. ProductMap rows whose Odoo ID is no longer active ────────────
-        # Pull all mapped IDs in Python to avoid very large NOT IN query on DB
+    try:
+        active_rows = odoo.models.execute_kw(
+            odoo.db, odoo.uid, odoo.password,
+            'product.product', 'search_read',
+            [active_domain], {'fields': ['id', 'default_code']}
+        )
+        active_odoo_ids = set(r['id'] for r in active_rows)
+        active_sku_set = set(
+            str(r['default_code']).strip()
+            for r in active_rows if r.get('default_code')
+        )
+    except Exception as e:
+        log_event('Product Sync', 'Warning',
+            f"Archive check aborted — could not build active-SKU safety set: {e}", shop_url=shop_url)
+        return 0  # Never archive without confirmed active-SKU data
+
+    def _sku_is_still_active(sp, label):
+        """
+        Returns True (safe to archive) if the Shopify product's primary variant
+        SKU is NOT in the active Odoo SKU set.
+        Returns False (skip) if the SKU is still live in Odoo — this means a
+        new active product was created with the same SKU after the old one was
+        archived (SKU reuse). Archiving would silently remove a live product.
+        """
+        if not sp or not sp.variants:
+            return False
+        primary_sku = str(getattr(sp.variants[0], 'sku', '') or '').strip()
+        if primary_sku and primary_sku in active_sku_set:
+            log_event('Product Sync', 'Warning',
+                f"SKU reuse guard: '{primary_sku}' still active in Odoo — "
+                f"skipping archive for {label}",
+                shop_url=shop_url)
+            return False
+        return True
+
+    if full:
+        # ── 1. Find stale ProductMap entries ────────────────────────────────
         all_maps = ProductMap.query.filter(
             ProductMap.shop_url == shop_url,
             ProductMap.odoo_product_id != -1,
@@ -674,12 +711,12 @@ def _archive_odoo_products_in_shopify(shop_url, odoo, cutoff_str=None, full=Fals
             return 0
 
         log_event('Product Sync', 'Warning',
-            f"Archive full-check: {len(stale_maps)} Shopify product(s) to archive (inactive in Odoo).",
+            f"Archive full-check: {len(stale_maps)} candidate(s) — verifying each against active SKUs.",
             shop_url=shop_url)
 
-        # ── 3. Archive each stale Shopify product ───────────────────────────
-        # Pack products create 2 ProductMap rows for the same Shopify product.
-        # seen_shopify_ids prevents archiving the same product twice.
+        # ── 2. Archive confirmed stale products ─────────────────────────────
+        # Pack products produce 2 ProductMap rows for the same Shopify product.
+        # seen_shopify_ids ensures we only archive each Shopify product once.
         seen_shopify_ids = set()
         for pm in stale_maps:
             try:
@@ -687,8 +724,15 @@ def _archive_odoo_products_in_shopify(shop_url, odoo, cutoff_str=None, full=Fals
                 product_id = variant.product_id
                 if product_id in seen_shopify_ids:
                     continue
-                seen_shopify_ids.add(product_id)
+
                 sp = shopify.Product.find(product_id)
+
+                # SKU reuse guard — do not archive if primary SKU is still live
+                if not _sku_is_still_active(sp, pm.sku):
+                    seen_shopify_ids.add(product_id)  # mark seen so we don't recheck
+                    continue
+
+                seen_shopify_ids.add(product_id)
                 if sp and sp.status != 'archived':
                     sp.status = 'archived'
                     sp.save()
@@ -700,7 +744,7 @@ def _archive_odoo_products_in_shopify(shop_url, odoo, cutoff_str=None, full=Fals
                     f"Could not archive Shopify product for SKU {pm.sku}: {e}", shop_url=shop_url)
 
     else:
-        # ── Delta: products archived since cutoff_str ───────────────────────
+        # ── Delta: products archived in Odoo since cutoff_str ───────────────
         if not cutoff_str:
             return 0
 
@@ -719,7 +763,7 @@ def _archive_odoo_products_in_shopify(shop_url, odoo, cutoff_str=None, full=Fals
                 {'fields': ['id', 'default_code'], 'context': {'active_test': False}}
             )
         except Exception as e:
-            log_event('Product Sync', 'Warning', f"Archive delta check error: {e}", shop_url=shop_url)
+            log_event('Product Sync', 'Warning', f"Archive delta query error: {e}", shop_url=shop_url)
             return 0
 
         if not recently_archived:
@@ -734,23 +778,30 @@ def _archive_odoo_products_in_shopify(shop_url, odoo, cutoff_str=None, full=Fals
             odoo_id = p['id']
             sku = str(p.get('default_code') or '').strip()
 
-            # Prefer ProductMap lookup (uses stored variant ID — no extra Shopify search)
-            pm = ProductMap.query.filter_by(odoo_product_id=odoo_id, shop_url=shop_url).first()
-
+            # Resolve Shopify product — ProductMap first (fast), SKU search as fallback
+            product_id = None
             try:
+                pm = ProductMap.query.filter_by(odoo_product_id=odoo_id, shop_url=shop_url).first()
                 if pm and pm.shopify_variant_id:
                     variant = shopify.Variant.find(int(pm.shopify_variant_id))
                     product_id = variant.product_id
                 elif sku:
                     product_id = find_shopify_product_by_sku(sku, shop_url)
-                else:
-                    continue
+            except Exception:
+                pass
 
-                if not product_id or product_id in seen_shopify_ids:
-                    continue
-                seen_shopify_ids.add(product_id)
+            if not product_id or product_id in seen_shopify_ids:
+                continue
 
+            try:
                 sp = shopify.Product.find(product_id)
+
+                # SKU reuse guard
+                if not _sku_is_still_active(sp, sku or str(odoo_id)):
+                    seen_shopify_ids.add(product_id)
+                    continue
+
+                seen_shopify_ids.add(product_id)
                 if sp and sp.status != 'archived':
                     sp.status = 'archived'
                     sp.save()

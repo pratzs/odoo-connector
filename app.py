@@ -2799,8 +2799,8 @@ def sync_images_only_manual(shop_url):
 
 def emergency_purge_junk_products(shop_url):
     """
-    EMERGENCY TOOL: Destroys ACTIVE products in Shopify not found in Odoo.
-    FIXED: Now correctly fetches Company ID from Shop table.
+    CLEANUP TOOL: Archives (soft-deletes) active Shopify products not found in Odoo.
+    Products are archived, not permanently deleted — fully reversible from Shopify Admin.
     """
     with app.app_context():
         # 1. Connect
@@ -2849,32 +2849,40 @@ def emergency_purge_junk_products(shop_url):
 
         log_event('Cleanup', 'Info', f"Found {len(valid_skus)} valid SKUs. Scanning Active Shopify Products...", shop_url=shop_url)
 
-        # 4. Scan & Destroy
-        # We only look at ACTIVE products. We ignore Archived.
+        # 4. Scan & Archive (soft-delete — reversible from Shopify Admin)
+        # We only look at ACTIVE products. Already-archived products are ignored.
         page = shopify.Product.find(limit=250, status='active')
-        deleted_count = 0
-        
+        archived_count = 0
+        skip_count = 0
+
         while page:
             for sp in page:
-                # Get SKU from first variant
-                sku = sp.variants[0].sku if sp.variants else None
-                
-                # Logic: If SKU is missing OR it is NOT in our valid Odoo list -> Delete it
-                if not sku or sku not in valid_skus:
+                # Check ALL variants — a product is valid if ANY variant's SKU is in valid_skus
+                # This protects pack products where variants[0] might use a suffixed SKU
+                product_skus = [str(v.sku).strip() for v in sp.variants if v.sku]
+                is_valid = any(s in valid_skus for s in product_skus)
+
+                if not product_skus or not is_valid:
                     try:
-                        sp.destroy()
-                        deleted_count += 1
-                        if deleted_count % 10 == 0:
-                            print(f"Purged junk: {sp.title} ({sku})")
+                        sp.status = 'archived'
+                        sp.save()
+                        archived_count += 1
+                        if archived_count % 10 == 0:
+                            print(f"Archived junk: {sp.title} ({product_skus})")
                     except Exception as e:
-                        print(f"Failed to delete {sp.id}: {e}")
-            
+                        print(f"Failed to archive {sp.id}: {e}")
+                else:
+                    skip_count += 1
+
             if page.has_next_page():
                 page = page.next_page()
             else:
                 break
-        
-        log_event('Cleanup', 'Success', f"Purge Complete. Deleted {deleted_count} active junk products.", shop_url=shop_url)
+
+        log_event('Cleanup', 'Success',
+            f"Purge Complete. Archived {archived_count} junk products ({skip_count} valid products kept). "
+            f"Archived products are reversible — restore from Shopify Admin → Products → Archived.",
+            shop_url=shop_url)
         
 
 def check_for_corrupted_categories(shop_url):
