@@ -336,6 +336,7 @@ ngrok http 5000
 | 51 | **Phase 1: shared-email customer safety** | `_get_safe_shopify_email()` added to `customers.py` — if two Odoo customers share an email, the second gets `{local}+{odoo_id}@{domain}` as their Shopify account email; `CustomerMap` always stores the real email for comms |
 | 52 | **Multipass shared-email guard** | `request_password_setup` now detects multiple `CustomerMap` rows for the same email and returns a message directing the customer to use their Store ID instead |
 | 53 | **CustomerMap-first order routing** | `process_order_data` now resolves the Odoo partner by `shopify_customer_id` via `CustomerMap` before falling back to email search — prevents duplicate Odoo partners when Shopify email is a `+` alias |
+| 54 | **Fix silent customer save failure** | `c.save()` return value was never checked — Shopify could reject a customer (duplicate/invalid phone) and the connector logged "Synced" without creating anything. Now: checks return value, retries once without phone if rejected, raises and logs the real error if still failing |
 
 ---
 

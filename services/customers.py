@@ -287,7 +287,31 @@ def _sync_single_customer(p, fields, shop_url, odoo):
         if fields['metafields']:
             c.metafields = fields['metafields']
 
-        c.save()
+        saved = c.save()
+
+        # If Shopify rejected the save (e.g. duplicate/invalid phone number),
+        # retry once with phone cleared — phone is non-essential for B2B accounts.
+        if not saved and c.phone:
+            c.phone = ''
+            if fields['street'] and getattr(c, 'addresses', None):
+                no_phone_addr = {
+                    'address1': fields['street'],
+                    'city': fields['city'],
+                    'zip': fields['zip'],
+                    'country': fields['address_country'],
+                    'company': fields['shopify_company'],
+                    'phone': '',
+                    'first_name': fields['first_name'],
+                    'last_name': fields['last_name'],
+                    'default': True
+                }
+                c.addresses = [shopify.Address(no_phone_addr)]
+            saved = c.save()
+
+        if not saved:
+            raw_errors = getattr(c, 'errors', None)
+            err_detail = getattr(raw_errors, 'errors', raw_errors) if raw_errors else 'Unknown Shopify error'
+            raise Exception(f"Shopify save rejected: {err_detail}")
 
         # Save mapping — always store real_email (not the + alias) for comms
         real_email = fields.get('real_email', email)
