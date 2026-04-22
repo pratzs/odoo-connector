@@ -61,6 +61,15 @@ def sync_products_master(shop_url):
 
         log_event('Product Sync', 'Success', f"Queued {len(chunks)} batches.", shop_url=shop_url)
 
+        # Archive in Shopify any products archived in Odoo since the last sync
+        try:
+            archived = _archive_odoo_products_in_shopify(shop_url, odoo, cutoff_str=cutoff_str)
+            if archived:
+                log_event('Product Sync', 'Info',
+                    f"Archived {archived} Shopify product(s) that were archived in Odoo.", shop_url=shop_url)
+        except Exception as e:
+            log_event('Product Sync', 'Warning', f"Archive propagation error: {e}", shop_url=shop_url)
+
 
 # =====================================================
 # 1.5 THE ABSOLUTE MASTER (FULL CATALOG RESYNC)
@@ -103,6 +112,17 @@ def sync_all_products_absolute_master(shop_url):
             q_default.enqueue(sync_product_batch_task, shop_url, batch_ids, f"Full Resync Batch {index+1}/{len(chunks)}", job_timeout=3600)
 
         log_event('Product Sync', 'Success', f"Queued FULL CATALOG sync. {len(chunks)} batches processing.", shop_url=shop_url)
+
+        # Full mode: compare ALL ProductMap entries against currently active Odoo products
+        # and archive any Shopify products whose Odoo product has been deactivated.
+        # This handles products archived before this feature existed (e.g. the current 700).
+        try:
+            archived = _archive_odoo_products_in_shopify(shop_url, odoo, full=True)
+            if archived:
+                log_event('Product Sync', 'Warning',
+                    f"FULL RESYNC: Archived {archived} Shopify product(s) — no longer active in Odoo.", shop_url=shop_url)
+        except Exception as e:
+            log_event('Product Sync', 'Warning', f"Full archive propagation error: {e}", shop_url=shop_url)
 
 
 # =====================================================
@@ -606,7 +626,146 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
 
 
 # =====================================================
-# 4. HELPERS & UTILITIES
+# 4. ARCHIVE PROPAGATION — Odoo → Shopify
+# =====================================================
+def _archive_odoo_products_in_shopify(shop_url, odoo, cutoff_str=None, full=False):
+    """
+    Archives Shopify products whose matching Odoo product has been set to active=False.
+
+    Delta mode  (full=False, cutoff_str provided):
+        Queries Odoo for products archived within the sync window. Fast — only
+        a handful of products are typically archived per cycle.
+
+    Full mode   (full=True):
+        Fetches ALL currently active Odoo product IDs, then compares against
+        ProductMap to find any entries no longer active in Odoo and archives
+        the corresponding Shopify product. Use this for the one-time migration
+        of products archived before this feature existed.
+    """
+    company_id = get_config('odoo_company_id', shop_url=shop_url)
+    archived_count = 0
+
+    if full:
+        # ── 1. All active Odoo IDs ──────────────────────────────────────────
+        domain = [['active', '=', True], ['type', 'in', ['product', 'consu']]]
+        if company_id:
+            domain += ['|', ['company_id', '=', int(company_id)], ['company_id', '=', False]]
+        try:
+            active_odoo_ids = set(odoo.models.execute_kw(
+                odoo.db, odoo.uid, odoo.password,
+                'product.product', 'search', [domain]
+            ))
+        except Exception as e:
+            log_event('Product Sync', 'Error', f"Archive full-check failed (Odoo): {e}", shop_url=shop_url)
+            return 0
+
+        # ── 2. ProductMap rows whose Odoo ID is no longer active ────────────
+        # Pull all mapped IDs in Python to avoid very large NOT IN query on DB
+        all_maps = ProductMap.query.filter(
+            ProductMap.shop_url == shop_url,
+            ProductMap.odoo_product_id != -1,
+            ProductMap.shopify_variant_id != None
+        ).all()
+
+        stale_maps = [m for m in all_maps if m.odoo_product_id not in active_odoo_ids]
+
+        if not stale_maps:
+            log_event('Product Sync', 'Info', "Archive full-check: no stale products found.", shop_url=shop_url)
+            return 0
+
+        log_event('Product Sync', 'Warning',
+            f"Archive full-check: {len(stale_maps)} Shopify product(s) to archive (inactive in Odoo).",
+            shop_url=shop_url)
+
+        # ── 3. Archive each stale Shopify product ───────────────────────────
+        # Pack products create 2 ProductMap rows for the same Shopify product.
+        # seen_shopify_ids prevents archiving the same product twice.
+        seen_shopify_ids = set()
+        for pm in stale_maps:
+            try:
+                variant = shopify.Variant.find(int(pm.shopify_variant_id))
+                product_id = variant.product_id
+                if product_id in seen_shopify_ids:
+                    continue
+                seen_shopify_ids.add(product_id)
+                sp = shopify.Product.find(product_id)
+                if sp and sp.status != 'archived':
+                    sp.status = 'archived'
+                    sp.save()
+                    archived_count += 1
+                    log_event('Product Sync', 'Info',
+                        f"Archived Shopify product: {pm.sku} (inactive in Odoo)", shop_url=shop_url)
+            except Exception as e:
+                log_event('Product Sync', 'Warning',
+                    f"Could not archive Shopify product for SKU {pm.sku}: {e}", shop_url=shop_url)
+
+    else:
+        # ── Delta: products archived since cutoff_str ───────────────────────
+        if not cutoff_str:
+            return 0
+
+        archive_domain = [
+            ['active', '=', False],
+            ['type', 'in', ['product', 'consu']],
+            ['write_date', '>=', cutoff_str],
+        ]
+        if company_id:
+            archive_domain += ['|', ['company_id', '=', int(company_id)], ['company_id', '=', False]]
+
+        try:
+            recently_archived = odoo.models.execute_kw(
+                odoo.db, odoo.uid, odoo.password,
+                'product.product', 'search_read', [archive_domain],
+                {'fields': ['id', 'default_code'], 'context': {'active_test': False}}
+            )
+        except Exception as e:
+            log_event('Product Sync', 'Warning', f"Archive delta check error: {e}", shop_url=shop_url)
+            return 0
+
+        if not recently_archived:
+            return 0
+
+        log_event('Product Sync', 'Info',
+            f"Archive delta: {len(recently_archived)} product(s) archived in Odoo since last sync.",
+            shop_url=shop_url)
+
+        seen_shopify_ids = set()
+        for p in recently_archived:
+            odoo_id = p['id']
+            sku = str(p.get('default_code') or '').strip()
+
+            # Prefer ProductMap lookup (uses stored variant ID — no extra Shopify search)
+            pm = ProductMap.query.filter_by(odoo_product_id=odoo_id, shop_url=shop_url).first()
+
+            try:
+                if pm and pm.shopify_variant_id:
+                    variant = shopify.Variant.find(int(pm.shopify_variant_id))
+                    product_id = variant.product_id
+                elif sku:
+                    product_id = find_shopify_product_by_sku(sku, shop_url)
+                else:
+                    continue
+
+                if not product_id or product_id in seen_shopify_ids:
+                    continue
+                seen_shopify_ids.add(product_id)
+
+                sp = shopify.Product.find(product_id)
+                if sp and sp.status != 'archived':
+                    sp.status = 'archived'
+                    sp.save()
+                    archived_count += 1
+                    log_event('Product Sync', 'Info',
+                        f"Archived Shopify product: {sku or odoo_id} (archived in Odoo)", shop_url=shop_url)
+            except Exception as e:
+                log_event('Product Sync', 'Warning',
+                    f"Could not archive Shopify product {sku or odoo_id}: {e}", shop_url=shop_url)
+
+    return archived_count
+
+
+# =====================================================
+# 5. HELPERS & UTILITIES
 # =====================================================
 def safe_find_variant_by_sku(sku):
     try:

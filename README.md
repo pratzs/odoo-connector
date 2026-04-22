@@ -337,6 +337,7 @@ ngrok http 5000
 | 52 | **Multipass shared-email guard** | `request_password_setup` now detects multiple `CustomerMap` rows for the same email and returns a message directing the customer to use their Store ID instead |
 | 53 | **CustomerMap-first order routing** | `process_order_data` now resolves the Odoo partner by `shopify_customer_id` via `CustomerMap` before falling back to email search — prevents duplicate Odoo partners when Shopify email is a `+` alias |
 | 54 | **Fix silent customer save failure** | `c.save()` return value was never checked — Shopify could reject a customer (duplicate/invalid phone) and the connector logged "Synced" without creating anything. Now: checks return value, retries once without phone if rejected, raises and logs the real error if still failing |
+| 55 | **Archive propagation: Odoo → Shopify** | Products archived in Odoo were silently ignored — they stayed live and purchasable in Shopify forever. Added `_archive_odoo_products_in_shopify()`: delta mode runs on every 24h sync (catches newly archived products), full mode runs on Force Full Resync (compares all ProductMap entries against active Odoo IDs — handles the one-time migration of bulk-archived products) |
 
 ---
 
