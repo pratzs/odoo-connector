@@ -171,7 +171,7 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
 
     token = secrets.token_urlsafe(40)
     cm.reset_token = token
-    cm.reset_token_expires = datetime.utcnow() + timedelta(hours=24)
+    cm.reset_token_expires = datetime.utcnow() + timedelta(days=7)
     db.session.commit()
 
     store_url = os.getenv("STORE_URL", f"https://{shop_url}")
@@ -241,7 +241,7 @@ Your Store ID: {odoo_id}
 
 Please keep this number safe as you will need it each time you log in.
 
-To set your password, visit the link below. This link is valid for 24 hours.
+To set your password, visit the link below. This link is valid for 7 days.
 
 {setup_link}
 
