@@ -3312,6 +3312,24 @@ def multipass_admin_send_setup():
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
+@app.route('/multipass/admin/test-setup-email', methods=['POST'])
+@require_shopify_session
+def multipass_admin_test_setup_email():
+    shop_url = request.args.get('shop')
+    data = request.get_json(silent=True) or {}
+    odoo_id = data.get('odoo_id')
+    if not odoo_id:
+        return jsonify({'success': False, 'message': 'odoo_id is required.'}), 400
+    force_type = data.get('force_type')  # 'existing', 'new', or omit for auto-detect
+    force_existing = True if force_type == 'existing' else (False if force_type == 'new' else None)
+    try:
+        from services.multipass import send_test_setup_email
+        ok, msg = send_test_setup_email(int(odoo_id), shop_url, force_existing=force_existing)
+        return jsonify({'success': ok, 'message': msg}), 200 if ok else 400
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
 # ==========================================
 #  METAFIELD MANUAL REFRESH ENDPOINT
 # ==========================================
