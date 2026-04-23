@@ -178,7 +178,7 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
     setup_link = f"{store_url}/pages/set-password?token={token}"
 
     try:
-        _send_setup_email(cm.email, cm.odoo_partner_id, setup_link)
+        _send_setup_email(cm.email, cm.odoo_partner_id, setup_link, shop_url=shop_url)
     except Exception as e:
         print(f"[Multipass] Email send failed for odoo_id={cm.odoo_partner_id}: {e}")
 
@@ -209,7 +209,7 @@ def send_setup_emails_to_all(shop_url: str):
                 skip += 1
                 continue
             try:
-                ok, _ = request_password_setup(str(customer.odoo_partner_id), shop_url)
+                ok, _ = request_password_setup(str(customer.odoo_partner_id), shop_url)  # noqa: shop_url propagates SMTP config
                 if ok:
                     sent += 1
                 else:
@@ -225,11 +225,22 @@ def send_setup_emails_to_all(shop_url: str):
 
 # ── Email helper ───────────────────────────────────────────────────────────────
 
-def _send_setup_email(to_email: str, odoo_id: int, setup_link: str):
-    smtp_host = os.getenv("MULTIPASS_SMTP_HOST", "premium74.web-hosting.com")
-    smtp_port = int(os.getenv("MULTIPASS_SMTP_PORT", "465"))
-    smtp_user = os.getenv("MULTIPASS_SMTP_USER", "admin@worthyproducts.nz")
-    smtp_pass = os.getenv("MULTIPASS_SMTP_PASSWORD") or os.getenv("SMTP_PASSWORD", "")
+def _send_setup_email(to_email: str, odoo_id: int, setup_link: str, shop_url: str = None):
+    from utils import get_config
+    from security_utils import decrypt_val
+
+    # Read SMTP settings saved by the dashboard (AppSettings DB)
+    # Fall back to env vars if nothing configured
+    db_host = get_config("smtp_host", "", shop_url=shop_url) if shop_url else ""
+    db_port = get_config("smtp_port", "", shop_url=shop_url) if shop_url else ""
+    db_user = get_config("smtp_user", "", shop_url=shop_url) if shop_url else ""
+    db_pass_enc = get_config("smtp_pass", "", shop_url=shop_url) if shop_url else ""
+    db_pass = decrypt_val(db_pass_enc) if db_pass_enc else ""
+
+    smtp_host = db_host or os.getenv("MULTIPASS_SMTP_HOST", "premium74.web-hosting.com")
+    smtp_port = int(db_port or os.getenv("MULTIPASS_SMTP_PORT", "465"))
+    smtp_user = db_user or os.getenv("MULTIPASS_SMTP_USER", "admin@worthyproducts.nz")
+    smtp_pass = db_pass or os.getenv("MULTIPASS_SMTP_PASSWORD") or os.getenv("SMTP_PASSWORD", "")
     shop_domain = os.getenv("STORE_DOMAIN", "worthyproducts.nz")
 
     plain = f"""\
@@ -282,6 +293,14 @@ Worthy Products Team
     if html:
         msg.add_alternative(html, subtype="html")
 
-    with smtplib.SMTP_SSL(smtp_host, smtp_port) as smtp:
-        smtp.login(smtp_user, smtp_pass)
-        smtp.send_message(msg)
+    # Port 465 = SMTP_SSL, Port 587 = STARTTLS
+    if smtp_port == 465:
+        with smtplib.SMTP_SSL(smtp_host, smtp_port) as smtp:
+            smtp.login(smtp_user, smtp_pass)
+            smtp.send_message(msg)
+    else:
+        with smtplib.SMTP(smtp_host, smtp_port) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.login(smtp_user, smtp_pass)
+            smtp.send_message(msg)
