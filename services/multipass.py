@@ -144,30 +144,34 @@ def set_customer_password(token: str, new_password: str) -> tuple[bool, str]:
 def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
     """
     Sends a password setup/reset email.
-    `identifier` can be an email address or a numeric Store ID.
-    Returns (True, message) always -- generic to prevent account enumeration.
+    `identifier` must be a numeric Store ID.
+    Returns specific success/error messages — this is a closed B2B platform.
     """
     identifier = str(identifier).strip()
     if not identifier:
-        return False, "Please enter your email address or Store ID."
+        return False, "Please enter your Store ID."
 
-    generic = (True, "If we found a matching account, a setup email has been sent.")
+    not_found_msg = (
+        "Sorry, that Store ID does not match any account. "
+        "Please contact the Worthy Products team at admin@worthyproducts.nz "
+        "or call 09 580 4110 to confirm your Store ID."
+    )
 
-    if "@" in identifier:
-        cm = CustomerMap.query.filter_by(email=identifier.lower(), shop_url=shop_url).first()
-    else:
-        try:
-            cm = CustomerMap.query.filter_by(
-                odoo_partner_id=int(identifier), shop_url=shop_url
-            ).first()
-        except ValueError:
-            return generic
+    try:
+        cm = CustomerMap.query.filter_by(
+            odoo_partner_id=int(identifier), shop_url=shop_url
+        ).first()
+    except ValueError:
+        return False, not_found_msg
 
     if not cm:
-        return generic
+        return False, not_found_msg
 
     if not cm.email or "@" not in cm.email or "pos.local" in cm.email:
-        return generic
+        return False, (
+            "We found your account but no valid email address is on file. "
+            "Please contact admin@worthyproducts.nz or call 09 580 4110 to update your details."
+        )
 
     token = secrets.token_urlsafe(40)
     cm.reset_token = token
@@ -184,7 +188,11 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
     except Exception as e:
         print(f"[Multipass] Email send failed for odoo_id={cm.odoo_partner_id}: {e}")
 
-    return generic
+    name_part = f", {display_name}" if display_name else ""
+    return True, (
+        f"We found your account{name_part}. "
+        f"A setup email has been sent to your registered email address."
+    )
 
 
 def send_setup_emails_to_all(shop_url: str):
