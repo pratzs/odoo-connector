@@ -58,7 +58,6 @@ class CustomerMap(db.Model):
     shopify_customer_id = db.Column(db.String(50), nullable=False)
     odoo_partner_id = db.Column(db.Integer, nullable=False)
     email = db.Column(db.String(100), index=True)
-
     # --- MULTIPASS LOGIN ---
     # Stores a bcrypt/werkzeug hash of the customer's self-set password.
     # Never stores plaintext. Null = password not yet set.

@@ -1,26 +1,23 @@
-# services/multipass.py
 """
 Multipass Login Service
 =======================
-Handles B2B customer login via Odoo ID + password.
+Handles B2B wholesale customer login via Odoo ID + password.
 
 Flow:
-  1. Customer visits /pages/b2b-login on the Shopify store
-  2. Enters Odoo ID (e.g. 35819) + their self-set password
+  1. Customer visits /account/login on the Shopify store (B2B tab)
+  2. Enters Store ID (Odoo partner ID) and their self-set password
   3. POST to /multipass/login on this connector app
-  4. We validate credentials, generate a Shopify Multipass token
-  5. Redirect customer into Shopify — authenticated, catalog loaded
-
-Password Setup (first time):
-  - Store owner triggers "Send Setup Email" from admin panel
-     OR customer clicks "Set up my password" on the login page
-  - We find the CustomerMap by Odoo ID, email a one-time link
-  - Customer clicks link → POST new password → hash stored
+  4. Connector validates credentials, generates a Shopify Multipass token
+  5. Customer is redirected into Shopify as authenticated
 
 Environment variables required:
-  SHOPIFY_MULTIPASS_SECRET  — from Shopify Admin > Settings > Customer accounts
-  SMTP_PASSWORD             — already used for inventory alerts
-  HOST                      — already set (your Render URL)
+  SHOPIFY_MULTIPASS_SECRET  -- from Shopify Admin > Settings > Customer accounts
+  STORE_DOMAIN              -- e.g. worthyproducts.nz (custom storefront domain)
+  STORE_URL                 -- e.g. https://worthyproducts.nz (full URL for email links)
+  MULTIPASS_SMTP_USER       -- sender email for setup/reset emails
+  MULTIPASS_SMTP_PASSWORD   -- SMTP password (falls back to SMTP_PASSWORD)
+  MULTIPASS_SMTP_HOST       -- defaults to premium74.web-hosting.com
+  MULTIPASS_SMTP_PORT       -- defaults to 465
 """
 
 import os
@@ -30,133 +27,98 @@ import hashlib
 import base64
 import secrets
 import smtplib
-import shopify
-
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import padding as crypto_padding
 from werkzeug.security import generate_password_hash, check_password_hash
 
-from models import db, CustomerMap, Shop
-from utils import get_config, log_event, setup_shopify_session
-from security_utils import decrypt_val
+from models import db, CustomerMap
 
 
-# ─────────────────────────────────────────────
-# 1. MULTIPASS TOKEN GENERATOR
-# ─────────────────────────────────────────────
+# ── Shopify Multipass token generation ────────────────────────────────────────
 
-def generate_multipass_token(email: str, shop_url: str, return_to: str = '/account') -> str | None:
+def _derive_keys(secret: str):
+    digest = hashlib.sha256(secret.encode("utf-8")).digest()
+    return digest[:16], digest[16:]  # enc_key, sig_key
+
+
+def generate_multipass_token(email: str, shop_url: str, return_to: str = "/account") -> str | None:
     """
-    Generates a Shopify Multipass token for the given email.
-    Returns the full login URL ready to redirect to.
-
-    Shopify algorithm:
-      key_material  = SHA256(MULTIPASS_SECRET)
-      enc_key       = key_material[0:16]   (AES-128)
-      sig_key       = key_material[16:32]  (HMAC-SHA256)
-      iv            = random 16 bytes
-      payload       = AES-128-CBC(enc_key, iv, PKCS7(customer_json))
-      token         = base64url(iv + payload + HMAC-SHA256(sig_key, iv+payload))
+    Generates a Shopify Multipass token.
+    Returns the full redirect URL on success, or None on failure.
     """
-    secret = os.getenv('SHOPIFY_MULTIPASS_SECRET')
+    secret = os.getenv("SHOPIFY_MULTIPASS_SECRET")
     if not secret:
-        print("MULTIPASS ERROR: SHOPIFY_MULTIPASS_SECRET not set in environment")
+        print("[Multipass] SHOPIFY_MULTIPASS_SECRET not set in environment.")
         return None
 
     try:
-        # 1. Derive keys
-        key_material = hashlib.sha256(secret.encode('utf-8')).digest()
-        enc_key = key_material[:16]
-        sig_key = key_material[16:]
+        enc_key, sig_key = _derive_keys(secret)
 
-        # 2. Build customer payload
-        customer_data = {
-            'email': email,
-            'created_at': datetime.utcnow().isoformat(),
-            'return_to': return_to,
-        }
-        payload_bytes = json.dumps(customer_data).encode('utf-8')
+        payload = json.dumps({
+            "email": email,
+            "created_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "return_to": return_to,
+        }).encode("utf-8")
 
-        # 3. PKCS7 pad to 16-byte boundary
-        pad_len = 16 - (len(payload_bytes) % 16)
-        payload_bytes += bytes([pad_len] * pad_len)
-
-        # 4. AES-128-CBC encrypt
         iv = os.urandom(16)
+        padder = crypto_padding.PKCS7(128).padder()
+        padded = padder.update(payload) + padder.finalize()
+
         cipher = Cipher(algorithms.AES(enc_key), modes.CBC(iv), backend=default_backend())
-        encryptor = cipher.encryptor()
-        ciphertext = encryptor.update(payload_bytes) + encryptor.finalize()
-        encrypted = iv + ciphertext
+        enc = cipher.encryptor()
+        ciphertext = enc.update(padded) + enc.finalize()
 
-        # 5. HMAC-SHA256 sign
-        signature = hmac.new(sig_key, encrypted, hashlib.sha256).digest()
+        message = iv + ciphertext
+        sig = hmac.new(sig_key, message, hashlib.sha256).digest()
 
-        # 6. Build token + URL
-        token = base64.urlsafe_b64encode(encrypted + signature).decode('utf-8')
-        clean_shop = shop_url.replace('https://', '').replace('http://', '').rstrip('/')
-        return f"https://{clean_shop}/account/login/multipass/{token}"
+        token = base64.urlsafe_b64encode(message + sig).decode().rstrip("=")
+
+        store_domain = os.getenv("STORE_DOMAIN", shop_url).replace("https://", "").replace("http://", "").rstrip("/")
+        return f"https://{store_domain}/account/login/multipass/{token}"
 
     except Exception as e:
-        print(f"Multipass token generation error: {e}")
+        print(f"[Multipass] Token generation error: {e}")
         return None
 
 
-# ─────────────────────────────────────────────
-# 2. LOGIN — Odoo ID + Password → Multipass URL
-# ─────────────────────────────────────────────
+# ── Public service functions ───────────────────────────────────────────────────
 
-def do_multipass_login(odoo_id: str, password: str, shop_url: str) -> tuple[bool, str]:
+def do_multipass_login(odoo_id: str, password: str, shop_url: str, return_to: str = "/account") -> tuple[bool, str]:
     """
-    Validates Odoo ID + password.
-    Returns (True, multipass_url) on success or (False, error_message) on failure.
+    Returns (True, redirect_url) on success or (False, error_message) on failure.
     """
     if not odoo_id or not password:
         return False, "Please enter your Store ID and password."
 
     try:
-        odoo_id_int = int(odoo_id.strip())
-    except ValueError:
+        odoo_id_int = int(str(odoo_id).strip())
+    except (ValueError, TypeError):
         return False, "Invalid Store ID format."
 
-    # 1. Look up customer
-    customer = CustomerMap.query.filter_by(
-        odoo_partner_id=odoo_id_int,
-        shop_url=shop_url
-    ).first()
-
-    if not customer:
-        # Generic message — don't reveal whether ID exists or not
+    cm = CustomerMap.query.filter_by(odoo_partner_id=odoo_id_int, shop_url=shop_url).first()
+    if not cm:
         return False, "Invalid Store ID or password."
 
-    # 2. Check password is set
-    if not customer.password_hash:
-        return False, "Password not set up yet. Please check your email for a setup link, or contact your account manager."
+    if not cm.password_hash:
+        return False, "Password not set yet. Please check your email for a setup link or contact admin@worthyproducts.nz."
 
-    # 3. Verify password
-    if not check_password_hash(customer.password_hash, password):
-        log_event('Multipass', 'Warning', f"Failed login attempt for Odoo ID {odoo_id_int}", shop_url=shop_url)
+    if not check_password_hash(cm.password_hash, password):
         return False, "Invalid Store ID or password."
 
-    # 4. Generate Multipass token
-    multipass_url = generate_multipass_token(customer.email, shop_url)
-    if not multipass_url:
-        return False, "Login service temporarily unavailable. Please try again shortly."
+    redirect_url = generate_multipass_token(cm.email, shop_url, return_to or "/account")
+    if not redirect_url:
+        return False, "Login service is temporarily unavailable. Please try again shortly."
 
-    log_event('Multipass', 'Success', f"Login successful for Odoo ID {odoo_id_int}", shop_url=shop_url)
-    return True, multipass_url
+    return True, redirect_url
 
-
-# ─────────────────────────────────────────────
-# 3. SET PASSWORD (first time or change)
-# ─────────────────────────────────────────────
 
 def set_customer_password(token: str, new_password: str) -> tuple[bool, str]:
     """
-    Called when a customer clicks their setup/reset email link and sets a new password.
-    Token is a one-time UUID stored in CustomerMap.reset_token.
+    Returns (True, success_message) or (False, error_message).
     """
     if not token or not new_password:
         return False, "Missing token or password."
@@ -164,371 +126,137 @@ def set_customer_password(token: str, new_password: str) -> tuple[bool, str]:
     if len(new_password) < 8:
         return False, "Password must be at least 8 characters."
 
-    # 1. Find the customer by reset token
-    customer = CustomerMap.query.filter_by(reset_token=token).first()
-
-    if not customer:
+    cm = CustomerMap.query.filter_by(reset_token=token).first()
+    if not cm:
         return False, "This link is invalid or has already been used."
 
-    # 2. Check expiry (tokens valid for 7 days)
-    if customer.reset_token_expires and datetime.utcnow() > customer.reset_token_expires:
+    if cm.reset_token_expires and datetime.utcnow() > cm.reset_token_expires:
         return False, "This link has expired. Please request a new one."
 
-    # 3. Hash and save the new password
-    customer.password_hash = generate_password_hash(new_password)
-    customer.reset_token = None           # Invalidate the token immediately
-    customer.reset_token_expires = None
+    cm.password_hash = generate_password_hash(new_password)
+    cm.reset_token = None
+    cm.reset_token_expires = None
     db.session.commit()
 
-    log_event('Multipass', 'Success',
-        f"Password set for Odoo ID {customer.odoo_partner_id}",
-        shop_url=customer.shop_url)
+    return True, "Password set successfully. You can now log in with your Store ID."
 
-    return True, "Password set successfully. You can now log in."
-
-
-# ─────────────────────────────────────────────
-# 4. REQUEST PASSWORD SETUP / RESET EMAIL
-# ─────────────────────────────────────────────
 
 def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
     """
-    Sends a setup/reset email to the customer.
-    `identifier` can be either:
-      - An Odoo ID (numeric string, e.g. "31274")
-      - An email address (e.g. "pratham@worthy.nz")
-
-    The email sent includes:
-      - Their Store ID (so managers always have it)
-      - A one-time password setup link via the STORE domain (not the connector)
-        e.g. https://vjtrading.myshopify.com/pages/set-password?token=xxx
+    Sends a password setup/reset email.
+    `identifier` can be an email address or a numeric Store ID.
+    Returns (True, message) always -- generic to prevent account enumeration.
     """
     identifier = str(identifier).strip()
     if not identifier:
         return False, "Please enter your email address or Store ID."
 
-    # 1. Look up customer by email OR odoo_id
-    customer = None
+    generic = (True, "If we found a matching account, a setup email has been sent.")
 
-    if '@' in identifier:
-        matches = CustomerMap.query.filter_by(
-            email=identifier.lower(),
-            shop_url=shop_url
-        ).all()
-        if len(matches) > 1:
-            # Shared email across multiple accounts — can't determine which store
-            return True, "Multiple accounts share this email. Please enter your Store ID instead."
-        customer = matches[0] if matches else None
+    if "@" in identifier:
+        cm = CustomerMap.query.filter_by(email=identifier.lower(), shop_url=shop_url).first()
     else:
         try:
-            odoo_id_int = int(identifier)
-            customer = CustomerMap.query.filter_by(
-                odoo_partner_id=odoo_id_int,
-                shop_url=shop_url
+            cm = CustomerMap.query.filter_by(
+                odoo_partner_id=int(identifier), shop_url=shop_url
             ).first()
         except ValueError:
-            return False, "Please enter a valid email address or Store ID."
+            return generic
 
-    neutral_msg = "If we found a matching account, a setup email has been sent."
+    if not cm:
+        return generic
 
-    if not customer or not customer.email or '@' not in customer.email:
-        return True, neutral_msg
+    if not cm.email or "@" not in cm.email or "pos.local" in cm.email:
+        return generic
 
-    if 'pos.local' in customer.email:
-        return False, "No email address is linked to this account. Please contact your account manager."
-
-    # 2. Fetch customer name and store name
-    customer_name = ""
-    store_name = ""
-
-    # --- ATTEMPT 1: ODOO ---
-    try:
-        odoo = get_odoo_connection(shop_url)
-        if odoo:
-            partners = odoo.models.execute_kw(
-                odoo.db, odoo.uid, odoo.password,
-                'res.partner', 'read',
-                [[customer.odoo_partner_id]],
-                {'fields': ['name', 'parent_id']}
-            )
-            if partners:
-                p = partners[0]
-                contact_name = p.get('name', '')
-                
-                # If they have a parent company, use it for Store Name
-                if p.get('parent_id'):
-                    store_name = p['parent_id'][1]
-                    customer_name = contact_name if contact_name else store_name
-                else:
-                    store_name = contact_name
-                    customer_name = contact_name
-    except Exception as e:
-        print(f"Odoo name lookup error: {e}")
-
-    # --- ATTEMPT 2: SHOPIFY FALLBACK ---
-    if not customer_name or not store_name:
-        try:
-            if setup_shopify_session(shop_url):
-                sp_customers = shopify.Customer.search(query=f"email:{customer.email}")
-                if sp_customers:
-                    sp_cust = sp_customers[0]
-                    # Combine first and last name safely
-                    full_name = f"{sp_cust.first_name or ''} {sp_cust.last_name or ''}".strip()
-                    
-                    if full_name:
-                        customer_name = customer_name or full_name
-                        store_name = store_name or full_name
-        except Exception as e:
-            print(f"Shopify name lookup error: {e}")
-
-    # --- FINAL SAFETY CATCH ---
-    if not customer_name: 
-        customer_name = "Valued Customer"
-    if not store_name: 
-        store_name = customer_name
-
-    # 3. Generate a secure one-time token
-    token = secrets.token_urlsafe(32)
-    customer.reset_token = token
-    customer.reset_token_expires = datetime.utcnow() + timedelta(days=7)
+    token = secrets.token_urlsafe(40)
+    cm.reset_token = token
+    cm.reset_token_expires = datetime.utcnow() + timedelta(hours=24)
     db.session.commit()
 
-    # 4. Build the setup URL & Apply Domain Override
-    clean_shop = shop_url.replace('https://', '').replace('http://', '').rstrip('/')
-    
-    # --- DOMAIN OVERRIDE FOR WORTHY PRODUCTS ---
-    if 'vjtrading.myshopify.com' in clean_shop:
-        clean_shop = 'worthyproducts.nz'
-    # -----------------------------------------
+    store_url = os.getenv("STORE_URL", f"https://{shop_url}")
+    setup_link = f"{store_url}/pages/set-password?token={token}"
 
-    setup_url = f"https://{clean_shop}/pages/set-password?token={token}"
-    action_label = "Set Up Your Password" if not customer.password_hash else "Reset Your Password"
-  
-    # 5. Get per-shop from-email from AppSettings (falls back to developer email)
-    from_email = _get_shop_from_email(shop_url)
-
-    success = _send_setup_email(
-        to_email=customer.email,
-        odoo_id=customer.odoo_partner_id,
-        setup_url=setup_url,
-        action_label=action_label,
-        shop_domain=clean_shop,
-        shop_url=shop_url,
-        from_email=from_email,
-        customer_name=customer_name,
-        store_name=store_name
-    )
-
-    if success:
-        log_event('Multipass', 'Info',
-            f"Password setup email sent to {customer.email} (Odoo ID {customer.odoo_partner_id})",
-            shop_url=shop_url)
-        return True, neutral_msg
-    else:
-        log_event('Multipass', 'Error',
-            f"Failed to send setup email to {customer.email} (Odoo ID {customer.odoo_partner_id})",
-            shop_url=shop_url)
-        return False, "Failed to send email. Please contact your account manager."
-
-
-def _get_shop_from_email(shop_url: str) -> str:
-    """
-    Returns the configured from-email for this shop.
-    Store owners set this in Settings as 'multipass_from_email'.
-    Falls back to the developer email if not configured.
-    """
     try:
-        from utils import get_config
-        configured = get_config('multipass_from_email', None, shop_url=shop_url)
-        if configured and '@' in str(configured):
-            return str(configured).strip()
-    except Exception:
-        pass
-    # Fallback — developer email
-    return "hello@tripsterdevelopers.com"
-
-
-def _send_setup_email(to_email, odoo_id, setup_url, action_label, shop_domain, shop_url,
-                      from_email="hello@tripsterdevelopers.com",
-                      customer_name="Valued Customer",
-                      store_name=""):
-    
-    from utils import get_config
-    from security_utils import decrypt_val
-
-    # 1. Fetch Custom Merchant SMTP Settings
-    custom_host = get_config('smtp_host', '', shop_url=shop_url)
-    custom_port = get_config('smtp_port', '465', shop_url=shop_url)
-    custom_user = get_config('smtp_user', '', shop_url=shop_url)
-    custom_pass_enc = get_config('smtp_pass', '', shop_url=shop_url)
-    custom_pass = decrypt_val(custom_pass_enc) if custom_pass_enc else ''
-
-    # 2. Default Fallbacks (Tripster Server)
-    DEFAULT_HOST = "premium74.web-hosting.com"
-    DEFAULT_PORT = 465
-    DEFAULT_USER = "hello@tripsterdevelopers.com"
-    DEFAULT_PASS = os.getenv('SMTP_PASSWORD')
-
-    # 3. Determine which configuration to use
-    use_custom_smtp = bool(custom_host and custom_user and custom_pass)
-
-    smtp_host = custom_host if use_custom_smtp else DEFAULT_HOST
-    smtp_port = int(custom_port) if use_custom_smtp else DEFAULT_PORT
-    smtp_user = custom_user if use_custom_smtp else DEFAULT_USER
-    smtp_pass = custom_pass if use_custom_smtp else DEFAULT_PASS
-
-    if not smtp_pass:
-        print("MULTIPASS EMAIL ERROR: SMTP password not available")
-        return False
-
-    action_word = "setup" if "Set Up" in action_label else "reset"
-    subject     = f"{action_label} — Your B2B Account Details"
-
-    # --- Load HTML template ---
-    try:
-        template_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            '..', 'templates', 'email_password_setup.html'
-        )
-        with open(template_path, 'r', encoding='utf-8') as f:
-            html_body = f.read()
-
-        html_body = html_body.format(
-            action_label  = action_label,
-            action_word   = action_word,
-            shop_domain   = shop_domain,
-            odoo_id       = odoo_id,
-            to_email      = to_email,
-            setup_url     = setup_url,
-            customer_name = customer_name,
-            store_name    = store_name or shop_domain,
-        )
+        _send_setup_email(cm.email, cm.odoo_partner_id, setup_link)
     except Exception as e:
-        print(f"Email template load error: {e} — falling back to plain text")
-        html_body = None
+        print(f"[Multipass] Email send failed for odoo_id={cm.odoo_partner_id}: {e}")
 
-    # Plain text fallback
-    plain_body = f"""Hello {customer_name},
+    return generic
 
-{action_label} — Your B2B Account Details
-
-Store Name : {store_name or shop_domain}
-Store ID   : {odoo_id}
-Email      : {to_email}
-
-To {action_label.lower()}: {setup_url}
-
-This link expires in 7 days.
-"""
-
-    try:
-        msg = EmailMessage()
-        msg['Subject']  = subject
-        msg['To']       = to_email
-        msg['Reply-To'] = from_email
-
-        # Set from address based on custom vs default
-        if use_custom_smtp:
-            # Send directly from the merchant's authenticated email
-            msg['From'] = f"{shop_domain.replace('.myshopify.com','').title()} <{smtp_user}>"
-        else:
-            # Must send from authenticated default user to prevent SPF/DKIM bounces
-            msg['From'] = f"{shop_domain.replace('.myshopify.com','').title()} <{DEFAULT_USER}>"
-
-        # Set plain text first, then add HTML alternative
-        msg.set_content(plain_body)
-        if html_body:
-            msg.add_alternative(html_body, subtype='html')
-
-        # Send via SMTP or SMTP_SSL
-        if smtp_port == 465:
-            with smtplib.SMTP_SSL(smtp_host, smtp_port) as smtp:
-                smtp.login(smtp_user, smtp_pass)
-                smtp.send_message(msg)
-        else:
-            with smtplib.SMTP(smtp_host, smtp_port) as smtp:
-                smtp.starttls()
-                smtp.login(smtp_user, smtp_pass)
-                smtp.send_message(msg)
-                
-        return True
-    except Exception as e:
-        print(f"Multipass email send error: {e}")
-        return False
-
-# ─────────────────────────────────────────────
-# 5. BULK SETUP EMAIL SENDER (Admin Tool)
-# ─────────────────────────────────────────────
 
 def send_setup_emails_to_all(shop_url: str):
     """
-    Background job: sends password setup emails to every CustomerMap
-    entry for this shop that has no password set yet.
-
-    Skips:
-      - Customers who already have a password_hash (already set up)
-      - Placeholder emails (pos.local addresses)
-      - Invalid emails (no @ symbol)
-
-    Called by: /multipass/admin/send-setup-emails route in app.py
+    Background job: sends setup emails to every CustomerMap entry without a password.
     """
     from app import app
+    from utils import log_event
 
     with app.app_context():
-        log_event('Multipass', 'Info',
-            'Bulk setup email job started.',
-            shop_url=shop_url)
+        log_event("Multipass", "Info", "Bulk setup email job started.", shop_url=shop_url)
 
-        # 1. Find all customers for this shop without a password
-        pending = CustomerMap.query.filter_by(
-            shop_url=shop_url,
-            password_hash=None
-        ).all()
+        pending = CustomerMap.query.filter_by(shop_url=shop_url, password_hash=None).all()
 
         if not pending:
-            log_event('Multipass', 'Info',
-                'Bulk email: no customers without a password found. Nothing to do.',
-                shop_url=shop_url)
+            log_event("Multipass", "Info", "Bulk email: no customers without a password found.", shop_url=shop_url)
             return
 
-        total      = len(pending)
-        sent_count = 0
-        skip_count = 0
-        fail_count = 0
-
-        log_event('Multipass', 'Info',
-            f'Bulk email: found {total} customers without a password. Sending...',
-            shop_url=shop_url)
+        total = len(pending)
+        sent = skip = fail = 0
 
         for customer in pending:
-            # 2. Skip invalid / placeholder emails
-            if not customer.email or '@' not in customer.email:
-                skip_count += 1
+            if not customer.email or "@" not in customer.email or "pos.local" in customer.email:
+                skip += 1
                 continue
-            if 'pos.local' in customer.email:
-                skip_count += 1
-                continue
-
-            # 3. Send via the existing single-customer helper
             try:
-                ok, msg = request_password_setup(
-                    str(customer.odoo_partner_id),
-                    shop_url
-                )
+                ok, _ = request_password_setup(str(customer.odoo_partner_id), shop_url)
                 if ok:
-                    sent_count += 1
+                    sent += 1
                 else:
-                    fail_count += 1
-                    log_event('Multipass', 'Warning',
-                        f'Bulk email: failed for Odoo ID {customer.odoo_partner_id} — {msg}',
-                        shop_url=shop_url)
+                    fail += 1
             except Exception as e:
-                fail_count += 1
-                log_event('Multipass', 'Error',
-                    f'Bulk email: exception for Odoo ID {customer.odoo_partner_id} — {e}',
-                    shop_url=shop_url)
+                fail += 1
+                log_event("Multipass", "Error", f"Bulk email error for {customer.odoo_partner_id}: {e}", shop_url=shop_url)
 
-        # 4. Final summary log
-        log_event('Multipass', 'Success',
-            f'Bulk email complete. Sent: {sent_count}, Skipped: {skip_count}, Failed: {fail_count} (of {total} total).',
+        log_event("Multipass", "Success",
+            f"Bulk email done. Sent: {sent}, Skipped: {skip}, Failed: {fail} of {total}.",
             shop_url=shop_url)
+
+
+# ── Email helper ───────────────────────────────────────────────────────────────
+
+def _send_setup_email(to_email: str, odoo_id: int, setup_link: str):
+    smtp_host = os.getenv("MULTIPASS_SMTP_HOST", "premium74.web-hosting.com")
+    smtp_port = int(os.getenv("MULTIPASS_SMTP_PORT", "465"))
+    smtp_user = os.getenv("MULTIPASS_SMTP_USER", "admin@worthyproducts.nz")
+    smtp_pass = os.getenv("MULTIPASS_SMTP_PASSWORD") or os.getenv("SMTP_PASSWORD", "")
+
+    msg = EmailMessage()
+    msg["Subject"] = "Set Up Your Worthy Products Wholesale Account Password"
+    msg["From"] = f"Worthy Products <{smtp_user}>"
+    msg["To"] = to_email
+    msg.set_content(f"""\
+Hi,
+
+Your Worthy Products B2B wholesale account is ready to use.
+
+Your Store ID: {odoo_id}
+
+Please keep this number safe as you will need it each time you log in.
+
+To set your password, visit the link below. This link is valid for 24 hours.
+
+{setup_link}
+
+If you did not request this, you can safely ignore this email.
+
+Need help? Contact our team:
+  Email: admin@worthyproducts.nz
+  Phone: 09 580 4110
+
+Worthy Products Team
+""")
+
+    with smtplib.SMTP_SSL(smtp_host, smtp_port) as smtp:
+        smtp.login(smtp_user, smtp_pass)
+        smtp.send_message(msg)

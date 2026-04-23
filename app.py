@@ -3223,9 +3223,10 @@ def multipass_login():
         return _multipass_cors(jsonify({}))
 
     data = request.get_json(silent=True) or request.form
-    shop_url = data.get('shop_url') or data.get('shop')
-    odoo_id  = data.get('odoo_id', '').strip()
-    password = data.get('password', '')
+    shop_url  = data.get('shop_url') or data.get('shop')
+    odoo_id   = data.get('odoo_id', '').strip()
+    password  = data.get('password', '')
+    return_to = (data.get('return_to') or '/account').strip() or '/account'
 
     if not shop_url:
         return _multipass_cors(jsonify({'success': False, 'error': 'Missing shop_url'})), 400
@@ -3246,7 +3247,7 @@ def multipass_login():
 
     try:
         from services.multipass import do_multipass_login
-        success, result = do_multipass_login(odoo_id, password, shop_url)
+        success, result = do_multipass_login(odoo_id, password, shop_url, return_to)
 
         if success:
             _clear_rate_limit(rate_key)  # Reset counter on success
@@ -3394,6 +3395,6 @@ def send_support_email():
 # Start scheduler thread
 # t = threading.Thread(target=run_schedule, daemon=True)
 # t.start()
-    
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
