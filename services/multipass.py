@@ -230,12 +230,9 @@ def _send_setup_email(to_email: str, odoo_id: int, setup_link: str):
     smtp_port = int(os.getenv("MULTIPASS_SMTP_PORT", "465"))
     smtp_user = os.getenv("MULTIPASS_SMTP_USER", "admin@worthyproducts.nz")
     smtp_pass = os.getenv("MULTIPASS_SMTP_PASSWORD") or os.getenv("SMTP_PASSWORD", "")
+    shop_domain = os.getenv("STORE_DOMAIN", "worthyproducts.nz")
 
-    msg = EmailMessage()
-    msg["Subject"] = "Set Up Your Worthy Products Wholesale Account Password"
-    msg["From"] = f"Worthy Products <{smtp_user}>"
-    msg["To"] = to_email
-    msg.set_content(f"""\
+    plain = f"""\
 Hi,
 
 Your Worthy Products B2B wholesale account is ready to use.
@@ -255,7 +252,35 @@ Need help? Contact our team:
   Phone: 09 580 4110
 
 Worthy Products Team
-""")
+"""
+
+    html = None
+    try:
+        template_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..", "templates", "email_password_setup.html"
+        )
+        with open(template_path, "r", encoding="utf-8") as f:
+            html = f.read().format(
+                action_label="Set Up Your Password",
+                action_word="setup",
+                shop_domain=shop_domain,
+                store_name="Worthy Products",
+                odoo_id=odoo_id,
+                to_email=to_email,
+                setup_url=setup_link,
+                customer_name="there",
+            )
+    except Exception as e:
+        print(f"[Multipass] HTML template load failed, falling back to plain text: {e}")
+
+    msg = EmailMessage()
+    msg["Subject"] = "Set Up Your Worthy Products Wholesale Account Password"
+    msg["From"] = f"Worthy Products <{smtp_user}>"
+    msg["To"] = to_email
+    msg.set_content(plain)
+    if html:
+        msg.add_alternative(html, subtype="html")
 
     with smtplib.SMTP_SSL(smtp_host, smtp_port) as smtp:
         smtp.login(smtp_user, smtp_pass)
