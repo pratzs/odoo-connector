@@ -116,32 +116,55 @@ def _get_storefront_token(shop_url: str) -> str | None:
     return None
 
 
+_STOREFRONT_AUTH_QUERY = """
+mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
+  customerAccessTokenCreate(input: $input) {
+    customerAccessToken { accessToken }
+    customerUserErrors { code message }
+  }
+}
+"""
+
+
+def _call_storefront_auth(email: str, password: str, storefront_token: str, shop_url: str):
+    """Returns the parsed customerAccessTokenCreate data dict, or None on network/auth error."""
+    resp = requests.post(
+        f"https://{shop_url}/api/2024-01/graphql.json",
+        headers={
+            "X-Shopify-Storefront-Access-Token": storefront_token,
+            "Content-Type": "application/json",
+        },
+        json={"query": _STOREFRONT_AUTH_QUERY, "variables": {"input": {"email": email, "password": password}}},
+        timeout=10,
+    )
+    if resp.status_code in (401, 403):
+        return None  # token revoked — caller should refresh
+    return (resp.json().get("data") or {}).get("customerAccessTokenCreate") or {}
+
+
+def _clear_storefront_token(shop_url: str):
+    from utils import set_config
+    set_config("storefront_access_token", "", shop_url=shop_url)
+
+
 def _verify_shopify_password(email: str, password: str, shop_url: str) -> bool:
     """Verifies email+password against Shopify's own auth system via Storefront API."""
     storefront_token = _get_storefront_token(shop_url)
     if not storefront_token:
         return False
 
-    query = """
-    mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
-      customerAccessTokenCreate(input: $input) {
-        customerAccessToken { accessToken }
-        customerUserErrors { code message }
-      }
-    }
-    """
     try:
-        resp = requests.post(
-            f"https://{shop_url}/api/2024-01/graphql.json",
-            headers={
-                "X-Shopify-Storefront-Access-Token": storefront_token,
-                "Content-Type": "application/json",
-            },
-            json={"query": query, "variables": {"input": {"email": email, "password": password}}},
-            timeout=10,
-        )
-        token_data = (resp.json().get("data") or {}).get("customerAccessTokenCreate") or {}
-        return bool(token_data.get("customerAccessToken"))
+        result = _call_storefront_auth(email, password, storefront_token, shop_url)
+
+        if result is None:
+            # Token was revoked — clear cache, get a fresh one, retry once
+            _clear_storefront_token(shop_url)
+            storefront_token = _get_storefront_token(shop_url)
+            if not storefront_token:
+                return False
+            result = _call_storefront_auth(email, password, storefront_token, shop_url)
+
+        return bool((result or {}).get("customerAccessToken"))
     except Exception as e:
         print(f"[Multipass] Shopify password verify error: {e}")
         return False
@@ -164,6 +187,9 @@ def do_multipass_login(odoo_id: str, password: str, shop_url: str, return_to: st
     cm = CustomerMap.query.filter_by(odoo_partner_id=odoo_id_int, shop_url=shop_url).first()
     if not cm:
         return False, "Invalid Store ID or password."
+
+    if not cm.shopify_customer_id:
+        return False, "Your account is not fully set up yet. Please contact admin@worthyproducts.nz."
 
     # Try existing Shopify password first so customers don't need to reset
     shopify_ok = _verify_shopify_password(cm.email, password, shop_url)
@@ -196,7 +222,7 @@ def set_customer_password(token: str, new_password: str) -> tuple[bool, str]:
     if not cm:
         return False, "This link is invalid or has already been used."
 
-    if cm.reset_token_expires and datetime.utcnow() > cm.reset_token_expires:
+    if not cm.reset_token_expires or datetime.utcnow() > cm.reset_token_expires:
         return False, "This link has expired. Please request a new one."
 
     cm.password_hash = generate_password_hash(new_password)
@@ -254,6 +280,10 @@ def request_password_setup(identifier: str, shop_url: str, display_name: str = N
         _send_setup_email(cm.email, cm.odoo_partner_id, setup_link, shop_url=shop_url, display_name=display_name)
     except Exception as e:
         print(f"[Multipass] Email send failed for odoo_id={cm.odoo_partner_id}: {e}")
+        return False, (
+            "We found your account but could not send the email right now. "
+            "Please try again shortly or contact admin@worthyproducts.nz."
+        )
 
     name_part = f", {display_name}" if display_name else ""
     return True, (
