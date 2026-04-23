@@ -322,8 +322,9 @@ Worthy Products Team
     except Exception as e:
         print(f"[Multipass] HTML template load failed, falling back to plain text: {e}")
 
+    subject_name = f" - {display_name}" if display_name else ""
     msg = EmailMessage()
-    msg["Subject"] = "Set Up Your Worthy Products Wholesale Account Password"
+    msg["Subject"] = f"Set Up Your Worthy Products Password{subject_name} (Store ID: {odoo_id})"
     msg["From"] = f"Worthy Products <{smtp_user}>"
     msg["To"] = to_email
     msg.set_content(plain)
