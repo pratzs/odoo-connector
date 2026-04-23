@@ -177,8 +177,10 @@ def request_password_setup(identifier: str, shop_url: str) -> tuple[bool, str]:
     store_url = os.getenv("STORE_URL", f"https://{shop_url}")
     setup_link = f"{store_url}/pages/set-password?token={token}"
 
+    display_name = _get_customer_display_name(cm, shop_url)
+
     try:
-        _send_setup_email(cm.email, cm.odoo_partner_id, setup_link, shop_url=shop_url)
+        _send_setup_email(cm.email, cm.odoo_partner_id, setup_link, shop_url=shop_url, display_name=display_name)
     except Exception as e:
         print(f"[Multipass] Email send failed for odoo_id={cm.odoo_partner_id}: {e}")
 
@@ -223,9 +225,36 @@ def send_setup_emails_to_all(shop_url: str):
             shop_url=shop_url)
 
 
+# ── Customer display name lookup ──────────────────────────────────────────────
+
+def _get_customer_display_name(cm, shop_url: str) -> str:
+    """
+    Returns the customer's company name, or first+last name as fallback.
+    Priority: Shopify default_address.company > first_name + last_name
+    """
+    try:
+        from utils import setup_shopify_session
+        import shopify
+        if setup_shopify_session(shop_url) and cm.shopify_customer_id:
+            c = shopify.Customer.find(int(cm.shopify_customer_id))
+            if c:
+                addr = getattr(c, "default_address", None)
+                company = getattr(addr, "company", None) if addr else None
+                if company and company.strip():
+                    return company.strip()
+                first = (getattr(c, "first_name", "") or "").strip()
+                last  = (getattr(c, "last_name",  "") or "").strip()
+                name  = f"{first} {last}".strip()
+                if name:
+                    return name
+    except Exception as e:
+        print(f"[Multipass] Could not fetch customer display name: {e}")
+    return ""
+
+
 # ── Email helper ───────────────────────────────────────────────────────────────
 
-def _send_setup_email(to_email: str, odoo_id: int, setup_link: str, shop_url: str = None):
+def _send_setup_email(to_email: str, odoo_id: int, setup_link: str, shop_url: str = None, display_name: str = ""):
     from utils import get_config
     from security_utils import decrypt_val
 
@@ -276,11 +305,11 @@ Worthy Products Team
                 action_label="Set Up Your Password",
                 action_word="setup",
                 shop_domain=shop_domain,
-                store_name="Worthy Products",
+                store_name=display_name or "your store",
                 odoo_id=odoo_id,
                 to_email=to_email,
                 setup_url=setup_link,
-                customer_name="there",
+                customer_name=display_name or "there",
             )
     except Exception as e:
         print(f"[Multipass] HTML template load failed, falling back to plain text: {e}")
