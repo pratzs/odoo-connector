@@ -3414,5 +3414,50 @@ def send_support_email():
 # t = threading.Thread(target=run_schedule, daemon=True)
 # t.start()
 
+# ---------------------------------------------------------------------------
+# ADMIN: remap a CustomerMap entry (e.g. after a Shopify customer merge)
+# POST /admin/remap-customer
+# Header: X-Admin-Key: <FLASK_SECRET_KEY>
+# Body: { "shop_url", "old_shopify_id", "new_shopify_id", "odoo_partner_id", "email" }
+# ---------------------------------------------------------------------------
+@app.route('/admin/remap-customer', methods=['POST'])
+def admin_remap_customer():
+    key = request.headers.get('X-Admin-Key', '')
+    if not key or key != os.getenv('FLASK_SECRET_KEY'):
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    data = request.json or {}
+    shop_url       = data.get('shop_url')
+    old_id         = str(data.get('old_shopify_id', ''))
+    new_id         = str(data.get('new_shopify_id', ''))
+    odoo_partner_id = data.get('odoo_partner_id')
+    email          = data.get('email', '').strip()
+
+    if not all([shop_url, new_id, odoo_partner_id]):
+        return jsonify({'error': 'shop_url, new_shopify_id and odoo_partner_id are required'}), 400
+
+    try:
+        deleted = 0
+        # Remove any stale entries for both the old and new shopify IDs
+        for sid in filter(None, [old_id, new_id]):
+            rows = CustomerMap.query.filter_by(shop_url=shop_url, shopify_customer_id=sid).all()
+            for row in rows:
+                db.session.delete(row)
+                deleted += 1
+
+        # Insert the canonical mapping for the surviving Shopify customer ID
+        db.session.add(CustomerMap(
+            shop_url=shop_url,
+            shopify_customer_id=new_id,
+            odoo_partner_id=int(odoo_partner_id),
+            email=email or None
+        ))
+        db.session.commit()
+        return jsonify({'success': True, 'deleted_old_rows': deleted, 'mapped': {'shopify_id': new_id, 'odoo_partner_id': odoo_partner_id, 'email': email}})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
