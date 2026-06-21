@@ -62,8 +62,16 @@ def process_order_data(data, odoo_client, shop_url):
         try:
             email = data.get('email') or data.get('contact_email')
             client_ref = f"ONLINE_{shopify_name}"
-            company_id = get_config('odoo_company_id', shop_url=shop_url) 
-            
+            company_id = get_config('odoo_company_id', shop_url=shop_url)
+
+            # Skip draft/test orders with no customer email - nothing useful to sync
+            if not email:
+                return True, "Skipped: No customer email on order"
+
+            # Skip orders with no line items (e.g. empty draft orders)
+            if not data.get('line_items'):
+                return True, "Skipped: No line items on order"
+
             # Double Check Odoo
             try:
                 existing_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
