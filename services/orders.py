@@ -94,9 +94,10 @@ def process_order_data(data, odoo_client, shop_url):
                             f"Partner resolved via CustomerMap: {partner['name']} (Odoo ID {partner['id']})",
                             shop_url=shop_url)
 
-            # Fallback: email search (B2C or customers not yet in CustomerMap)
+            # Fallback: email search scoped to the configured company so we never
+            # accidentally match a same-email partner from a sibling Odoo company.
             if not partner:
-                partner = odoo.search_partner_by_email(email)
+                partner = odoo.search_partner_by_email(email, company_id=company_id)
             
             cust_data = data.get('customer', {})
             bill_addr = data.get('billing_address') or data.get('shipping_address') or {}

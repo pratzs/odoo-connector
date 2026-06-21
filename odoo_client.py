@@ -98,13 +98,18 @@ class OdooClient:
 
     # --- PARTNER METHODS ---
 
-    def search_partner_by_email(self, email):
+    def search_partner_by_email(self, email, company_id=None):
         # OPTIMIZATION: Use search_read (1 call) instead of search + read (2 calls)
         domain = ['|', ['active', '=', True], ['active', '=', False], ['email', '=', email]]
-        fields = ['id', 'name', 'active', 'parent_id', 'user_id', 'category_id', 'vat', 'phone', 'street', 'city', 'zip', 'country_id']
-        
+        # When a company context is set, restrict to partners belonging to that company
+        # or shared partners (company_id=False). This prevents matching a partner that
+        # belongs to a sibling Odoo company (e.g. Oceania vs Products cross-leakage).
+        if company_id:
+            domain += ['|', ['company_id', '=', int(company_id)], ['company_id', '=', False]]
+        fields = ['id', 'name', 'active', 'parent_id', 'user_id', 'category_id', 'vat', 'phone', 'street', 'city', 'zip', 'country_id', 'company_id']
+
         partners = self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search_read', [domain], {'fields': fields, 'limit': 1})
-        
+
         if partners:
             p = partners[0]
             if not p.get('active'):
