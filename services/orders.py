@@ -45,7 +45,7 @@ def process_order_data(data, odoo_client, shop_url):
         except: pass
 
         # --- GUARD 2: Cancelled Checks ---
-        if data.get('cancelled_at'): return False, "Skipped: Order is Cancelled."
+        if data.get('cancelled_at'): return True, "Skipped: Order is Cancelled."
 
         # --- LOCK IT PERMANENTLY IN DB ---
         try:
