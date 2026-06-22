@@ -518,36 +518,35 @@ def perform_inventory_sync(shop_url):
                         if not sp_variant: continue
                         
                         if pid not in found_in_odoo:
-                            print(f"⚠️ Warning: Odoo ID {pid} for SKU {sku} not found in Odoo. Skipping sync.")
-                            continue 
-                        
+                            continue
+
                         final_qty = total_qty
                         if is_pack and qty_per_pack > 1.0 and not sku.endswith('-UNIT'):
                             final_qty = math.floor(total_qty / qty_per_pack)
-                            
+
                         final_qty = int(final_qty)
-                        
-                        if sync_zero and final_qty <= 0: continue
-                        
+
+                        if not sync_zero and final_qty <= 0: continue
+
                         current_shopify_qty = int(sp_variant.inventory_quantity) if sp_variant.inventory_quantity else 0
 
                         diff = abs(final_qty - current_shopify_qty)
                         if diff >= alert_threshold:
                             discrepancy_list.append({
-                                'sku': sku, 'odoo': final_qty, 
+                                'sku': sku, 'odoo': final_qty,
                                 'shopify': current_shopify_qty, 'diff': diff
                             })
-                        
+
                         if final_qty != current_shopify_qty:
                             try:
                                 shopify.InventoryLevel.set(
-                                    location_id=shopify_location_id, 
+                                    location_id=shopify_location_id,
                                     inventory_item_id=sp_variant.inventory_item_id,
                                     available=final_qty
                                 )
                                 updates += 1
                             except Exception as e:
-                                print(f"Failed to update {sku}: {e}")
+                                log_event('Inventory', 'Warning', f"Failed to set qty for {sku}: {e}", shop_url=shop_url)
 
             except Exception as e:
                 log_event('Inventory', 'Error', f"Batch Error: {e}", shop_url=shop_url)
