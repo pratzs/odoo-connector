@@ -414,8 +414,9 @@ def perform_inventory_sync(shop_url):
         mappings = ProductMap.query.filter(ProductMap.shop_url == shop_url, ProductMap.sku.in_(all_skus)).all()
         for m in mappings:
             sku_to_odoo_id[m.sku] = m.odoo_product_id
-            
-        missing_skus = [sku for sku in all_skus if sku not in sku_to_odoo_id]
+
+        # Include previously-failed (-1) SKUs so they get retried every sync
+        missing_skus = [sku for sku in all_skus if sku_to_odoo_id.get(sku, None) in (None, -1)]
         
         if missing_skus:
             # Only log this once at start, not repeatedly
@@ -446,18 +447,6 @@ def perform_inventory_sync(shop_url):
 
                 db.session.commit()
 
-                # --- IGNORE LOGIC ---
-                # Save failures as -1 so we don't ask Odoo again
-                for sku in missing_skus:
-                    if sku not in found_skus:
-                        if not ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first():
-                            db.session.add(ProductMap(
-                                shop_url=shop_url, 
-                                sku=sku, 
-                                odoo_product_id=-1,
-                                shopify_variant_id='0'
-                            ))
-                
                 db.session.commit()
 
             except Exception as e:
@@ -526,7 +515,14 @@ def perform_inventory_sync(shop_url):
 
                         final_qty = total_qty
                         if is_pack and qty_per_pack > 1.0 and not sku.endswith('-UNIT'):
-                            final_qty = math.floor(total_qty / qty_per_pack)
+                            divided = math.floor(total_qty / qty_per_pack)
+                            if divided == 0 and total_qty > 0:
+                                log_event('Inventory', 'Warning',
+                                    f"Pack calc gave 0 for {sku} (qty={total_qty}, per_pack={qty_per_pack}) — using raw qty",
+                                    shop_url=shop_url)
+                                final_qty = int(total_qty)
+                            else:
+                                final_qty = divided
 
                         final_qty = int(final_qty)
 
