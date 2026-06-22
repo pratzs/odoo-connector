@@ -38,11 +38,11 @@ def sync_products_master(shop_url):
         cutoff_str = cutoff.strftime('%Y-%m-%d %H:%M:%S')
 
         domain = [
-            ['sale_ok', '=', True], 
-            ['type', 'in', ['product', 'consu']], 
-            ['active', '=', True], 
-            ['write_date', '>=', cutoff_str], # <--- Delta Sync Gatekeeper
-            '|', 
+            ['sale_ok', '=', True],
+            ['type', 'in', ['product', 'consu']],
+            ['active', '=', True],
+            '|', ['write_date', '>=', cutoff_str], ['product_tmpl_id.write_date', '>=', cutoff_str],
+            '|',
             ['company_id', '=', int(company_id)],
             ['company_id', '=', False]
         ]
@@ -81,7 +81,7 @@ def sync_all_products_absolute_master(shop_url):
         if not shop: return
         
         odoo = get_odoo_connection(shop_url)
-        if not odoo: return
+        if not odoo or not setup_shopify_session(shop_url): return
 
         company_id = shop.odoo_company_id
         if not company_id: return
