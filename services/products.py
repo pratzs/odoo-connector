@@ -504,24 +504,26 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     try:
         meta_targets = []
         
-        # Original Retail Price (Strictly formatted to 2 decimal places for Shopify validation)
+        # Original Retail Price
+        # Shopify metafield definition is type 'money' — value must be JSON {"amount":"X.XX","currency_code":"XXX"}
         if cfg.get('meta_original_price'):
             safe_price = "{:.2f}".format(float(p.get('list_price') or 0.0))
+            currency = cfg.get('currency') or 'NZD'
             meta_targets.append({
                 'ownerId': f"gid://shopify/Product/{sp.id}",
                 'namespace': 'custom',
-                'key': 'original_retail_price', 
-                'value': str(safe_price), 
-                'type': 'number_decimal'
+                'key': 'original_retail_price',
+                'value': json.dumps({"amount": safe_price, "currency_code": currency}),
+                'type': 'money'
             })
-        
+
         # Vendor Product Code
         if cfg.get('meta_vendor_code') and p.get('vendor_code'):
             meta_targets.append({
                 'ownerId': f"gid://shopify/Product/{sp.id}",
                 'namespace': 'custom',
-                'key': 'vendor_product_code', 
-                'value': str(p.get('vendor_code')), 
+                'key': 'vendor_product_code',
+                'value': str(p.get('vendor_code')),
                 'type': 'single_line_text_field'
             })
 
@@ -535,16 +537,13 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
               }
             }
             """
-            # Execute the GraphQL Upsert
             result = json.loads(client.execute(query, {'metafields': meta_targets}))
-            
-            # Catch and log any specific Shopify validation errors
             errors = result.get('data', {}).get('metafieldsSet', {}).get('userErrors', [])
             if errors:
-                print(f"GraphQL Metafield Validation Error for {sku}: {errors}")
-                    
+                log_event('Product', 'Warning', f"Metafield error for {sku}: {errors}", shop_url=shop_url)
+
     except Exception as e:
-        print(f"Metafield Save Error {sku}: {e}")
+        log_event('Product', 'Warning', f"Metafield save error for {sku}: {e}", shop_url=shop_url)
 
     # --- Variant Sync ---
     existing = getattr(sp, 'variants', [])
@@ -1277,6 +1276,12 @@ def refresh_metafields_for_shop(shop_url):
         sync_price  = get_config('prod_sync_meta_original_price', False, shop_url=shop_url)
         sync_vendor = get_config('prod_sync_meta_vendor_code',    False, shop_url=shop_url)
 
+        # Fetch store currency (needed for money-type metafield value format)
+        try:
+            currency = shopify.Shop.current().currency
+        except Exception:
+            currency = 'NZD'
+
         if not sync_price and not sync_vendor:
             return 0, "Both metafields are disabled in settings — tick at least one to refresh"
 
@@ -1404,8 +1409,8 @@ def refresh_metafields_for_shop(shop_url):
                 if sync_price:
                     mutations.append({
                         'key':   'original_retail_price',
-                        'value': data['price'],
-                        'type':  'number_decimal',
+                        'value': json.dumps({"amount": data['price'], "currency_code": currency}),
+                        'type':  'money',
                         'existing': existing_metas.get('original_retail_price')
                     })
 
@@ -1468,7 +1473,7 @@ def refresh_metafields_for_shop(shop_url):
                         updated += 1
                     except Exception as e:
                         errors += 1
-                        print(f"Metafield write error ({m['key']}): {e}")
+                        log_event('Metafield Refresh', 'Warning', f"Metafield write error ({m['key']}): {e}", shop_url=shop_url)
 
         summary = f"Metafield refresh complete. Updated {updated} metafields across {len(maps)} products."
         if errors:
