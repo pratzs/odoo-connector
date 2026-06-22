@@ -1348,6 +1348,105 @@ def trigger_diagnose():
     return jsonify({"message": "Diagnostic Queued."})
 
 
+@app.route('/maintenance/stock_check', methods=['GET'])
+def maintenance_stock_check():
+    """
+    Open in browser: /maintenance/stock_check?token=TOKEN&shop=vjtrading.myshopify.com&sku=C0100
+    No Shopify session needed — Odoo-only query.
+    Protected by MAINTENANCE_SECRET env var.
+    """
+    token = request.args.get('token', '')
+    expected = os.getenv('MAINTENANCE_SECRET', '')
+    if not expected or token != expected:
+        return "Forbidden", 403
+
+    shop_url = request.args.get('shop')
+    sku = request.args.get('sku')
+    if not shop_url or not sku:
+        return "Usage: ?token=X&shop=vjtrading.myshopify.com&sku=C0100", 400
+
+    odoo = get_odoo_connection(shop_url)
+    if not odoo:
+        return f"Odoo connection failed for {shop_url}", 500
+
+    lines = [f"=== Stock Check: {sku} on {shop_url} ===\n"]
+    try:
+        # Find all product.product with this SKU
+        prods = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+            'product.product', 'search_read',
+            [[['default_code', '=', sku]]],
+            {'fields': ['id', 'name', 'default_code', 'active', 'qty_available',
+                        'virtual_available', 'sh_is_secondary_unit', 'qty_per_pack',
+                        'product_tmpl_id', 'company_id']})
+
+        if not prods:
+            lines.append(f"No product.product found with default_code='{sku}'")
+        else:
+            for p in prods:
+                tmpl = p.get('product_tmpl_id', [None, ''])
+                company = p.get('company_id', [None, ''])
+                lines.append(
+                    f"product.product ID={p['id']}  active={p['active']}  name={p['name']}\n"
+                    f"  template_id={tmpl[0]}  company={company}\n"
+                    f"  qty_available={p['qty_available']}  virtual_available={p['virtual_available']}\n"
+                    f"  sh_is_secondary_unit={p.get('sh_is_secondary_unit')}  qty_per_pack={p.get('qty_per_pack')}\n"
+                )
+
+            # All variants under same template
+            tmpl_id = prods[0]['product_tmpl_id'][0] if prods[0].get('product_tmpl_id') else None
+            if tmpl_id:
+                lines.append(f"\n=== All variants under template {tmpl_id} ===")
+                variants = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                    'product.product', 'search_read',
+                    [[['product_tmpl_id', '=', tmpl_id]]],
+                    {'fields': ['id', 'name', 'default_code', 'active',
+                                'qty_available', 'sh_is_secondary_unit', 'qty_per_pack']})
+                for v in variants:
+                    lines.append(
+                        f"  ID={v['id']}  sku={v['default_code']}  active={v['active']}  "
+                        f"qty_available={v['qty_available']}  "
+                        f"is_secondary={v.get('sh_is_secondary_unit')}  per_pack={v.get('qty_per_pack')}"
+                    )
+
+            # Raw stock.quant for the mapped product
+            pid = prods[0]['id']
+            lines.append(f"\n=== stock.quant for product.product {pid} ===")
+            quants = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'stock.quant', 'search_read',
+                [[['product_id', '=', pid]]],
+                {'fields': ['location_id', 'quantity', 'reserved_quantity', 'lot_id']})
+            if not quants:
+                lines.append("  (no quant rows — stock is on a different variant or location)")
+            for q in quants:
+                loc = q.get('location_id', [None, ''])
+                lot = q.get('lot_id', [None, ''])
+                lines.append(
+                    f"  location={loc[1]}  qty={q['quantity']}  reserved={q['reserved_quantity']}  lot={lot[1] if lot[0] else '-'}"
+                )
+
+            # Quants for ALL variants of this template
+            if tmpl_id:
+                all_ids = [v['id'] for v in variants]
+                lines.append(f"\n=== stock.quant totals for all variants under template {tmpl_id} ===")
+                if all_ids:
+                    tmpl_quants = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                        'stock.quant', 'read_group',
+                        [[['product_id', 'in', all_ids]]],
+                        ['product_id', 'quantity', 'reserved_quantity'],
+                        ['product_id'])
+                    if not tmpl_quants:
+                        lines.append("  (no quant rows for any variant under this template)")
+                    for tq in tmpl_quants:
+                        lines.append(
+                            f"  product_id={tq['product_id']}  total_qty={tq['quantity']}  reserved={tq['reserved_quantity']}"
+                        )
+
+    except Exception as e:
+        lines.append(f"\nERROR: {e}")
+
+    return "<pre>" + "\n".join(lines) + "</pre>", 200
+
+
 @app.route('/maintenance/fix_variants', methods=['POST'])
 @require_shopify_session
 def trigger_fix_variants():
