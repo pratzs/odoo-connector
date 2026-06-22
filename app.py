@@ -382,6 +382,13 @@ def perform_inventory_sync(shop_url):
         alert_threshold  = int(_cfg.get('alert_threshold') or 50)
         alert_email      = _cfg.get('alert_email')
 
+        # Company filter — only sync products belonging to this shop's Odoo company
+        company_id = get_config('odoo_company_id', shop_url=shop_url)
+        try:
+            company_id = int(company_id) if company_id else None
+        except (TypeError, ValueError):
+            company_id = None
+
         # 1. FETCH SHOPIFY VARIANTS (ACTIVE ONLY)
         # Store only the two fields needed for inventory sync to minimise memory usage.
         # Full Shopify Product objects (with images, metafields, etc.) are ~100x larger.
@@ -429,9 +436,12 @@ def perform_inventory_sync(shop_url):
                 active_ids = set()
                 for i in range(0, len(known_ids), VCHUNK):
                     chunk = known_ids[i:i+VCHUNK]
+                    active_domain = [['id', 'in', chunk], ['active', '=', True]]
+                    if company_id:
+                        active_domain += ['|', ['company_id', '=', company_id], ['company_id', '=', False]]
                     active_res = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                         'product.product', 'search_read',
-                        [[['id', 'in', chunk], ['active', '=', True]]],
+                        [active_domain],
                         {'fields': ['id']})
                     for r in active_res:
                         active_ids.add(r['id'])
@@ -458,6 +468,8 @@ def perform_inventory_sync(shop_url):
                 for i in range(0, len(missing_skus), CHUNK):
                     chunk = missing_skus[i:i+CHUNK]
                     domain = [['default_code', 'in', chunk], ['active', '=', True]]
+                    if company_id:
+                        domain += ['|', ['company_id', '=', company_id], ['company_id', '=', False]]
                     res = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                         'product.product', 'search_read', [domain], {'fields': ['default_code']})
 
