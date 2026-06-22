@@ -383,19 +383,23 @@ def perform_inventory_sync(shop_url):
         alert_email      = _cfg.get('alert_email')
 
         # 1. FETCH SHOPIFY VARIANTS (ACTIVE ONLY)
-        shopify_variants = {} 
+        # Store only the two fields needed for inventory sync to minimise memory usage.
+        # Full Shopify Product objects (with images, metafields, etc.) are ~100x larger.
+        shopify_variants = {}  # sku -> {'inventory_item_id': int, 'inventory_quantity': int}
         try:
-            # FIX: Added status='active' to ignore Archived/Draft products
             page = shopify.Product.find(limit=250, status='active')
-            
             while page:
                 for p in page:
                     for v in p.variants:
                         if v.sku:
-                            shopify_variants[v.sku] = v
-                if page.has_next_page(): 
+                            shopify_variants[v.sku] = {
+                                'inventory_item_id': v.inventory_item_id,
+                                'inventory_quantity': v.inventory_quantity or 0,
+                            }
+                    p.__dict__.clear()  # release the full product object immediately
+                if page.has_next_page():
                     page = page.next_page()
-                else: 
+                else:
                     break
         except Exception as e:
             log_event('Inventory', 'Error', f"Shopify Fetch Failed: {e}", shop_url=shop_url)
@@ -528,7 +532,7 @@ def perform_inventory_sync(shop_url):
 
                         if not sync_zero and final_qty <= 0: continue
 
-                        current_shopify_qty = int(sp_variant.inventory_quantity) if sp_variant.inventory_quantity else 0
+                        current_shopify_qty = int(sp_variant['inventory_quantity'])
 
                         diff = abs(final_qty - current_shopify_qty)
                         if diff >= alert_threshold:
@@ -541,7 +545,7 @@ def perform_inventory_sync(shop_url):
                             try:
                                 shopify.InventoryLevel.set(
                                     location_id=shopify_location_id,
-                                    inventory_item_id=sp_variant.inventory_item_id,
+                                    inventory_item_id=sp_variant['inventory_item_id'],
                                     available=final_qty
                                 )
                                 updates += 1
