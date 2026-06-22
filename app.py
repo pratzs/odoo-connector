@@ -3034,6 +3034,92 @@ def api_run_deep_diagnose():
         return jsonify({"success": False, "report": f"CRITICAL SYSTEM ERROR: {str(e)}"})
 
 
+@app.route('/api/diagnose/stock', methods=['POST'])
+@require_shopify_session
+def api_diagnose_stock():
+    """
+    Deep stock diagnostic: given an Odoo product.product ID, returns qty_available,
+    all variants under the same template, and raw stock.quant rows.
+    POST body: { "odoo_product_id": 74648 }
+    """
+    shop_url = request.args.get('shop')
+    data = request.json or {}
+    odoo_product_id = data.get('odoo_product_id')
+    sku = data.get('sku')
+
+    if not odoo_product_id and not sku:
+        return jsonify({"error": "Provide odoo_product_id or sku"}), 400
+
+    odoo = get_odoo_connection(shop_url)
+    if not odoo:
+        return jsonify({"error": "Odoo connection failed"}), 500
+
+    try:
+        result = {}
+
+        # If only SKU given, resolve to product.product ID(s)
+        if sku and not odoo_product_id:
+            prods = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'product.product', 'search_read',
+                [[['default_code', '=', sku]]],
+                {'fields': ['id', 'name', 'default_code', 'product_tmpl_id', 'active']})
+            result['sku_search'] = prods
+            if prods:
+                odoo_product_id = prods[0]['id']
+
+        if not odoo_product_id:
+            return jsonify({"error": "Product not found in Odoo", "detail": result}), 404
+
+        pid = int(odoo_product_id)
+
+        # 1. Read the target product.product
+        prod = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+            'product.product', 'read', [[pid]],
+            {'fields': ['name', 'default_code', 'active', 'qty_available',
+                        'virtual_available', 'sh_is_secondary_unit', 'qty_per_pack',
+                        'product_tmpl_id', 'company_id']})
+        result['product'] = prod[0] if prod else None
+
+        if not prod:
+            return jsonify({"error": f"product.product {pid} not found", "detail": result}), 404
+
+        tmpl_id = prod[0]['product_tmpl_id'][0] if prod[0].get('product_tmpl_id') else None
+        result['template_id'] = tmpl_id
+
+        # 2. All product.product variants under the same template
+        if tmpl_id:
+            variants = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                'product.product', 'search_read',
+                [[['product_tmpl_id', '=', tmpl_id]]],
+                {'fields': ['id', 'name', 'default_code', 'active',
+                            'qty_available', 'virtual_available',
+                            'sh_is_secondary_unit', 'qty_per_pack']})
+            result['all_variants'] = variants
+
+        # 3. Raw stock.quant rows for this product.product
+        quants = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+            'stock.quant', 'search_read',
+            [[['product_id', '=', pid]]],
+            {'fields': ['location_id', 'quantity', 'reserved_quantity', 'lot_id']})
+        result['stock_quants'] = quants
+
+        # 4. Also quants for ALL variants of the template
+        if tmpl_id:
+            all_variant_ids = [v['id'] for v in result.get('all_variants', [])]
+            if all_variant_ids:
+                tmpl_quants = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                    'stock.quant', 'read_group',
+                    [[['product_id', 'in', all_variant_ids]]],
+                    ['product_id', 'quantity', 'reserved_quantity'],
+                    ['product_id'])
+                result['template_quants_by_variant'] = tmpl_quants
+
+        return jsonify(result)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/jobs/<status>', methods=['GET'])
 @require_shopify_session
 def api_inspect_jobs(status):
