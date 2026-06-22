@@ -417,35 +417,65 @@ def perform_inventory_sync(shop_url):
 
         # Include previously-failed (-1) SKUs so they get retried every sync
         missing_skus = [sku for sku in all_skus if sku_to_odoo_id.get(sku, None) in (None, -1)]
-        
+
+        # Validate existing mappings: find any product.product IDs that have been
+        # archived/replaced in Odoo since the mapping was created (e.g. product recreated).
+        # One batch call checks all mapped IDs for active=True at once.
+        known_ids = [pid for pid in sku_to_odoo_id.values() if pid and pid > 0]
+        stale_skus = []
+        if known_ids:
+            try:
+                VCHUNK = 200
+                active_ids = set()
+                for i in range(0, len(known_ids), VCHUNK):
+                    chunk = known_ids[i:i+VCHUNK]
+                    active_res = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                        'product.product', 'search_read',
+                        [[['id', 'in', chunk], ['active', '=', True]]],
+                        {'fields': ['id']})
+                    for r in active_res:
+                        active_ids.add(r['id'])
+
+                for sku, pid in list(sku_to_odoo_id.items()):
+                    if pid and pid > 0 and pid not in active_ids:
+                        stale_skus.append(sku)
+                        del sku_to_odoo_id[sku]  # force re-lookup below
+
+                if stale_skus:
+                    log_event('Inventory', 'Warning',
+                        f"Found {len(stale_skus)} stale Odoo mappings (product archived/replaced): {stale_skus[:10]}",
+                        shop_url=shop_url)
+                    missing_skus = list(set(missing_skus) | set(stale_skus))
+            except Exception as e:
+                log_event('Inventory', 'Warning', f"Stale-mapping check failed: {e}", shop_url=shop_url)
+
         if missing_skus:
             # Only log this once at start, not repeatedly
             log_event('Inventory', 'Info', f"Found {len(missing_skus)} unmapped items. Searching Odoo...", shop_url=shop_url)
             try:
                 CHUNK = 10
-                found_skus = set() 
 
                 for i in range(0, len(missing_skus), CHUNK):
                     chunk = missing_skus[i:i+CHUNK]
                     domain = [['default_code', 'in', chunk], ['active', '=', True]]
                     res = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                         'product.product', 'search_read', [domain], {'fields': ['default_code']})
-                    
+
                     for r in res:
                         sku = r['default_code']
                         sku_to_odoo_id[sku] = r['id']
-                        found_skus.add(sku)
-                        
-                        # SAVE MAPPING
-                        if not ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first():
-                            db.session.add(ProductMap(
-                                shop_url=shop_url, 
-                                sku=sku, 
-                                odoo_product_id=r['id'],
-                                shopify_variant_id='0' 
-                            ))
 
-                db.session.commit()
+                        # Upsert mapping (handles both new and stale-refreshed entries)
+                        existing = ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first()
+                        if existing:
+                            existing.odoo_product_id = r['id']
+                        else:
+                            db.session.add(ProductMap(
+                                shop_url=shop_url,
+                                sku=sku,
+                                odoo_product_id=r['id'],
+                                shopify_variant_id='0'
+                            ))
 
                 db.session.commit()
 
