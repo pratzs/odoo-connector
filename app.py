@@ -500,6 +500,7 @@ def perform_inventory_sync(shop_url):
         updates = 0
         processed = 0
         BATCH_SIZE = 50
+        post_sync_zero_skus = set()  # collected during batches, remapped once after
         
         for i in range(0, len(map_items), BATCH_SIZE):
             batch = map_items[i:i+BATCH_SIZE]
@@ -542,50 +543,10 @@ def perform_inventory_sync(shop_url):
                         found_in_odoo.add(record['id'])
                         qty_map[record['id']] += float(record.get(target_field, 0.0))
                 
-                # Zero-qty secondary remap: if a mapped product returned 0, check whether
-                # a DIFFERENT active product with the same SKU in the correct company has stock.
-                # Catches active-but-wrong-company products that slip past the stale ID check.
-                zero_pids = [pid for pid, qty in qty_map.items() if qty == 0]
-                if zero_pids:
-                    zero_skus = []
-                    for pid in zero_pids:
-                        zero_skus.extend(batch_skus.get(pid, []))
-                    if zero_skus:
-                        try:
-                            remap_domain = [['default_code', 'in', zero_skus], ['active', '=', True],
-                                            [target_field, '>', 0]]
-                            if company_id:
-                                remap_domain += ['|', ['company_id', '=', company_id], ['company_id', '=', False]]
-                            remap_res = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                                'product.product', 'search_read', [remap_domain],
-                                {'fields': ['default_code', target_field]})
-                            for r in remap_res:
-                                sku = r['default_code']
-                                new_pid = r['id']
-                                old_pid = sku_to_odoo_id.get(sku)
-                                if new_pid != old_pid:
-                                    log_event('Inventory', 'Warning',
-                                        f"Zero-qty remap: {sku} {old_pid}→{new_pid} (qty={r[target_field]})",
-                                        shop_url=shop_url)
-                                    sku_to_odoo_id[sku] = new_pid
-                                    # Update qty_map and batch_skus for the rest of this batch
-                                    qty_map[new_pid] = float(r[target_field])
-                                    found_in_odoo.add(new_pid)
-                                    if old_pid in batch_skus:
-                                        batch_skus.setdefault(new_pid, []).extend(
-                                            [s for s in batch_skus[old_pid] if s == sku])
-                                    # Persist new mapping
-                                    existing = ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first()
-                                    if existing:
-                                        existing.odoo_product_id = new_pid
-                                    else:
-                                        db.session.add(ProductMap(
-                                            shop_url=shop_url, sku=sku,
-                                            odoo_product_id=new_pid, shopify_variant_id='0'))
-                            db.session.commit()
-                        except Exception as e:
-                            db.session.rollback()
-                            log_event('Inventory', 'Warning', f"Zero-qty remap failed: {e}", shop_url=shop_url)
+                # Collect zero-qty SKUs for post-loop remap (one bulk query after all batches)
+                for pid, qty in qty_map.items():
+                    if qty == 0:
+                        post_sync_zero_skus.update(batch_skus.get(pid, []))
 
                 # Update Shopify
                 for pid, total_qty in qty_map.items():
@@ -637,6 +598,47 @@ def perform_inventory_sync(shop_url):
 
             except Exception as e:
                 log_event('Inventory', 'Error', f"Batch Error: {e}", shop_url=shop_url)
+
+        # Post-loop zero-qty remap: one bulk Odoo query for all zero-qty SKUs.
+        # Updates ProductMap so the NEXT sync pushes correct stock to Shopify.
+        if post_sync_zero_skus:
+            try:
+                zero_list = list(post_sync_zero_skus)
+                REMAP_CHUNK = 200
+                remaps_found = 0
+                for ci in range(0, len(zero_list), REMAP_CHUNK):
+                    chunk_skus = zero_list[ci:ci + REMAP_CHUNK]
+                    remap_domain = [['default_code', 'in', chunk_skus], ['active', '=', True],
+                                    [target_field, '>', 0]]
+                    if company_id:
+                        remap_domain += ['|', ['company_id', '=', company_id], ['company_id', '=', False]]
+                    remap_res = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                        'product.product', 'search_read', [remap_domain],
+                        {'fields': ['default_code', target_field]})
+                    for r in remap_res:
+                        sku = r['default_code']
+                        new_pid = r['id']
+                        old_pid = sku_to_odoo_id.get(sku)
+                        if old_pid and new_pid != old_pid:
+                            log_event('Inventory', 'Warning',
+                                f"Post-sync remap: {sku} {old_pid}→{new_pid} (qty={r[target_field]}). Updating next sync.",
+                                shop_url=shop_url)
+                            sku_to_odoo_id[sku] = new_pid
+                            existing = ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first()
+                            if existing:
+                                existing.odoo_product_id = new_pid
+                            else:
+                                db.session.add(ProductMap(shop_url=shop_url, sku=sku,
+                                    odoo_product_id=new_pid, shopify_variant_id='0'))
+                            remaps_found += 1
+                if remaps_found:
+                    db.session.commit()
+                    log_event('Inventory', 'Warning',
+                        f"Post-sync: {remaps_found} ProductMap remaps saved. Next sync will correct stock.",
+                        shop_url=shop_url)
+            except Exception as e:
+                db.session.rollback()
+                log_event('Inventory', 'Warning', f"Post-sync zero-qty remap failed: {e}", shop_url=shop_url)
 
         if discrepancy_list and alert_email:
             send_inventory_alert(shop_url, alert_email, discrepancy_list)
