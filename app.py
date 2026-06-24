@@ -519,11 +519,17 @@ def perform_inventory_sync(shop_url):
 
         # 3. BATCH SYNC
         map_items = list(sku_to_odoo_id.items())
+        valid_items = [(sku, pid) for sku, pid in map_items if pid > 0]
         updates = 0
         processed = 0
         BATCH_SIZE = 50
+        total_batches = max(1, (len(valid_items) + BATCH_SIZE - 1) // BATCH_SIZE)
         post_sync_zero_skus = set()  # collected during batches, remapped once after
-        
+
+        log_event('Inventory', 'Info',
+            f"Starting batch sync: {len(valid_items)} mapped SKUs across {total_batches} batches.",
+            shop_url=shop_url)
+
         for i in range(0, len(map_items), BATCH_SIZE):
             batch = map_items[i:i+BATCH_SIZE]
             batch_ids = list(set([item[1] for item in batch if item[1] > 0]))
@@ -536,6 +542,12 @@ def perform_inventory_sync(shop_url):
                     batch_skus[pid].append(sku)
             
             if not batch_ids: continue
+
+            batch_num = (i // BATCH_SIZE) + 1
+            if batch_num == 1 or batch_num % 5 == 0:
+                log_event('Inventory', 'Info',
+                    f"Batch {batch_num}/{total_batches} — {updates} updates so far.",
+                    shop_url=shop_url)
 
             try:
                 import math
