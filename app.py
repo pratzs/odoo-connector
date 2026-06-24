@@ -26,6 +26,9 @@ from functools import wraps
 from sqlalchemy import text
 from email.message import EmailMessage
 from rq import Retry
+from rq.command import send_stop_job_command
+from rq.job import Job
+from rq.worker import BaseWorker
 # --- CUSTOM MODULES ---
 from models import db, ProductMap, SyncLog, AppSetting, CustomerMap, ProcessedOrder, Shop, FailedSyncOrder, SyncHealth
 from odoo_client import OdooClient
@@ -1280,8 +1283,57 @@ def clear_background_queue():
         return jsonify({"error": f"Failed to clear queue: {str(e)}"}), 500
         
 
+@app.route('/maintenance/kill_inventory_sync', methods=['POST'])
+@require_shopify_session
+def kill_inventory_sync():
+    """
+    Kills any active inventory sync jobs for this shop and enqueues a fresh one.
+    Uses RQ's send_stop_job_command to signal the worker to abandon the job.
+    """
+    shop_url = request.args.get('shop')
+    if not shop_url:
+        return jsonify({"error": "Missing shop parameter"}), 400
+
+    killed = []
+    errors = []
+
+    try:
+        from rq.job import Job
+        from rq.registry import StartedJobRegistry
+        registry = StartedJobRegistry(queue=q_critical, connection=conn)
+        active_job_ids = registry.get_job_ids()
+
+        for job_id in active_job_ids:
+            try:
+                job = Job.fetch(job_id, connection=conn)
+                args = job.args or []
+                if args and args[0] == shop_url and job.func_name and 'inventory' in job.func_name.lower():
+                    send_stop_job_command(conn, job_id)
+                    killed.append(job_id)
+                    log_event('System', 'Warning',
+                        f"Killed active inventory sync job {job_id} via admin endpoint.",
+                        shop_url=shop_url)
+            except Exception as e:
+                errors.append(f"{job_id}: {e}")
+    except Exception as e:
+        return jsonify({"error": f"Failed to inspect active jobs: {e}"}), 500
+
+    # Enqueue a fresh sync
+    new_job = q_critical.enqueue(perform_inventory_sync, shop_url, job_timeout=3600)
+    log_event('System', 'Info',
+        f"Re-queued inventory sync as job {new_job.get_id()} after killing {len(killed)} active job(s).",
+        shop_url=shop_url)
+
+    return jsonify({
+        "killed": killed,
+        "errors": errors,
+        "new_job_id": new_job.get_id(),
+        "message": f"Killed {len(killed)} job(s). Fresh sync queued as {new_job.get_id()}."
+    }), 200
+
+
 @app.route('/sync/inventory', methods=['GET'])
-@require_shopify_session        
+@require_shopify_session
 def sync_inventory_endpoint():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
