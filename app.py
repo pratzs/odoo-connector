@@ -2417,6 +2417,10 @@ def order_sync_failed(job, connection, type, value, traceback):
             shopify_id = str(order_data.get('id', ''))
             order_name = order_data.get('name', shopify_id)
 
+            # Don't queue cancelled orders for retry
+            if order_data.get('cancelled_at'):
+                return
+
             existing = FailedSyncOrder.query.filter_by(shop_url=shop_url, shopify_id=shopify_id).first()
             if existing:
                 existing.last_attempt_at = datetime.utcnow()
@@ -2845,7 +2849,12 @@ def retry_failed_orders(shop_url):
 
         log_event('Order', 'Info', f"Hourly retry: processing {len(pending)} failed order(s).", shop_url=shop_url)
 
+        if not setup_shopify_session(shop_url):
+            log_event('Order', 'Error', "Hourly retry: could not activate Shopify session.", shop_url=shop_url)
+            return
+
         capped = []
+        skipped_cancelled = 0
         for failed in pending:
             # Cap: if exceeded max attempts, stop retrying and alert
             if failed.attempt_count >= MAX_FAILED_ORDER_ATTEMPTS:
@@ -2854,6 +2863,18 @@ def retry_failed_orders(shop_url):
 
             try:
                 order_data = json.loads(failed.order_data)
+
+                # Check current Shopify status — skip if cancelled
+                try:
+                    live_order = shopify.Order.find(failed.shopify_id)
+                    if live_order and getattr(live_order, 'cancelled_at', None):
+                        db.session.delete(failed)
+                        db.session.commit()
+                        skipped_cancelled += 1
+                        continue
+                except Exception:
+                    pass
+
                 lock = ProcessedOrder.query.filter_by(shopify_id=failed.shopify_id, shop_url=shop_url).first()
                 if lock:
                     db.session.delete(lock)
@@ -2872,6 +2893,11 @@ def retry_failed_orders(shop_url):
                 log_event('Order', 'Error',
                     f"Hourly retry could not re-enqueue order {failed.shopify_id}: {e}",
                     shop_url=shop_url)
+
+        if skipped_cancelled:
+            log_event('Order', 'Info',
+                f"Hourly retry: dropped {skipped_cancelled} cancelled order(s) from retry queue.",
+                shop_url=shop_url)
 
         if capped:
             order_names = ', '.join(f.shopify_id for f in capped)
