@@ -3890,5 +3890,28 @@ def admin_remap_customer():
         return jsonify({'error': str(e)}), 500
 
 
+def _start_scheduler_thread():
+    """Launch run_schedule() in a daemon thread inside gunicorn.
+    Replaces the separate clock.py process, saving ~150 MB RSS.
+    Only starts when RUN_SCHEDULER env var is set (set in Render start cmd)."""
+    if not os.environ.get('RUN_SCHEDULER'):
+        return
+    import threading
+
+    def _loop():
+        import time as _t
+        _t.sleep(5)
+        try:
+            run_schedule()
+        except Exception as e:
+            print(f"Scheduler thread crashed: {e}")
+
+    t = threading.Thread(target=_loop, daemon=True)
+    t.start()
+    print("🕒 Scheduler thread started (in-process)")
+
+_start_scheduler_thread()
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
