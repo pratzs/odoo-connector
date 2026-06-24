@@ -568,8 +568,8 @@ def perform_inventory_sync(shop_url):
                     quant_domain.append(['location_id', 'not in', exclude_loc_ids])
 
                 groups = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                    'stock.quant', 'read_group', [quant_domain],
-                    ['product_id', 'quantity'], ['product_id'])
+                    'stock.quant', 'read_group',
+                    [quant_domain, ['product_id', 'quantity'], ['product_id']])
                 for g in groups:
                     if g.get('product_id'):
                         pid_to_qty[g['product_id'][0]] = float(g.get('quantity', 0.0))
