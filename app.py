@@ -425,7 +425,8 @@ def perform_inventory_sync(shop_url):
             return
 
         total_shopify = len(shopify_variants)
-        
+        gc.collect()
+
         # 2. RESOLVE ODOO IDs LOCALLY
         sku_to_odoo_id = {}
         all_skus = list(shopify_variants.keys())
@@ -537,6 +538,7 @@ def perform_inventory_sync(shop_url):
         log_event('Inventory', 'Info',
             f"Starting batch sync: {len(valid_items)} mapped SKUs, {len(all_valid_pids)} unique Odoo products.",
             shop_url=shop_url)
+        gc.collect()
 
         # --- Pre-fetch ALL Odoo data before entering the Shopify update loop ---
         # Order: stock first (1 call), then pack data only for products with stock > 0.

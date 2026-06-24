@@ -1,7 +1,8 @@
 import os
 import uuid
 from redis import Redis
-from rq import Worker, Queue
+from rq import Queue
+from rq.worker import SimpleWorker
 from app import app
 
 redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
@@ -11,16 +12,16 @@ if __name__ == '__main__':
     unique_id = str(uuid.uuid4())[:8]
     unique_name = f"Worker-{unique_id}"
 
-    # Single process listens to both queues; RQ checks critical before default,
-    # so inventory/order jobs always run first. One process instead of two
-    # saves ~100-150 MB RSS on Render's 512 MB instance.
+    # SimpleWorker runs jobs IN-PROCESS instead of forking a child process
+    # per job. This saves ~150MB RSS on Render's 512MB instance because
+    # fork() would create a 3rd Python process with the full app loaded.
     queues = [
         Queue('critical', connection=conn),
         Queue('default', connection=conn),
     ]
-    w = Worker(queues, connection=conn, name=unique_name)
+    w = SimpleWorker(queues, connection=conn, name=unique_name)
 
-    print(f"👷 Starting {unique_name} on [critical, default] queues...")
+    print(f"👷 Starting {unique_name} on [critical, default] queues (SimpleWorker, no fork)...")
 
     with app.app_context():
         w.work()
