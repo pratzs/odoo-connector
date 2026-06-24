@@ -44,8 +44,8 @@ class RequestsTransport(xmlrpc.client.Transport):
                 url, 
                 data=request_body, 
                 headers={'Content-Type': 'text/xml'},
-                verify=self.verify, 
-                timeout=300
+                verify=self.verify,
+                timeout=60
             )
             resp.raise_for_status()
             
