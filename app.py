@@ -384,30 +384,12 @@ def perform_inventory_sync(shop_url):
         exclude_locations = _cfg.get('inventory_locations_exclude') or []
         target_field      = _cfg.get('inventory_field') or 'qty_available'
 
-        # Expand parent location IDs to all internal children, minus any exclusions.
-        # Lets the user select WPW01/PICK [internal] and automatically include every
-        # pick sub-location without checking each one, while still being able to
-        # exclude specific sub-locations like WPW01/PICK/Clearance.
-        if target_locations:
-            try:
-                parent_ids  = [int(l) for l in target_locations]
-                exclude_ids = [int(e) for e in exclude_locations] if exclude_locations else []
-                expand_domain = [['id', 'child_of', parent_ids],
-                                 ['usage', '=', 'internal'],
-                                 ['active', '=', True]]
-                if exclude_ids:
-                    expand_domain.append(['id', 'not in', exclude_ids])
-                expanded = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                    'stock.location', 'search', [expand_domain], {})
-                if expanded:
-                    target_locations = expanded
-                    log_event('Inventory', 'Info',
-                        f"Locations expanded: {len(parent_ids)} parent(s) → {len(expanded)} leaf locations"
-                        + (f", {len(exclude_ids)} excluded" if exclude_ids else ""),
-                        shop_url=shop_url)
-            except Exception as e:
-                log_event('Inventory', 'Warning', f"Location expansion failed, using raw IDs: {e}",
-                          shop_url=shop_url)
+        # parent_ids / exclude_ids used by the stock.quant child_of query below.
+        # We do NOT pre-expand locations to leaf IDs — that produces thousands of IDs
+        # and makes the SQL IN clause enormous. Instead we pass parent IDs with the
+        # child_of operator and let Odoo's parent_left/parent_right index handle it.
+        parent_loc_ids  = [int(l) for l in target_locations]  if target_locations  else []
+        exclude_loc_ids = [int(e) for e in exclude_locations] if exclude_locations else []
         sync_zero        = _cfg.get('sync_zero_stock') in (True, 'true')
         alert_threshold  = int(_cfg.get('alert_threshold') or 50)
         alert_email      = _cfg.get('alert_email')
@@ -572,28 +554,38 @@ def perform_inventory_sync(shop_url):
                 for p in pack_data:
                     pid_to_pack[p['id']] = p
 
-            # Use get_stock_batch which calls stock.quant read_group — one Odoo API call
-            # for all products across all (already-expanded) locations.
-            loc_ids = [int(l) for l in target_locations] if target_locations else []
+            # One stock.quant read_group call using child_of — Odoo resolves the
+            # location hierarchy via parent_left/parent_right index, so we never
+            # need to expand parents to thousands of leaf IDs.
+            pid_to_qty = {pid: 0.0 for pid in all_valid_pids}
 
-            if loc_ids:
-                raw_qtys = odoo.get_stock_batch(all_valid_pids, loc_ids, target_field)
-                pid_to_qty = {pid: float(qty) for pid, qty in raw_qtys.items()}
-                # get_stock_batch initialises every requested pid to 0, so all are "found"
-                pid_found_in_odoo = set(all_valid_pids)
+            if parent_loc_ids:
+                quant_domain = [
+                    ['product_id', 'in', all_valid_pids],
+                    ['location_id', 'child_of', parent_loc_ids],
+                ]
+                if exclude_loc_ids:
+                    quant_domain.append(['location_id', 'not in', exclude_loc_ids])
+
+                groups = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                    'stock.quant', 'read_group', [quant_domain],
+                    ['product_id', 'quantity'], ['product_id'])
+                for g in groups:
+                    if g.get('product_id'):
+                        pid_to_qty[g['product_id'][0]] = float(g.get('quantity', 0.0))
             else:
                 for ci in range(0, len(all_valid_pids), ODOO_CHUNK):
                     chunk = all_valid_pids[ci:ci + ODOO_CHUNK]
                     stock_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                         'product.product', 'read', [chunk], {'fields': [target_field]})
                     for record in stock_data:
-                        pid_found_in_odoo.add(record['id'])
                         pid_to_qty[record['id']] = pid_to_qty.get(record['id'], 0.0) + float(record.get(target_field, 0.0))
 
+            pid_found_in_odoo = set(all_valid_pids)
             nonzero_count = sum(1 for q in pid_to_qty.values() if q > 0)
             log_event('Inventory', 'Info',
                 f"Odoo data fetched: {len(pid_found_in_odoo)}/{len(all_valid_pids)} products, "
-                f"{nonzero_count} with stock > 0. Locations: {len(loc_ids)} selected.",
+                f"{nonzero_count} with stock > 0. Parents: {parent_loc_ids}, excluded: {exclude_loc_ids or 'none'}",
                 shop_url=shop_url)
 
         except Exception as e:
