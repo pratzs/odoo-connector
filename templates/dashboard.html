@@ -440,12 +440,24 @@
                         </div>
 
                         <div class="bg-light p-3 rounded border mb-2">
-                            <label class="form-label-sm fw-semibold">Stock Locations</label>
+                            <div class="d-flex justify-content-between align-items-center mb-1">
+                                <label class="form-label-sm fw-semibold mb-0">Stock Locations</label>
+                                <div>
+                                    <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1" onclick="setAllLocs('.loc-check', true)">All</button>
+                                    <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1" onclick="setAllLocs('.loc-check', false)">None</button>
+                                </div>
+                            </div>
                             <div class="form-text mb-2">Select parent locations — all sub-locations are included automatically.</div>
                             <div id="locationList" class="small">Loading...</div>
                         </div>
                         <div class="bg-light p-3 rounded border">
-                            <label class="form-label-sm fw-semibold text-danger">Exclude Sub-Locations</label>
+                            <div class="d-flex justify-content-between align-items-center mb-1">
+                                <label class="form-label-sm fw-semibold text-danger mb-0">Exclude Sub-Locations</label>
+                                <div>
+                                    <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1" onclick="setAllLocs('.loc-exclude-check', true)">All</button>
+                                    <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1" onclick="setAllLocs('.loc-exclude-check', false)">None</button>
+                                </div>
+                            </div>
                             <div class="form-text mb-2">Check any sub-locations to exclude from stock counts (e.g. Clearance).</div>
                             <div id="locationExcludeList" class="small text-muted">Select locations above first.</div>
                         </div>
@@ -1473,6 +1485,10 @@ function openUnmappedModal() {
         .catch(err => {
             if(loadingEl) loadingEl.innerHTML = `<div class="text-danger">Error loading report: ${err}</div>`;
         });
+}
+
+function setAllLocs(selector, checked) {
+    document.querySelectorAll(selector).forEach(cb => cb.checked = checked);
 }
 
     function syncLocations() {
