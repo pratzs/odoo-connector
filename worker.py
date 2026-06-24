@@ -1,43 +1,26 @@
 import os
-import multiprocessing
 import uuid
 from redis import Redis
-from rq import Worker, Queue, Connection
+from rq import Worker, Queue
 from app import app
 
 redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
 conn = Redis.from_url(redis_url)
 
-def start_worker(queue_name):
-    """
-    Starts a dedicated worker process for a specific queue.
-    """
-    # FIX: Use UUID to ensure unique name even if PID is reused during restart
-    # This prevents "ValueError: There exists an active worker..."
+if __name__ == '__main__':
     unique_id = str(uuid.uuid4())[:8]
-    unique_name = f"Worker-{queue_name}-{unique_id}"
+    unique_name = f"Worker-{unique_id}"
 
-    print(f"👷 Starting {unique_name} for '{queue_name}' queue...")
+    # Single process listens to both queues; RQ checks critical before default,
+    # so inventory/order jobs always run first. One process instead of two
+    # saves ~100-150 MB RSS on Render's 512 MB instance.
+    queues = [
+        Queue('critical', connection=conn),
+        Queue('default', connection=conn),
+    ]
+    w = Worker(queues, connection=conn, name=unique_name)
 
-    # FIX: Pass connection directly to Queue and Worker instead of using
-    # the deprecated Connection context manager (removed in RQ 2.x).
-    q = Queue(queue_name, connection=conn)
-    w = Worker([q], connection=conn, name=unique_name)
+    print(f"👷 Starting {unique_name} on [critical, default] queues...")
 
     with app.app_context():
         w.work()
-
-if __name__ == '__main__':
-    print("🚀 Launching Parallel Workers...")
-
-    # Process 1: Critical Lane (Orders, Inventory)
-    p1 = multiprocessing.Process(target=start_worker, args=('critical',))
-    
-    # Process 2: Default Lane (Products, Images)
-    p2 = multiprocessing.Process(target=start_worker, args=('default',))
-
-    p1.start()
-    p2.start()
-    
-    p1.join()
-    p2.join()
