@@ -467,6 +467,7 @@ def perform_inventory_sync(shop_url):
             log_event('Inventory', 'Info', f"Found {len(missing_skus)} unmapped items. Searching Odoo...", shop_url=shop_url)
             try:
                 CHUNK = 10
+                found_skus = set()
 
                 for i in range(0, len(missing_skus), CHUNK):
                     chunk = missing_skus[i:i+CHUNK]
@@ -478,9 +479,9 @@ def perform_inventory_sync(shop_url):
 
                     for r in res:
                         sku = r['default_code']
+                        found_skus.add(sku)
                         sku_to_odoo_id[sku] = r['id']
 
-                        # Upsert mapping (handles both new and stale-refreshed entries)
                         existing = ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first()
                         if existing:
                             existing.odoo_product_id = r['id']
@@ -491,6 +492,24 @@ def perform_inventory_sync(shop_url):
                                 odoo_product_id=r['id'],
                                 shopify_variant_id='0'
                             ))
+
+                # Tombstone SKUs with no active Odoo product — prevents infinite stale→unmapped cycle
+                not_found = [s for s in missing_skus if s not in found_skus]
+                for sku in not_found:
+                    existing = ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first()
+                    if existing:
+                        existing.odoo_product_id = 0
+                    else:
+                        db.session.add(ProductMap(
+                            shop_url=shop_url,
+                            sku=sku,
+                            odoo_product_id=0,
+                            shopify_variant_id='0'
+                        ))
+                if not_found:
+                    log_event('Inventory', 'Warning',
+                        f"Tombstoned {len(not_found)} SKUs with no active Odoo product: {not_found[:10]}",
+                        shop_url=shop_url)
 
                 db.session.commit()
 
@@ -1282,6 +1301,49 @@ def clear_background_queue():
     except Exception as e:
         return jsonify({"error": f"Failed to clear queue: {str(e)}"}), 500
         
+
+@app.route('/maintenance/tombstone_skus', methods=['POST'])
+@require_shopify_session
+def tombstone_skus():
+    """
+    Permanently exclude SKUs that have no active Odoo product.
+    Sets odoo_product_id=0 so they are skipped by every future sync
+    (stale check, unmapped search, and batch loop all skip pid<=0).
+    Body: {"skus": ["C0423", "N0080", ...]}
+    """
+    shop_url = request.args.get('shop')
+    if not shop_url:
+        return jsonify({"error": "Missing shop parameter"}), 400
+
+    data = request.get_json(silent=True) or {}
+    skus = data.get('skus', [])
+    if not skus:
+        return jsonify({"error": "No SKUs provided"}), 400
+
+    tombstoned = []
+    for sku in skus:
+        existing = ProductMap.query.filter_by(shop_url=shop_url, sku=sku).first()
+        if existing:
+            existing.odoo_product_id = 0
+        else:
+            db.session.add(ProductMap(
+                shop_url=shop_url,
+                sku=sku,
+                odoo_product_id=0,
+                shopify_variant_id='0'
+            ))
+        tombstoned.append(sku)
+
+    db.session.commit()
+    log_event('Inventory', 'Warning',
+        f"Manually tombstoned {len(tombstoned)} SKUs (no active Odoo product): {tombstoned}",
+        shop_url=shop_url)
+
+    return jsonify({
+        "tombstoned": tombstoned,
+        "message": f"{len(tombstoned)} SKUs will be skipped by all future syncs."
+    }), 200
+
 
 @app.route('/maintenance/kill_inventory_sync', methods=['POST'])
 @require_shopify_session
