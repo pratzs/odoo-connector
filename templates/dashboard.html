@@ -439,9 +439,15 @@
                             <label class="form-check-label" for="checkCommitted">Combine Committed Stock</label>
                         </div>
 
-                        <div class="bg-light p-3 rounded border">
-                            <label class="form-label-sm">Locations</label>
+                        <div class="bg-light p-3 rounded border mb-2">
+                            <label class="form-label-sm fw-semibold">Stock Locations</label>
+                            <div class="form-text mb-2">Select parent locations — all sub-locations are included automatically.</div>
                             <div id="locationList" class="small">Loading...</div>
+                        </div>
+                        <div class="bg-light p-3 rounded border">
+                            <label class="form-label-sm fw-semibold text-danger">Exclude Sub-Locations</label>
+                            <div class="form-text mb-2">Check any sub-locations to exclude from stock counts (e.g. Clearance).</div>
+                            <div id="locationExcludeList" class="small text-muted">Select locations above first.</div>
                         </div>
                     </div>
                 </div>
@@ -1217,19 +1223,20 @@ if(companySelect) {
 
 function fetchLocations(companyId) {
     const list = document.getElementById('locationList');
+    const excList = document.getElementById('locationExcludeList');
     if(!list) return;
     list.innerHTML = '<div class="spinner-border spinner-border-sm"></div> Loading...';
-    
+    if(excList) excList.innerHTML = '<div class="spinner-border spinner-border-sm"></div> Loading...';
+
     fetch(`/api/odoo/locations?company_id=${companyId}&shop=${CURRENT_SHOP_URL}`)
         .then(r => r.json())
         .then(data => {
             if(data.error) { list.innerHTML = `<span class="text-danger">${data.error}</span>`; return; }
-            
-            // Use the correct key from your SAVED_SETTINGS
-            const savedLocs = SAVED_SETTINGS.inventory_locations || []; 
-            
+
+            const savedLocs    = SAVED_SETTINGS.inventory_locations || [];
+            const savedExclude = SAVED_SETTINGS.inventory_locations_exclude || [];
+
             const items = data.map(loc => {
-                // Check if this location ID is in the saved array
                 const isChecked = savedLocs.includes(loc.id) ? 'checked' : '';
                 return `
                     <div class="form-check">
@@ -1238,6 +1245,19 @@ function fetchLocations(companyId) {
                     </div>`;
             });
             list.innerHTML = items.join('') || '<span class="text-warning">No locations found.</span>';
+
+            // Populate exclude list with the same locations
+            if(excList) {
+                const excItems = data.map(loc => {
+                    const isChecked = savedExclude.includes(loc.id) ? 'checked' : '';
+                    return `
+                        <div class="form-check">
+                            <input class="form-check-input loc-exclude-check" type="checkbox" value="${loc.id}" id="exc_${loc.id}" ${isChecked}>
+                            <label class="form-check-label small" for="exc_${loc.id}">${loc.name}</label>
+                        </div>`;
+                });
+                excList.innerHTML = excItems.join('') || '<span class="text-warning">No locations found.</span>';
+            }
         });
 }
 
@@ -1257,6 +1277,7 @@ function saveSettings() {
         sync_zero_stock: document.getElementById('checkZeroStock').checked,
         combine_committed: document.getElementById('checkCommitted').checked,
         inventory_locations: Array.from(document.querySelectorAll('.loc-check:checked')).map(cb => parseInt(cb.value)),
+        inventory_locations_exclude: Array.from(document.querySelectorAll('.loc-exclude-check:checked')).map(cb => parseInt(cb.value)),
         
         // Products
         prod_auto_create: document.getElementById('prodAutoCreate').checked,
