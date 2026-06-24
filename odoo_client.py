@@ -26,8 +26,8 @@ class RequestsTransport(xmlrpc.client.Transport):
         self.verbose = False  # <--- FIX: Initialize verbose to prevent AttributeError
         self.session = requests.Session()
         
-        # Retry strategy for network blips
-        retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
+        # Retry on HTTP 5xx only — NOT on timeouts/connection errors (those retry 3x60s=3min silently)
+        retries = Retry(total=3, connect=False, read=False, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
         self.session.mount('https://', HTTPAdapter(max_retries=retries))
         self.session.mount('http://', HTTPAdapter(max_retries=retries))
         
