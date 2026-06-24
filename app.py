@@ -545,16 +545,28 @@ def perform_inventory_sync(shop_url):
                 for p in pack_data:
                     pid_to_pack[p['id']] = p
 
-            if target_locations:
-                for loc_id in target_locations:
-                    ctx = {'location': int(loc_id)}
-                    for ci in range(0, len(all_valid_pids), ODOO_CHUNK):
-                        chunk = all_valid_pids[ci:ci + ODOO_CHUNK]
-                        stock_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                            'product.product', 'read', [chunk], {'fields': [target_field], 'context': ctx})
-                        for record in stock_data:
-                            pid_found_in_odoo.add(record['id'])
-                            pid_to_qty[record['id']] = pid_to_qty.get(record['id'], 0.0) + float(record.get(target_field, 0.0))
+            # Use stock.quant with location_id IN [...] — one call per product chunk
+            # regardless of how many locations are selected. Falls back to
+            # product.product read (with no location context) when no locations configured.
+            loc_ids = [int(l) for l in target_locations] if target_locations else []
+
+            if loc_ids:
+                QUANT_CHUNK = 500  # stock.quant rows are lightweight; fetch more at once
+                for ci in range(0, len(all_valid_pids), QUANT_CHUNK):
+                    chunk = all_valid_pids[ci:ci + QUANT_CHUNK]
+                    domain = [['location_id', 'in', loc_ids], ['product_id', 'in', chunk]]
+                    quants = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                        'stock.quant', 'search_read', [domain],
+                        {'fields': ['product_id', 'quantity']})
+                    for q in quants:
+                        pid = q['product_id'][0]  # Many2one: [id, name]
+                        pid_found_in_odoo.add(pid)
+                        pid_to_qty[pid] = pid_to_qty.get(pid, 0.0) + float(q.get('quantity', 0.0))
+                # Mark products that Odoo knows about but returned no quants (genuinely 0 stock)
+                for pid in all_valid_pids:
+                    if pid not in pid_found_in_odoo:
+                        pid_found_in_odoo.add(pid)
+                        pid_to_qty.setdefault(pid, 0.0)
             else:
                 for ci in range(0, len(all_valid_pids), ODOO_CHUNK):
                     chunk = all_valid_pids[ci:ci + ODOO_CHUNK]
@@ -566,8 +578,8 @@ def perform_inventory_sync(shop_url):
 
             nonzero_count = sum(1 for q in pid_to_qty.values() if q > 0)
             log_event('Inventory', 'Info',
-                f"Odoo data fetched: {len(pid_found_in_odoo)}/{len(all_valid_pids)} products returned, "
-                f"{nonzero_count} with stock > 0. Location filter: {target_locations or 'none'}",
+                f"Odoo data fetched: {len(pid_found_in_odoo)}/{len(all_valid_pids)} products, "
+                f"{nonzero_count} with stock > 0. Locations: {len(loc_ids)} selected.",
                 shop_url=shop_url)
 
         except Exception as e:
