@@ -539,24 +539,16 @@ def perform_inventory_sync(shop_url):
             shop_url=shop_url)
 
         # --- Pre-fetch ALL Odoo data before entering the Shopify update loop ---
-        # This replaces per-batch Odoo calls (~60 calls) with bulk chunks (~8-16 calls total).
-        ODOO_CHUNK = 200
+        # Order: stock first (1 call), then pack data only for products with stock > 0.
+        # This minimises Odoo round-trips: if 200/1480 products have stock we make
+        # 1 read_group + 1 pack read instead of 8 pack reads + 1 read_group.
+        ODOO_CHUNK = 500
         pid_to_pack = {}
         pid_to_qty = {}
         pid_found_in_odoo = set()
 
         try:
-            for ci in range(0, len(all_valid_pids), ODOO_CHUNK):
-                chunk = all_valid_pids[ci:ci + ODOO_CHUNK]
-                pack_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
-                    'product.product', 'read', [chunk],
-                    {'fields': ['sh_is_secondary_unit', 'qty_per_pack']})
-                for p in pack_data:
-                    pid_to_pack[p['id']] = p
-
-            # One stock.quant read_group call using child_of — Odoo resolves the
-            # location hierarchy via parent_left/parent_right index, so we never
-            # need to expand parents to thousands of leaf IDs.
+            # Step 1: get stock quantities (1 Odoo call via child_of index)
             pid_to_qty = {pid: 0.0 for pid in all_valid_pids}
 
             if parent_loc_ids:
@@ -581,11 +573,27 @@ def perform_inventory_sync(shop_url):
                     for record in stock_data:
                         pid_to_qty[record['id']] = pid_to_qty.get(record['id'], 0.0) + float(record.get(target_field, 0.0))
 
-            pid_found_in_odoo = set(all_valid_pids)
             nonzero_count = sum(1 for q in pid_to_qty.values() if q > 0)
             log_event('Inventory', 'Info',
-                f"Odoo data fetched: {len(pid_found_in_odoo)}/{len(all_valid_pids)} products, "
-                f"{nonzero_count} with stock > 0. Parents: {parent_loc_ids}, excluded: {exclude_loc_ids or 'none'}",
+                f"Stock fetched: {nonzero_count}/{len(all_valid_pids)} products with qty > 0. "
+                f"Parents: {parent_loc_ids}, excluded: {exclude_loc_ids or 'none'}",
+                shop_url=shop_url)
+
+            # Step 2: fetch pack info only for products that actually have stock.
+            # Products with 0 stock will be synced as 0 regardless of pack units.
+            pids_with_stock = [pid for pid, qty in pid_to_qty.items() if qty > 0]
+            for ci in range(0, len(pids_with_stock), ODOO_CHUNK):
+                chunk = pids_with_stock[ci:ci + ODOO_CHUNK]
+                pack_data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                    'product.product', 'read', [chunk],
+                    {'fields': ['sh_is_secondary_unit', 'qty_per_pack']})
+                for p in pack_data:
+                    pid_to_pack[p['id']] = p
+
+            pid_found_in_odoo = set(all_valid_pids)
+            log_event('Inventory', 'Info',
+                f"Pack data fetched for {len(pids_with_stock)} in-stock products. "
+                f"Ready to sync {len(all_valid_pids)} SKUs.",
                 shop_url=shop_url)
 
         except Exception as e:
