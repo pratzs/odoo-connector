@@ -390,7 +390,7 @@ def perform_inventory_sync(shop_url):
         # child_of operator and let Odoo's parent_left/parent_right index handle it.
         parent_loc_ids  = [int(l) for l in target_locations]  if target_locations  else []
         exclude_loc_ids = [int(e) for e in exclude_locations] if exclude_locations else []
-        sync_zero        = _cfg.get('sync_zero_stock') in (True, 'true')
+        skip_zero        = _cfg.get('sync_zero_stock') in (True, 'true')
         alert_threshold  = int(_cfg.get('alert_threshold') or 50)
         alert_email      = _cfg.get('alert_email')
 
@@ -644,7 +644,7 @@ def perform_inventory_sync(shop_url):
 
                 final_qty = int(final_qty)
 
-                if not sync_zero and final_qty <= 0:
+                if skip_zero and final_qty <= 0:
                     continue
 
                 current_shopify_qty = int(sp_variant['inventory_quantity'])
