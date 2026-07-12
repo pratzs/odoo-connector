@@ -29,6 +29,44 @@ def extract_pack_size(uom_name):
     match = re.search(r'(\d+)$', str(uom_name).strip())
     return int(match.group(1)) if match else None
 
+def bisecting_read(odoo, model, ids, fields, shop_url, label, chunk_size=250):
+    """
+    Reads records in chunks; if a chunk's read call errors (e.g. Odoo's XML-RPC
+    'cannot marshal NewId objects' bug on certain products), bisects that chunk down
+    until the exact poison record(s) are isolated and skipped — instead of losing
+    every product in the chunk over one bad record.
+
+    Returns (records, failed_ids).
+    """
+    results = []
+    failed = []
+
+    def read_range(id_list):
+        if not id_list:
+            return
+        try:
+            data = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, model, 'read', [id_list], {'fields': fields})
+            results.extend(data)
+        except Exception:
+            if len(id_list) == 1:
+                failed.append(id_list[0])
+            else:
+                mid = len(id_list) // 2
+                read_range(id_list[:mid])
+                read_range(id_list[mid:])
+
+    for i in range(0, len(ids), chunk_size):
+        read_range(ids[i:i + chunk_size])
+
+    if failed:
+        shown = failed[:20]
+        suffix = f" (+{len(failed) - 20} more)" if len(failed) > 20 else ""
+        log_event('Metafield Refresh', 'Warning',
+            f"{label}: skipped {len(failed)} product(s) that error on read — Odoo IDs: {shown}{suffix}",
+            shop_url=shop_url)
+
+    return results, failed
+
 # =====================================================
 # 1. THE DISPATCHER
 # =====================================================
@@ -1350,27 +1388,14 @@ def refresh_metafields_for_shop(shop_url):
         if sync_pack_size:
             read_fields.append('uom_po_id')
 
-        odoo_products = []
         CHUNK_SIZE = 250
-        chunk_errors = 0
-        for i in range(0, len(odoo_ids), CHUNK_SIZE):
-            chunk = odoo_ids[i:i + CHUNK_SIZE]
-            try:
-                chunk_data = odoo.models.execute_kw(
-                    odoo.db, odoo.uid, odoo.password,
-                    'product.product', 'read', [chunk],
-                    {'fields': read_fields}
-                )
-                if chunk_data:
-                    odoo_products.extend(chunk_data)
-            except Exception as e:
-                chunk_errors += 1
-                log_event('Metafield Refresh', 'Warning',
-                    f"Odoo read failed for chunk {i}-{i+len(chunk)} ({len(chunk)} products) — skipping this chunk: {e}",
-                    shop_url=shop_url)
+        odoo_products, failed_ids = bisecting_read(
+            odoo, 'product.product', odoo_ids, read_fields, shop_url,
+            label="Product read", chunk_size=CHUNK_SIZE
+        )
 
         if not odoo_products:
-            return 0, f"Odoo read failed for all {chunk_errors} chunk(s) — check logs"
+            return 0, f"Odoo read failed for all {len(failed_ids)} product(s) — check logs"
 
         # 3. Bulk-fetch vendor codes from product.supplierinfo (CHUNKED)
         vendor_code_map = {}
@@ -1555,5 +1580,7 @@ def refresh_metafields_for_shop(shop_url):
         summary = f"Metafield refresh complete. Updated {updated} metafields across {len(maps)} products."
         if errors:
             summary += f" ({errors} errors — check logs)"
+        if failed_ids:
+            summary += f" ({len(failed_ids)} product(s) skipped — Odoo read errors, see logs)"
         log_event('Metafield Refresh', 'Success', summary, shop_url=shop_url)
         return updated, summary
