@@ -1365,10 +1365,11 @@ def refresh_metafields_for_shop(shop_url):
         if not sync_price and not sync_vendor and not sync_qty_per_pack and not sync_pack_size:
             return 0, "All metafields are disabled in settings — tick at least one to refresh"
 
-        # 1. Load every mapped product for this shop (skip placeholder -1 rows)
+        # 1. Load every mapped product for this shop (skip placeholder -1/0 rows —
+        # 0 is never a valid Odoo record id and reading it errors on the Odoo side)
         maps = ProductMap.query.filter(
             ProductMap.shop_url == shop_url,
-            ProductMap.odoo_product_id != -1
+            ProductMap.odoo_product_id.notin_([-1, 0])
         ).all()
 
         if not maps:
