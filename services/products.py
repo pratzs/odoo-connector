@@ -196,10 +196,12 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
 
         # --- A. PREFETCH ODOO DATA ---
         fields = ['default_code', 'name', 'list_price', 'standard_price', 'active',
-                  'uom_id', 'uom_po_id', 'sh_is_secondary_unit', 'sh_secondary_uom',
+                  'uom_id', 'sh_is_secondary_unit', 'sh_secondary_uom',
                   'public_categ_ids', 'product_tag_ids', 'description_sale',
                   'image_1920', 'barcode', 'qty_per_pack', 'product_tmpl_id']
-        
+        if cfg['meta_pack_size']:
+            fields.append('uom_po_id')
+
         try:
             products = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'read', [batch_ids], {'fields': fields})
         except Exception as e:
@@ -1338,21 +1340,37 @@ def refresh_metafields_for_shop(shop_url):
         shopify_map = {m.odoo_product_id: m.shopify_variant_id for m in maps}
 
         # 2. Bulk-fetch Odoo data (CHUNKED to prevent Render OOM crashes)
+        # Only request the fields each enabled metafield actually needs — qty_per_pack
+        # in particular is a custom computed field that has been known to crash Odoo's
+        # XML-RPC serialization for some products (NewId marshalling error), so it must
+        # never be fetched unless prod_sync_meta_qty_per_pack is actually ticked.
+        read_fields = ['id', 'list_price', 'product_tmpl_id']
+        if sync_qty_per_pack:
+            read_fields.append('qty_per_pack')
+        if sync_pack_size:
+            read_fields.append('uom_po_id')
+
         odoo_products = []
         CHUNK_SIZE = 250
-        try:
-            for i in range(0, len(odoo_ids), CHUNK_SIZE):
-                chunk = odoo_ids[i:i + CHUNK_SIZE]
+        chunk_errors = 0
+        for i in range(0, len(odoo_ids), CHUNK_SIZE):
+            chunk = odoo_ids[i:i + CHUNK_SIZE]
+            try:
                 chunk_data = odoo.models.execute_kw(
                     odoo.db, odoo.uid, odoo.password,
                     'product.product', 'read', [chunk],
-                    {'fields': ['id', 'list_price', 'product_tmpl_id', 'qty_per_pack', 'uom_po_id']}
+                    {'fields': read_fields}
                 )
                 if chunk_data:
                     odoo_products.extend(chunk_data)
-        except Exception as e:
-            log_event('Metafield Refresh', 'Error', f"Odoo read failed: {e}", shop_url=shop_url)
-            return 0, f"Odoo read failed: {e}"
+            except Exception as e:
+                chunk_errors += 1
+                log_event('Metafield Refresh', 'Warning',
+                    f"Odoo read failed for chunk {i}-{i+len(chunk)} ({len(chunk)} products) — skipping this chunk: {e}",
+                    shop_url=shop_url)
+
+        if not odoo_products:
+            return 0, f"Odoo read failed for all {chunk_errors} chunk(s) — check logs"
 
         # 3. Bulk-fetch vendor codes from product.supplierinfo (CHUNKED)
         vendor_code_map = {}
