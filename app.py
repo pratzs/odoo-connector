@@ -2587,6 +2587,7 @@ def save_settings():
             'prod_sync_vendor', 'prod_sync_barcode', 
             'prod_auto_create', 'prod_auto_publish',  # <--- CRITICAL ONES
             'prod_sync_meta_original_price', 'prod_sync_meta_vendor_code',
+            'prod_sync_meta_qty_per_pack', 'prod_sync_meta_pack_size',
             'sync_zero_stock'
         ]
 

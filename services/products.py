@@ -4,6 +4,7 @@ import gc
 import time
 import hashlib
 import math
+import re
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from models import Shop, ProductMap, AppSetting, db
@@ -16,6 +17,17 @@ from utils import get_odoo_connection, log_event, setup_shopify_session, get_con
 def find_variant_in_cache(sku, shopify_product_cache):
     clean_sku = str(sku).strip()
     return shopify_product_cache.get(clean_sku)
+
+def extract_pack_size(uom_name):
+    """
+    Pulls the pack size out of a Purchase UoM name, e.g. 'CTNX24' -> 24, 'CTNX12' -> 12.
+    Returns None if the name doesn't end in a number (e.g. 'Unit', 'Each', 'Dozen') —
+    callers should skip writing the metafield in that case rather than guessing.
+    """
+    if not uom_name:
+        return None
+    match = re.search(r'(\d+)$', str(uom_name).strip())
+    return int(match.group(1)) if match else None
 
 # =====================================================
 # 1. THE DISPATCHER
@@ -151,7 +163,8 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
         _cfg_keys = {'prod_sync_title', 'prod_sync_price', 'prod_sync_cost', 'prod_sync_desc',
                      'prod_sync_tags', 'prod_sync_images', 'prod_sync_vendor', 'prod_sync_barcode',
                      'prod_auto_create', 'prod_auto_publish',
-                     'prod_sync_meta_original_price', 'prod_sync_meta_vendor_code'}
+                     'prod_sync_meta_original_price', 'prod_sync_meta_vendor_code',
+                     'prod_sync_meta_qty_per_pack', 'prod_sync_meta_pack_size'}
         _rows = AppSetting.query.filter(
             AppSetting.shop_url == shop_url,
             AppSetting.key.in_(_cfg_keys)
@@ -176,13 +189,15 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
             'auto_publish':        _raw.get('prod_auto_publish', False),
             'meta_original_price': _raw.get('prod_sync_meta_original_price', False),
             'meta_vendor_code':    _raw.get('prod_sync_meta_vendor_code', False),
+            'meta_qty_per_pack':   _raw.get('prod_sync_meta_qty_per_pack', False),
+            'meta_pack_size':      _raw.get('prod_sync_meta_pack_size', False),
             'currency': currency
         }
 
         # --- A. PREFETCH ODOO DATA ---
-        fields = ['default_code', 'name', 'list_price', 'standard_price', 'active', 
-                  'uom_id', 'sh_is_secondary_unit', 'sh_secondary_uom', 
-                  'public_categ_ids', 'product_tag_ids', 'description_sale', 
+        fields = ['default_code', 'name', 'list_price', 'standard_price', 'active',
+                  'uom_id', 'uom_po_id', 'sh_is_secondary_unit', 'sh_secondary_uom',
+                  'public_categ_ids', 'product_tag_ids', 'description_sale',
                   'image_1920', 'barcode', 'qty_per_pack', 'product_tmpl_id']
         
         try:
@@ -526,6 +541,29 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
                 'value': str(p.get('vendor_code')),
                 'type': 'single_line_text_field'
             })
+
+        # Qty Per Pack (e.g. 12.00 for a CTNX12 carton)
+        if cfg.get('meta_qty_per_pack'):
+            meta_targets.append({
+                'ownerId': f"gid://shopify/Product/{sp.id}",
+                'namespace': 'custom',
+                'key': 'qty_per_pack',
+                'value': "{:.2f}".format(float(p.get('qty_per_pack') or 1.0)),
+                'type': 'number_decimal'
+            })
+
+        # Pack Size — parsed from Purchase UoM name (e.g. 'CTNX24' -> 24)
+        if cfg.get('meta_pack_size'):
+            po_uom = p.get('uom_po_id')  # [id, "CTNX24"] or False
+            pack_size = extract_pack_size(po_uom[1]) if po_uom else None
+            if pack_size is not None:
+                meta_targets.append({
+                    'ownerId': f"gid://shopify/Product/{sp.id}",
+                    'namespace': 'custom',
+                    'key': 'pack_size',
+                    'value': str(pack_size),
+                    'type': 'number_integer'
+                })
 
         if meta_targets:
             client = shopify.GraphQL()
@@ -1256,7 +1294,7 @@ def sync_missing_new_products(shop_url):
 
 def refresh_metafields_for_shop(shop_url):
     """
-    Force re-writes the two metafields (original_retail_price + vendor_product_code)
+    Force re-writes the metafields (original_retail_price + vendor_product_code + qty_per_pack)
     on every product in ProductMap for this shop.
 
     Unlike the regular sync which skips unchanged values, this ALWAYS writes —
@@ -1272,9 +1310,11 @@ def refresh_metafields_for_shop(shop_url):
             log_event('Metafield Refresh', 'Error', 'Connection failed (Odoo or Shopify)', shop_url=shop_url)
             return 0, "Connection failed"
 
-        # Only run if at least one of the two metafields is enabled in settings
-        sync_price  = get_config('prod_sync_meta_original_price', False, shop_url=shop_url)
-        sync_vendor = get_config('prod_sync_meta_vendor_code',    False, shop_url=shop_url)
+        # Only run if at least one metafield is enabled in settings
+        sync_price        = get_config('prod_sync_meta_original_price', False, shop_url=shop_url)
+        sync_vendor        = get_config('prod_sync_meta_vendor_code',    False, shop_url=shop_url)
+        sync_qty_per_pack  = get_config('prod_sync_meta_qty_per_pack',   False, shop_url=shop_url)
+        sync_pack_size     = get_config('prod_sync_meta_pack_size',      False, shop_url=shop_url)
 
         # Fetch store currency (needed for money-type metafield value format)
         try:
@@ -1282,8 +1322,8 @@ def refresh_metafields_for_shop(shop_url):
         except Exception:
             currency = 'NZD'
 
-        if not sync_price and not sync_vendor:
-            return 0, "Both metafields are disabled in settings — tick at least one to refresh"
+        if not sync_price and not sync_vendor and not sync_qty_per_pack and not sync_pack_size:
+            return 0, "All metafields are disabled in settings — tick at least one to refresh"
 
         # 1. Load every mapped product for this shop (skip placeholder -1 rows)
         maps = ProductMap.query.filter(
@@ -1306,7 +1346,7 @@ def refresh_metafields_for_shop(shop_url):
                 chunk_data = odoo.models.execute_kw(
                     odoo.db, odoo.uid, odoo.password,
                     'product.product', 'read', [chunk],
-                    {'fields': ['id', 'list_price', 'product_tmpl_id']}
+                    {'fields': ['id', 'list_price', 'product_tmpl_id', 'qty_per_pack', 'uom_po_id']}
                 )
                 if chunk_data:
                     odoo_products.extend(chunk_data)
@@ -1338,9 +1378,12 @@ def refresh_metafields_for_shop(shop_url):
         odoo_data = {}
         for p in odoo_products:
             tmpl_id = p['product_tmpl_id'][0] if p.get('product_tmpl_id') else None
+            po_uom = p.get('uom_po_id')  # [id, "CTNX24"] or False
             odoo_data[p['id']] = {
                 'price': "{:.2f}".format(float(p.get('list_price') or 0.0)),
-                'vendor_code': vendor_code_map.get(tmpl_id, '') if tmpl_id else ''
+                'vendor_code': vendor_code_map.get(tmpl_id, '') if tmpl_id else '',
+                'qty_per_pack': "{:.2f}".format(float(p.get('qty_per_pack') or 1.0)),
+                'pack_size': extract_pack_size(po_uom[1]) if po_uom else None
             }
 
         # 5. Walk through each product and force-write metafields
@@ -1420,6 +1463,22 @@ def refresh_metafields_for_shop(shop_url):
                         'value': data['vendor_code'],
                         'type':  'single_line_text_field',
                         'existing': existing_metas.get('vendor_product_code')
+                    })
+
+                if sync_qty_per_pack:
+                    mutations.append({
+                        'key':   'qty_per_pack',
+                        'value': data['qty_per_pack'],
+                        'type':  'number_decimal',
+                        'existing': existing_metas.get('qty_per_pack')
+                    })
+
+                if sync_pack_size and data['pack_size'] is not None:
+                    mutations.append({
+                        'key':   'pack_size',
+                        'value': str(data['pack_size']),
+                        'type':  'number_integer',
+                        'existing': existing_metas.get('pack_size')
                     })
 
                 for m in mutations:
