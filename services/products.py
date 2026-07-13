@@ -1421,6 +1421,12 @@ def refresh_metafields_for_shop(shop_url):
         total_failed_ids = []
         total_products = len(maps)
 
+        # Diagnostics for why pack_size might not populate for a given product,
+        # even when sync_pack_size is enabled — tracks whether Odoo simply never
+        # returned a uom_po_id at all vs. returned one that didn't parse.
+        diag_no_uom = 0
+        diag_unparsed_samples = {}  # {raw uom name: count}, capped below
+
         for sb_start in range(0, total_products, SUPER_BATCH):
             sb_maps = maps[sb_start:sb_start + SUPER_BATCH]
             odoo_ids    = [m.odoo_product_id for m in sb_maps]
@@ -1461,11 +1467,19 @@ def refresh_metafields_for_shop(shop_url):
             for p in odoo_products:
                 tmpl_id = p['product_tmpl_id'][0] if p.get('product_tmpl_id') else None
                 po_uom = p.get('uom_po_id')  # [id, "CTNX24"] or False
+                pack_size = extract_pack_size(po_uom[1]) if po_uom else None
+
+                if sync_pack_size:
+                    if not po_uom:
+                        diag_no_uom += 1
+                    elif pack_size is None:
+                        diag_unparsed_samples[po_uom[1]] = diag_unparsed_samples.get(po_uom[1], 0) + 1
+
                 odoo_data[p['id']] = {
                     'price': "{:.2f}".format(float(p.get('list_price') or 0.0)),
                     'vendor_code': vendor_code_map.get(tmpl_id, '') if tmpl_id else '',
                     'qty_per_pack': "{:.2f}".format(float(p.get('qty_per_pack') or 1.0)),
-                    'pack_size': extract_pack_size(po_uom[1]) if po_uom else None
+                    'pack_size': pack_size
                 }
 
             # 5. Walk through each product in this super-batch and force-write metafields
@@ -1608,4 +1622,12 @@ def refresh_metafields_for_shop(shop_url):
         if total_failed_ids:
             summary += f" ({len(total_failed_ids)} product(s) skipped — Odoo read errors, see logs)"
         log_event('Metafield Refresh', 'Success', summary, shop_url=shop_url)
+
+        if sync_pack_size:
+            top_unparsed = sorted(diag_unparsed_samples.items(), key=lambda kv: -kv[1])[:15]
+            log_event('Metafield Refresh', 'Info',
+                f"pack_size diagnostics: {diag_no_uom} product(s) had no uom_po_id returned by Odoo at all; "
+                f"top unparsed Purchase UoM values seen (name: count): {top_unparsed}",
+                shop_url=shop_url)
+
         return total_updated, summary
