@@ -622,9 +622,12 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
             po_uom = p.get('uom_po_id')  # [id, "CTNX24"] or False
             # Prefer uom_map's own name field over the related field's inline
             # display name, which comes back blank for many products — see
-            # refresh_metafields_for_shop for the full explanation.
+            # refresh_metafields_for_shop for the full explanation. Every product
+            # with SOME Purchase UoM assigned gets a pack_size — the real count
+            # when we can resolve/parse the name, otherwise 1 (assume single unit
+            # rather than leaving the metafield blank).
             po_uom_name = uom_map.get(po_uom[0], {}).get('name') if po_uom else None
-            pack_size = extract_pack_size(po_uom_name) if po_uom_name else None
+            pack_size = (extract_pack_size(po_uom_name) if po_uom_name else 1) if po_uom else None
             if pack_size is not None:
                 meta_targets.append({
                     'ownerId': f"gid://shopify/Product/{sp.id}",
@@ -1504,8 +1507,11 @@ def refresh_metafields_for_shop(shop_url):
                 # Prefer uom.uom's own name field over the related field's inline
                 # display name — the latter comes back blank for a large chunk of
                 # products (name_get() issue), the former is always reliable.
+                # Every product with SOME Purchase UoM assigned gets a pack_size —
+                # the real count when the name resolves/parses, otherwise 1
+                # (assume single unit rather than leaving the metafield blank).
                 po_uom_name = uom_id_to_name.get(po_uom[0]) if po_uom else None
-                pack_size = extract_pack_size(po_uom_name) if po_uom_name else None
+                pack_size = (extract_pack_size(po_uom_name) if po_uom_name else 1) if po_uom else None
 
                 if sync_pack_size:
                     if not po_uom:
