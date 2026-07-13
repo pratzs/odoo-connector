@@ -294,7 +294,17 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
             
         uom_map = {}
         try:
-            uoms = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'uom.uom', 'search_read', [], {'fields': ['id', 'name', 'factor_inv']})
+            # allowed_company_ids covers every company and the domain includes
+            # archived records — some UoMs (used for pack_size) are scoped to a
+            # company outside this session's default context or are deprecated/
+            # "(DNU)", and would otherwise silently drop out with a blank name.
+            all_company_ids = [c['id'] for c in odoo.models.execute_kw(
+                odoo.db, odoo.uid, odoo.password, 'res.company', 'search_read', [[]], {'fields': ['id']})]
+            uoms = odoo.models.execute_kw(
+                odoo.db, odoo.uid, odoo.password, 'uom.uom', 'search_read',
+                [['|', ['active', '=', True], ['active', '=', False]]],
+                {'fields': ['id', 'name', 'factor_inv'], 'context': {'allowed_company_ids': all_company_ids}}
+            )
             for u in uoms:
                 uom_map[u['id']] = {'name': u['name'], 'ratio': float(u.get('factor_inv', 1.0))}
         except: pass
@@ -622,12 +632,13 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
             po_uom = p.get('uom_po_id')  # [id, "CTNX24"] or False
             # Prefer uom_map's own name field over the related field's inline
             # display name, which comes back blank for many products — see
-            # refresh_metafields_for_shop for the full explanation. Every product
-            # with SOME Purchase UoM assigned gets a pack_size — the real count
-            # when we can resolve/parse the name, otherwise 1 (assume single unit
-            # rather than leaving the metafield blank).
+            # refresh_metafields_for_shop for the full explanation. IMPORTANT:
+            # only default to 1 when the name resolved but isn't a pack (e.g.
+            # 'Unit', 'Each') — if the name is unresolved/blank, we genuinely
+            # don't know the real value (could be CTNX12), so skip rather than
+            # risk writing a wrong pack size.
             po_uom_name = uom_map.get(po_uom[0], {}).get('name') if po_uom else None
-            pack_size = (extract_pack_size(po_uom_name) if po_uom_name else 1) if po_uom else None
+            pack_size = extract_pack_size(po_uom_name) if po_uom_name else None
             if pack_size is not None:
                 meta_targets.append({
                     'ownerId': f"gid://shopify/Product/{sp.id}",
@@ -1429,11 +1440,23 @@ def refresh_metafields_for_shop(shop_url):
         uom_id_to_name = {}
         if sync_pack_size:
             try:
+                # Some products' Purchase UoM points at a uom.uom record scoped to
+                # a company outside this session's default context (e.g. shared
+                # Odoo instance across Worthy Products / Worthy Oceania) — without
+                # allowed_company_ids covering every company, ir.rule silently
+                # drops those records from search_read, which is why names like
+                # 'CTNX12' still came back blank even after including archived
+                # records. Explicitly widen the context to every company that
+                # exists so nothing gets filtered out.
+                all_company_ids = [c['id'] for c in odoo.models.execute_kw(
+                    odoo.db, odoo.uid, odoo.password,
+                    'res.company', 'search_read', [[]], {'fields': ['id']}
+                )]
                 uom_records = odoo.models.execute_kw(
                     odoo.db, odoo.uid, odoo.password,
                     'uom.uom', 'search_read',
                     [['|', ['active', '=', True], ['active', '=', False]]],
-                    {'fields': ['id', 'name']}
+                    {'fields': ['id', 'name'], 'context': {'allowed_company_ids': all_company_ids}}
                 )
                 uom_id_to_name = {u['id']: u['name'] for u in uom_records}
             except Exception as e:
@@ -1507,11 +1530,12 @@ def refresh_metafields_for_shop(shop_url):
                 # Prefer uom.uom's own name field over the related field's inline
                 # display name — the latter comes back blank for a large chunk of
                 # products (name_get() issue), the former is always reliable.
-                # Every product with SOME Purchase UoM assigned gets a pack_size —
-                # the real count when the name resolves/parses, otherwise 1
-                # (assume single unit rather than leaving the metafield blank).
+                # IMPORTANT: only default to 1 when the name resolved but isn't a
+                # pack (e.g. 'Unit', 'Each') — if the name is unresolved/blank, we
+                # genuinely don't know the real value (could be CTNX12), so skip
+                # rather than risk writing a wrong pack size.
                 po_uom_name = uom_id_to_name.get(po_uom[0]) if po_uom else None
-                pack_size = (extract_pack_size(po_uom_name) if po_uom_name else 1) if po_uom else None
+                pack_size = extract_pack_size(po_uom_name) if po_uom_name else None
 
                 if sync_pack_size:
                     if not po_uom:
