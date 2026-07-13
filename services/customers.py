@@ -3,7 +3,7 @@ import json
 import re
 from datetime import datetime, timedelta
 from models import db, Shop, CustomerMap
-from utils import get_config, log_event, set_config, get_odoo_connection, setup_shopify_session
+from utils import get_config, get_shop_company_id, log_event, set_config, get_odoo_connection, setup_shopify_session
 
 
 # --- GRAPHQL HELPERS FOR B2B ---
@@ -361,7 +361,7 @@ def sync_customers_master(shop_url):
         if direction == 'shopify_to_odoo':
             return
 
-        company_id = get_config('odoo_company_id', shop_url=shop_url)
+        company_id = get_shop_company_id(shop_url)
         w_tag = get_config('cust_whitelist_tags', '', shop_url=shop_url)
         b_tag = get_config('cust_blacklist_tags', '', shop_url=shop_url)
         whitelist = [t.strip() for t in w_tag.split(',') if t.strip()]
@@ -473,7 +473,7 @@ def sync_all_customers_absolute_master(shop_url):
         if direction == 'shopify_to_odoo':
             return
 
-        company_id = get_config('odoo_company_id', shop_url=shop_url)
+        company_id = get_shop_company_id(shop_url)
         w_tag = get_config('cust_whitelist_tags', '', shop_url=shop_url)
         b_tag = get_config('cust_blacklist_tags', '', shop_url=shop_url)
         whitelist = [t.strip() for t in w_tag.split(',') if t.strip()]

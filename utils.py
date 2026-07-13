@@ -49,6 +49,20 @@ def get_config(key, default=None, shop_url=None):
         except: return setting.value
     except: return default
 
+def get_shop_company_id(shop_url):
+    """
+    odoo_company_id lives on the Shop table's own column, not in the generic
+    AppSetting key-value store — get_config('odoo_company_id', ...) always
+    returns None because that key is never written there (it's explicitly
+    excluded when settings are saved). Every company-scoping call site must
+    use this instead, or it silently searches/matches across ALL Odoo
+    companies rather than just the one configured for this shop.
+    """
+    if not shop_url:
+        return None
+    shop = Shop.query.filter_by(shop_url=shop_url).first()
+    return shop.odoo_company_id if shop else None
+
 def set_config(key, value, shop_url=None):
     if not shop_url:
         try:

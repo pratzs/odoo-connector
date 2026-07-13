@@ -1,7 +1,7 @@
 # services/orders.py
 from datetime import datetime
 from models import db, ProcessedOrder, Shop, CustomerMap
-from utils import get_config, set_config, log_event, acquire_distributed_lock
+from utils import get_config, get_shop_company_id, set_config, log_event, acquire_distributed_lock
 
 def process_order_data(data, odoo_client, shop_url): 
     """
@@ -62,7 +62,7 @@ def process_order_data(data, odoo_client, shop_url):
         try:
             email = data.get('email') or data.get('contact_email')
             client_ref = f"ONLINE_{shopify_name}"
-            company_id = get_config('odoo_company_id', shop_url=shop_url)
+            company_id = get_shop_company_id(shop_url)
 
             # Skip draft/test orders with no customer email - nothing useful to sync
             if not email:

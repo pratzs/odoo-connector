@@ -8,7 +8,7 @@ import re
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from models import Shop, ProductMap, AppSetting, db
-from utils import get_odoo_connection, log_event, setup_shopify_session, get_config, q_default
+from utils import get_odoo_connection, log_event, setup_shopify_session, get_config, get_shop_company_id, q_default
 
 
 # =====================================================
@@ -727,7 +727,7 @@ def _archive_odoo_products_in_shopify(shop_url, odoo, cutoff_str=None, full=Fals
         If the active-SKU safety set cannot be built, the function aborts
         entirely — never archives without verified safety data.
     """
-    company_id = get_config('odoo_company_id', shop_url=shop_url)
+    company_id = get_shop_company_id(shop_url)
     archived_count = 0
 
     # ── STEP 0: Build active-SKU safety guard (mandatory) ───────────────────

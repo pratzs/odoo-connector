@@ -35,15 +35,16 @@ from odoo_client import OdooClient
 # from security_utils import require_shopify_session 
 # --- UTILS (Merged & Clean) ---
 from utils import (
-    conn, 
+    conn,
     q_default,
     q_critical,
-    get_config, 
-    set_config, 
-    log_event, 
+    get_config,
+    get_shop_company_id,
+    set_config,
+    log_event,
     acquire_distributed_lock,
-    get_odoo_connection, 
-    setup_shopify_session, 
+    get_odoo_connection,
+    setup_shopify_session,
     automate_webhook_registration,
     send_inventory_alert 
 )
@@ -249,7 +250,7 @@ def sync_categories_only(shop_url):
         log_event('System', 'Info', "Starting eCommerce Category Sync (Reverse-Link Mode)...", shop_url=shop_url)
         
         # FIX: Added shop_url=shop_url here
-        company_id = get_config('odoo_company_id', shop_url=shop_url)
+        company_id = get_shop_company_id(shop_url)
         
         # 1. Load Odoo Data
         try:
@@ -395,7 +396,7 @@ def perform_inventory_sync(shop_url):
         alert_email      = _cfg.get('alert_email')
 
         # Company filter — only sync products belonging to this shop's Odoo company
-        company_id = get_config('odoo_company_id', shop_url=shop_url)
+        company_id = get_shop_company_id(shop_url)
         try:
             company_id = int(company_id) if company_id else None
         except (TypeError, ValueError):
@@ -1276,7 +1277,7 @@ def api_refresh_locations():
 
     try:
         # 2. Fetch Locations from Odoo
-        company_id = get_config('odoo_company_id', shop_url=shop_url)
+        company_id = get_shop_company_id(shop_url)
         locations = odoo.get_locations(company_id=company_id)
 
         # 3. Cache them in the Database
@@ -1464,7 +1465,7 @@ def task_force_name_repair(shop_url):
         odoo = get_odoo_connection(shop_url)
         if not odoo or not setup_shopify_session(shop_url): return
 
-        company_id = get_config('odoo_company_id', shop_url=shop_url)
+        company_id = get_shop_company_id(shop_url)
         
         # Config
         raw_groups = get_config('group_companies_list', '', shop_url=shop_url)
@@ -2128,7 +2129,7 @@ def manual_order_fetch():
         return jsonify({"orders": [], "error": "Could not connect to Odoo"})
 
     # --- FIX: Get Company ID ---
-    company_id = get_config('odoo_company_id', shop_url=shop_url)
+    company_id = get_shop_company_id(shop_url)
     
     # 2. Fetch Recent Shopify Orders
     try:
