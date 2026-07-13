@@ -37,6 +37,10 @@ def extract_pack_size(uom_name):
     Deliberately requires the 'CTNX' prefix rather than matching any trailing
     digit: dimensional/volume UoMs like 'm3' or 'MTR1' also end in a digit but
     aren't pack sizes, and a bare trailing-digit match would misfire on those.
+
+    Allows trailing text after the number (e.g. 'CTNX200 (DNU)' -> 200) — some
+    deprecated/"do not use" UoMs still carry a real multiplier in their name,
+    and products still assigned to them shouldn't lose their pack size over it.
     """
     if not uom_name:
         return None
@@ -44,7 +48,7 @@ def extract_pack_size(uom_name):
     word_qty = _KNOWN_WORD_QUANTITIES.get(name.lower())
     if word_qty is not None:
         return word_qty
-    match = re.match(r'ctnx(\d+)$', name, re.IGNORECASE)
+    match = re.match(r'ctnx(\d+)', name, re.IGNORECASE)
     return int(match.group(1)) if match else None
 
 def bisecting_read(odoo, model, ids, fields, shop_url, label, chunk_size=250):
@@ -613,7 +617,11 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
         # Pack Size — parsed from Purchase UoM name (e.g. 'CTNX24' -> 24)
         if cfg.get('meta_pack_size'):
             po_uom = p.get('uom_po_id')  # [id, "CTNX24"] or False
-            pack_size = extract_pack_size(po_uom[1]) if po_uom else None
+            # Prefer uom_map's own name field over the related field's inline
+            # display name, which comes back blank for many products — see
+            # refresh_metafields_for_shop for the full explanation.
+            po_uom_name = uom_map.get(po_uom[0], {}).get('name') if po_uom else None
+            pack_size = extract_pack_size(po_uom_name) if po_uom_name else None
             if pack_size is not None:
                 meta_targets.append({
                     'ownerId': f"gid://shopify/Product/{sp.id}",
@@ -1403,6 +1411,22 @@ def refresh_metafields_for_shop(shop_url):
         if sync_pack_size:
             read_fields.append('uom_po_id')
 
+        # uom_po_id's related display name (returned inline on the product.product
+        # read) comes back as an empty string for a large chunk of products —
+        # almost certainly the same name_get()-under-company-context issue found
+        # elsewhere in this app. Fetching uom.uom's own 'name' field directly by id
+        # (there are only a few dozen UoMs total) sidesteps that entirely.
+        uom_id_to_name = {}
+        if sync_pack_size:
+            try:
+                uom_records = odoo.models.execute_kw(
+                    odoo.db, odoo.uid, odoo.password,
+                    'uom.uom', 'search_read', [[]], {'fields': ['id', 'name']}
+                )
+                uom_id_to_name = {u['id']: u['name'] for u in uom_records}
+            except Exception as e:
+                log_event('Metafield Refresh', 'Warning', f"UoM name fetch failed: {e}", shop_url=shop_url)
+
         CHUNK_SIZE = 250
         WRITE_BATCH_SIZE = 50
         # SUPER_BATCH bounds how many products' Odoo+Shopify data live in memory at
@@ -1467,13 +1491,17 @@ def refresh_metafields_for_shop(shop_url):
             for p in odoo_products:
                 tmpl_id = p['product_tmpl_id'][0] if p.get('product_tmpl_id') else None
                 po_uom = p.get('uom_po_id')  # [id, "CTNX24"] or False
-                pack_size = extract_pack_size(po_uom[1]) if po_uom else None
+                # Prefer uom.uom's own name field over the related field's inline
+                # display name — the latter comes back blank for a large chunk of
+                # products (name_get() issue), the former is always reliable.
+                po_uom_name = uom_id_to_name.get(po_uom[0]) if po_uom else None
+                pack_size = extract_pack_size(po_uom_name) if po_uom_name else None
 
                 if sync_pack_size:
                     if not po_uom:
                         diag_no_uom += 1
                     elif pack_size is None:
-                        diag_unparsed_samples[po_uom[1]] = diag_unparsed_samples.get(po_uom[1], 0) + 1
+                        diag_unparsed_samples[po_uom_name or ''] = diag_unparsed_samples.get(po_uom_name or '', 0) + 1
 
                 odoo_data[p['id']] = {
                     'price': "{:.2f}".format(float(p.get('list_price') or 0.0)),
