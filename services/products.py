@@ -1475,7 +1475,10 @@ def refresh_metafields_for_shop(shop_url):
                 batch = map_items[i:i + WRITE_BATCH_SIZE]
                 variant_ids = [str(v_id) for _, v_id in batch]
 
-                # Bulk-fetch Shopify products by variant ID via GraphQL
+                # Bulk-fetch Shopify product IDs by variant ID via GraphQL. metafieldsSet
+                # always upserts (create or update) regardless of current value, so we
+                # don't need each product's existing metafield state here — fetching it
+                # was dead weight adding unnecessary query cost per call.
                 gql = """
                 query($ids: [ID!]!) {
                   nodes(ids: $ids) {
@@ -1483,9 +1486,6 @@ def refresh_metafields_for_shop(shop_url):
                       id
                       product {
                         id
-                        metafields(first: 20, namespace: "custom") {
-                          edges { node { id key value } }
-                        }
                       }
                     }
                   }
@@ -1518,10 +1518,6 @@ def refresh_metafields_for_shop(shop_url):
 
                     data = odoo_data[odoo_id]
                     product_gid = node.get('product', {}).get('id')
-                    existing_metas = {
-                        edge['node']['key']: edge['node']
-                        for edge in node.get('product', {}).get('metafields', {}).get('edges', [])
-                    }
 
                     # Build the metafield mutations
                     mutations = []
@@ -1530,57 +1526,72 @@ def refresh_metafields_for_shop(shop_url):
                         mutations.append({
                             'key':   'original_retail_price',
                             'value': json.dumps({"amount": data['price'], "currency_code": currency}),
-                            'type':  'money',
-                            'existing': existing_metas.get('original_retail_price')
+                            'type':  'money'
                         })
 
                     if sync_vendor and data['vendor_code']:
                         mutations.append({
                             'key':   'vendor_product_code',
                             'value': data['vendor_code'],
-                            'type':  'single_line_text_field',
-                            'existing': existing_metas.get('vendor_product_code')
+                            'type':  'single_line_text_field'
                         })
 
                     if sync_qty_per_pack:
                         mutations.append({
                             'key':   'qty_per_pack',
                             'value': data['qty_per_pack'],
-                            'type':  'number_decimal',
-                            'existing': existing_metas.get('qty_per_pack')
+                            'type':  'number_decimal'
                         })
 
                     if sync_pack_size and data['pack_size'] is not None:
                         mutations.append({
                             'key':   'pack_size',
                             'value': str(data['pack_size']),
-                            'type':  'number_integer',
-                            'existing': existing_metas.get('pack_size')
+                            'type':  'number_integer'
                         })
 
-                    for m in mutations:
-                        existing = m.pop('existing')
+                    if mutations:
+                        set_gql = """
+                        mutation($metafields: [MetafieldsSetInput!]!) {
+                          metafieldsSet(metafields: $metafields) {
+                            metafields { key value }
+                            userErrors { field message }
+                          }
+                        }
+                        """
+                        set_vars = {'metafields': [{
+                            'ownerId': product_gid,
+                            'namespace': 'custom',
+                            'key': m['key'],
+                            'value': m['value'],
+                            'type': m['type']
+                        } for m in mutations]}
+
                         try:
-                            set_gql = """
-                            mutation($metafields: [MetafieldsSetInput!]!) {
-                              metafieldsSet(metafields: $metafields) {
-                                metafields { key value }
-                                userErrors { field message }
-                              }
-                            }
-                            """
-                            set_vars = {'metafields': [{
-                                'ownerId': product_gid,
-                                'namespace': 'custom',
-                                'key': m['key'],
-                                'value': m['value'],
-                                'type': m['type']
-                            }]}
-                            client.execute(set_gql, set_vars)
-                            total_updated += 1
+                            raw = client.execute(set_gql, set_vars)
+                            result = json.loads(raw)
                         except Exception as e:
-                            total_errors += 1
-                            log_event('Metafield Refresh', 'Warning', f"Metafield write error ({m['key']}): {e}", shop_url=shop_url)
+                            total_errors += len(mutations)
+                            log_event('Metafield Refresh', 'Warning',
+                                f"Metafield write transport error for {product_gid}: {e}", shop_url=shop_url)
+                            continue
+
+                        # Shopify's GraphQL API returns HTTP 200 even when a mutation is
+                        # rejected — the failure only shows up in these two response
+                        # fields, never as a Python exception. Previously neither was
+                        # checked, so rejected writes (throttling, validation errors)
+                        # were silently counted as successes.
+                        top_level_errors = result.get('errors')
+                        user_errors = result.get('data', {}).get('metafieldsSet', {}).get('userErrors', [])
+
+                        if top_level_errors or user_errors:
+                            total_errors += len(mutations)
+                            keys = ', '.join(m['key'] for m in mutations)
+                            log_event('Metafield Refresh', 'Warning',
+                                f"Metafield write rejected ({keys}) for {product_gid}: "
+                                f"{top_level_errors or user_errors}", shop_url=shop_url)
+                        else:
+                            total_updated += len(mutations)
 
             # Free this super-batch's data before starting the next one
             del odoo_products, odoo_data, vendor_code_map, map_items, shopify_map
