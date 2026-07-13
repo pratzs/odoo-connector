@@ -3052,9 +3052,13 @@ def run_schedule():
                     conn.setex("last_failed_job_cleanup", 1800, "done")
 
                 # 4. Global — AI daily health report (once per day)
-                if not conn.get("last_ai_daily_report"):
-                    q_default.enqueue(run_ai_report_job, job_timeout=120)
-                    conn.setex("last_ai_daily_report", 86400, "done")
+                # Disabled: Anthropic account is out of API credits, so this was
+                # failing every day and logging an error. Re-enable by uncommenting
+                # once credits are topped up — the manual "Send AI Report Now"
+                # button still works either way.
+                # if not conn.get("last_ai_daily_report"):
+                #     q_default.enqueue(run_ai_report_job, job_timeout=120)
+                #     conn.setex("last_ai_daily_report", 86400, "done")
 
         except Exception as e:
             # Catch DB connection errors etc. so the clock process never dies
