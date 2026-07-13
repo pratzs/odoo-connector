@@ -30,13 +30,16 @@ def extract_pack_size(uom_name):
     Pulls the pack size out of a Purchase UoM name — any 'CTNX<n>' name works
     generically (e.g. 'CTNX24' -> 24, 'CTNX12' -> 12, 'CTNX150' -> 150,
     including any future CTNX<n> value, not just ones seen today), plus known
-    word-based quantities like 'Dozen' -> 12. Returns None for UoMs with no
-    defined pack multiplier (e.g. 'Unit', 'Each', 'Bag', 'CTN', 'm3', 'MTR1') —
-    callers should skip writing the metafield in that case rather than guessing.
+    word-based quantities like 'Dozen' -> 12. Every other named UoM (e.g.
+    'Unit', 'Each', 'Bag', 'CTN', or any future value with no defined
+    multiplier) defaults to 1 — every product should get a pack_size value,
+    not just the ones with an explicit carton count. Returns None only when
+    there's no Purchase UoM name at all to work with.
 
     Deliberately requires the 'CTNX' prefix rather than matching any trailing
     digit: dimensional/volume UoMs like 'm3' or 'MTR1' also end in a digit but
-    aren't pack sizes, and a bare trailing-digit match would misfire on those.
+    aren't pack sizes, and a bare trailing-digit match would misfire on those
+    — they fall through to the size-1 default instead.
 
     Allows trailing text after the number (e.g. 'CTNX200 (DNU)' -> 200) — some
     deprecated/"do not use" UoMs still carry a real multiplier in their name,
@@ -49,7 +52,7 @@ def extract_pack_size(uom_name):
     if word_qty is not None:
         return word_qty
     match = re.match(r'ctnx(\d+)', name, re.IGNORECASE)
-    return int(match.group(1)) if match else None
+    return int(match.group(1)) if match else 1
 
 def bisecting_read(odoo, model, ids, fields, shop_url, label, chunk_size=250):
     """
