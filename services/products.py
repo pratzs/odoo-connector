@@ -1415,13 +1415,19 @@ def refresh_metafields_for_shop(shop_url):
         # read) comes back as an empty string for a large chunk of products —
         # almost certainly the same name_get()-under-company-context issue found
         # elsewhere in this app. Fetching uom.uom's own 'name' field directly by id
-        # (there are only a few dozen UoMs total) sidesteps that entirely.
+        # (there are only a few dozen UoMs total) sidesteps that entirely. Domain
+        # explicitly includes archived UoMs — search_read excludes inactive
+        # records by default, and products still assigned to a deprecated/"(DNU)"
+        # UoM would otherwise silently drop out of this map (same pattern used in
+        # search_partner_by_email for the exact same class of bug).
         uom_id_to_name = {}
         if sync_pack_size:
             try:
                 uom_records = odoo.models.execute_kw(
                     odoo.db, odoo.uid, odoo.password,
-                    'uom.uom', 'search_read', [[]], {'fields': ['id', 'name']}
+                    'uom.uom', 'search_read',
+                    [['|', ['active', '=', True], ['active', '=', False]]],
+                    {'fields': ['id', 'name']}
                 )
                 uom_id_to_name = {u['id']: u['name'] for u in uom_records}
             except Exception as e:
@@ -1450,6 +1456,7 @@ def refresh_metafields_for_shop(shop_url):
         # returned a uom_po_id at all vs. returned one that didn't parse.
         diag_no_uom = 0
         diag_unparsed_samples = {}  # {raw uom name: count}, capped below
+        diag_blank_uom_ids = set()  # raw Odoo uom.uom ids behind blank names, capped at 15
 
         for sb_start in range(0, total_products, SUPER_BATCH):
             sb_maps = maps[sb_start:sb_start + SUPER_BATCH]
@@ -1502,6 +1509,8 @@ def refresh_metafields_for_shop(shop_url):
                         diag_no_uom += 1
                     elif pack_size is None:
                         diag_unparsed_samples[po_uom_name or ''] = diag_unparsed_samples.get(po_uom_name or '', 0) + 1
+                        if not po_uom_name and len(diag_blank_uom_ids) < 15:
+                            diag_blank_uom_ids.add(po_uom[0])
 
                 odoo_data[p['id']] = {
                     'price': "{:.2f}".format(float(p.get('list_price') or 0.0)),
@@ -1655,7 +1664,8 @@ def refresh_metafields_for_shop(shop_url):
             top_unparsed = sorted(diag_unparsed_samples.items(), key=lambda kv: -kv[1])[:15]
             log_event('Metafield Refresh', 'Info',
                 f"pack_size diagnostics: {diag_no_uom} product(s) had no uom_po_id returned by Odoo at all; "
-                f"top unparsed Purchase UoM values seen (name: count): {top_unparsed}",
+                f"top unparsed Purchase UoM values seen (name: count): {top_unparsed}; "
+                f"sample raw uom.uom ids behind blank names (check these directly in Odoo): {sorted(diag_blank_uom_ids)}",
                 shop_url=shop_url)
 
         return total_updated, summary
