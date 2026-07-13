@@ -18,15 +18,33 @@ def find_variant_in_cache(sku, shopify_product_cache):
     clean_sku = str(sku).strip()
     return shopify_product_cache.get(clean_sku)
 
+# Known word-based UoM names with an implicit fixed quantity — not a digit
+# suffix, so the regex below never catches these. Extend this map if other
+# named quantities (e.g. "Pair", "Gross") show up in the Odoo UoM list.
+_KNOWN_WORD_QUANTITIES = {
+    'dozen': 12,
+}
+
 def extract_pack_size(uom_name):
     """
-    Pulls the pack size out of a Purchase UoM name, e.g. 'CTNX24' -> 24, 'CTNX12' -> 12.
-    Returns None if the name doesn't end in a number (e.g. 'Unit', 'Each', 'Dozen') —
+    Pulls the pack size out of a Purchase UoM name — any 'CTNX<n>' name works
+    generically (e.g. 'CTNX24' -> 24, 'CTNX12' -> 12, 'CTNX150' -> 150,
+    including any future CTNX<n> value, not just ones seen today), plus known
+    word-based quantities like 'Dozen' -> 12. Returns None for UoMs with no
+    defined pack multiplier (e.g. 'Unit', 'Each', 'Bag', 'CTN', 'm3', 'MTR1') —
     callers should skip writing the metafield in that case rather than guessing.
+
+    Deliberately requires the 'CTNX' prefix rather than matching any trailing
+    digit: dimensional/volume UoMs like 'm3' or 'MTR1' also end in a digit but
+    aren't pack sizes, and a bare trailing-digit match would misfire on those.
     """
     if not uom_name:
         return None
-    match = re.search(r'(\d+)$', str(uom_name).strip())
+    name = str(uom_name).strip()
+    word_qty = _KNOWN_WORD_QUANTITIES.get(name.lower())
+    if word_qty is not None:
+        return word_qty
+    match = re.match(r'ctnx(\d+)$', name, re.IGNORECASE)
     return int(match.group(1)) if match else None
 
 def bisecting_read(odoo, model, ids, fields, shop_url, label, chunk_size=250):
