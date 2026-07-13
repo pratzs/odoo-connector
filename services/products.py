@@ -593,7 +593,8 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     # 2. Explicitly handle Metafields (Using Shopify's Recommended GraphQL Upsert)
     try:
         meta_targets = []
-        
+        needs_pack_size_clear = False
+
         # Original Retail Price
         # Shopify metafield definition is type 'money' — value must be JSON {"amount":"X.XX","currency_code":"XXX"}
         if cfg.get('meta_original_price'):
@@ -647,6 +648,8 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
                     'value': str(pack_size),
                     'type': 'number_integer'
                 })
+            else:
+                needs_pack_size_clear = True
 
         if meta_targets:
             client = shopify.GraphQL()
@@ -662,6 +665,32 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
             errors = result.get('data', {}).get('metafieldsSet', {}).get('userErrors', [])
             if errors:
                 log_event('Product', 'Warning', f"Metafield error for {sku}: {errors}", shop_url=shop_url)
+
+        # If pack_size can't be resolved, clear any existing value rather than
+        # leaving it untouched — an earlier buggy deploy force-wrote pack_size=1
+        # everywhere, including onto real multi-packs, so skipping the write
+        # here would leave that wrong value stuck forever.
+        if needs_pack_size_clear:
+            delete_query = """
+            mutation metafieldsDelete($metafields: [MetafieldIdentifierInput!]!) {
+              metafieldsDelete(metafields: $metafields) {
+                deletedMetafields { key ownerId }
+                userErrors { field message }
+              }
+            }
+            """
+            try:
+                client = shopify.GraphQL()
+                del_result = json.loads(client.execute(delete_query, {'metafields': [{
+                    'ownerId': f"gid://shopify/Product/{sp.id}",
+                    'namespace': 'custom',
+                    'key': 'pack_size'
+                }]}))
+                del_errors = del_result.get('data', {}).get('metafieldsDelete', {}).get('userErrors', [])
+                if del_errors:
+                    log_event('Product', 'Warning', f"pack_size clear error for {sku}: {del_errors}", shop_url=shop_url)
+            except Exception as e:
+                log_event('Product', 'Warning', f"pack_size clear failed for {sku}: {e}", shop_url=shop_url)
 
     except Exception as e:
         log_event('Product', 'Warning', f"Metafield save error for {sku}: {e}", shop_url=shop_url)
@@ -1627,12 +1656,21 @@ def refresh_metafields_for_shop(shop_url):
                             'type':  'number_decimal'
                         })
 
-                    if sync_pack_size and data['pack_size'] is not None:
-                        mutations.append({
-                            'key':   'pack_size',
-                            'value': str(data['pack_size']),
-                            'type':  'number_integer'
-                        })
+                    # If pack_size can't be resolved this run, clear any existing
+                    # value rather than leaving it untouched — an earlier buggy
+                    # deploy force-wrote pack_size=1 everywhere, including onto
+                    # real multi-packs like CTNX12, and simply skipping the write
+                    # here would leave that wrong value stuck forever.
+                    needs_pack_size_clear = False
+                    if sync_pack_size:
+                        if data['pack_size'] is not None:
+                            mutations.append({
+                                'key':   'pack_size',
+                                'value': str(data['pack_size']),
+                                'type':  'number_integer'
+                            })
+                        else:
+                            needs_pack_size_clear = True
 
                     if mutations:
                         set_gql = """
@@ -1676,6 +1714,32 @@ def refresh_metafields_for_shop(shop_url):
                                 f"{top_level_errors or user_errors}", shop_url=shop_url)
                         else:
                             total_updated += len(mutations)
+
+                    if needs_pack_size_clear:
+                        delete_gql = """
+                        mutation($metafields: [MetafieldIdentifierInput!]!) {
+                          metafieldsDelete(metafields: $metafields) {
+                            deletedMetafields { key ownerId }
+                            userErrors { field message }
+                          }
+                        }
+                        """
+                        delete_vars = {'metafields': [{
+                            'ownerId': product_gid,
+                            'namespace': 'custom',
+                            'key': 'pack_size'
+                        }]}
+                        try:
+                            raw = client.execute(delete_gql, delete_vars)
+                            del_result = json.loads(raw)
+                            del_errors = del_result.get('errors') or \
+                                del_result.get('data', {}).get('metafieldsDelete', {}).get('userErrors', [])
+                            if del_errors:
+                                log_event('Metafield Refresh', 'Warning',
+                                    f"pack_size clear rejected for {product_gid}: {del_errors}", shop_url=shop_url)
+                        except Exception as e:
+                            log_event('Metafield Refresh', 'Warning',
+                                f"pack_size clear transport error for {product_gid}: {e}", shop_url=shop_url)
 
             # Free this super-batch's data before starting the next one
             del odoo_products, odoo_data, vendor_code_map, map_items, shopify_map
