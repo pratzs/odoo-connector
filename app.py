@@ -395,6 +395,12 @@ def perform_inventory_sync(shop_url):
         alert_threshold  = int(_cfg.get('alert_threshold') or 50)
         alert_email      = _cfg.get('alert_email')
 
+        # Clearance mirror SKUs ('{sku}-CLR') are managed by the separate
+        # clearance pass (services/clearance.py). They have no Odoo default_code,
+        # so if the main sync scanned them it would tombstone them to 0 and fight
+        # the clearance pass — skip them here.
+        clearance_suffix = get_config('clearance_sku_suffix', '-CLR', shop_url=shop_url) or '-CLR'
+
         # Company filter — only sync products belonging to this shop's Odoo company
         company_id = get_shop_company_id(shop_url)
         try:
@@ -411,7 +417,7 @@ def perform_inventory_sync(shop_url):
             while page:
                 for p in page:
                     for v in p.variants:
-                        if v.sku:
+                        if v.sku and not v.sku.endswith(clearance_suffix):
                             shopify_variants[v.sku] = {
                                 'inventory_item_id': v.inventory_item_id,
                                 'inventory_quantity': v.inventory_quantity or 0,
@@ -786,6 +792,14 @@ def run_inventory_sync(shop_url):
                 db.session.commit()
         except Exception:
             pass
+
+        # Clearance mirror pass — runs right after every inventory sync on the
+        # same cadence, but fault-isolated so it can never fail inventory health.
+        try:
+            from services.clearance import perform_clearance_sync
+            perform_clearance_sync(shop_url)
+        except Exception as e:
+            log_event('Clearance', 'Error', f"Clearance sync failed: {e}", shop_url=shop_url)
 
 
 def run_fulfillment_sync(shop_url):

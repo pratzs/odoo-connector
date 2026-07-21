@@ -51,6 +51,33 @@ class ProductMap(db.Model):
     last_synced_at = db.Column(db.DateTime, default=datetime.utcnow)
     image_hash = db.Column(db.String(32), nullable=True)
 
+class ClearanceMirror(db.Model):
+    """
+    Bridges a base product to its auto-managed Clearance mirror in Shopify.
+
+    The connector shows normal (Pick/Bulk) stock on the base product and the
+    Clearance + Damaged stock on a separate '{sku}{suffix}' mirror product so
+    it can carry its own discounted price and live only in the Clearance
+    collection. One row per base SKU per shop. Caches the mirror's Shopify IDs
+    so each sync avoids re-looking them up, and lets the sync zero-out / draft
+    mirrors whose clearance stock has dropped to 0.
+    """
+    __tablename__ = 'clearance_mirror'
+    __table_args__ = (
+        db.UniqueConstraint('shop_url', 'base_sku', name='uq_clearance_mirror_shop_sku'),
+    )
+    id                    = db.Column(db.Integer, primary_key=True)
+    shop_url              = db.Column(db.String(255), index=True, nullable=False)
+    base_sku              = db.Column(db.String(50), index=True, nullable=False)
+    clr_sku               = db.Column(db.String(60), nullable=False)
+    odoo_product_id       = db.Column(db.Integer, nullable=False)
+    shopify_product_id    = db.Column(db.String(50), nullable=True)
+    shopify_variant_id    = db.Column(db.String(50), nullable=True)
+    inventory_item_id     = db.Column(db.String(50), nullable=True)
+    last_qty              = db.Column(db.Integer, default=0)
+    is_active             = db.Column(db.Boolean, default=True)
+    last_synced_at        = db.Column(db.DateTime, default=datetime.utcnow)
+
 class CustomerMap(db.Model):
     __tablename__ = 'customer_map'
     id = db.Column(db.Integer, primary_key=True)

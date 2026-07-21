@@ -512,6 +512,58 @@
                 </div>
             </div>
 
+            <!-- CLEARANCE COLLECTION SETTINGS -->
+            <div class="row mt-3">
+                <div class="col-12">
+                    <div class="card p-4">
+                        <div class="section-header">🏷️ Clearance Collection</div>
+                        <div class="form-text mb-3">
+                            Sells stock from your Clearance / Damaged locations as a separate discounted
+                            product ('{sku}-CLR') that lives only in your Clearance collection. Normal
+                            stock is unaffected. Runs automatically after each inventory sync.
+                        </div>
+
+                        <div class="form-check form-switch mb-3">
+                            <input class="form-check-input" type="checkbox" id="clearanceEnabled" {% if config.clearance_enabled %}checked{% endif %}>
+                            <label class="form-check-label" for="clearanceEnabled">Enable clearance sync</label>
+                        </div>
+
+                        <div class="row">
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label-sm">Discount %</label>
+                                <input type="number" min="0" max="100" step="1" class="form-control" id="clearanceDiscountPct"
+                                       value="{{ config.clearance_discount_pct if config.clearance_discount_pct is not none else 40 }}">
+                                <div class="form-text">Mirror price = list price − this %. Set 40 if a store-wide 10% app makes it 50%.</div>
+                            </div>
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label-sm">Clearance Collection ID</label>
+                                <input type="number" class="form-control" id="clearanceCollectionId"
+                                       value="{{ config.clearance_collection_id or '' }}" placeholder="e.g. 654321987">
+                                <div class="form-text">Numeric ID of the manual Shopify collection mirrors are added to.</div>
+                            </div>
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label-sm">Mirror SKU Suffix</label>
+                                <input type="text" class="form-control" id="clearanceSkuSuffix"
+                                       value="{{ config.clearance_sku_suffix or '-CLR' }}">
+                                <div class="form-text">Appended to the base SKU for the clearance product.</div>
+                            </div>
+                        </div>
+
+                        <div class="bg-light p-3 rounded border">
+                            <div class="d-flex justify-content-between align-items-center mb-1">
+                                <label class="form-label-sm fw-semibold text-warning mb-0">Clearance Locations</label>
+                                <div>
+                                    <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1" onclick="setAllLocs('.loc-clearance-check', true)">All</button>
+                                    <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1" onclick="setAllLocs('.loc-clearance-check', false)">None</button>
+                                </div>
+                            </div>
+                            <div class="form-text mb-2">Check the Clearance + Damaged locations. These should also be excluded above so they don't show on normal listings.</div>
+                            <div id="locationClearanceList" class="small text-muted">Select a company above first.</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- B2B LOGIN EMAIL SETTINGS -->
             <div class="row mt-3">
                 <div class="col-12">
@@ -1269,17 +1321,20 @@ if(companySelect) {
 function fetchLocations(companyId) {
     const list = document.getElementById('locationList');
     const excList = document.getElementById('locationExcludeList');
+    const clrList = document.getElementById('locationClearanceList');
     if(!list) return;
     list.innerHTML = '<div class="spinner-border spinner-border-sm"></div> Loading...';
     if(excList) excList.innerHTML = '<div class="spinner-border spinner-border-sm"></div> Loading...';
+    if(clrList) clrList.innerHTML = '<div class="spinner-border spinner-border-sm"></div> Loading...';
 
     fetch(`/api/odoo/locations?company_id=${companyId}&shop=${CURRENT_SHOP_URL}`)
         .then(r => r.json())
         .then(data => {
             if(data.error) { list.innerHTML = `<span class="text-danger">${data.error}</span>`; return; }
 
-            const savedLocs    = SAVED_SETTINGS.inventory_locations || [];
-            const savedExclude = SAVED_SETTINGS.inventory_locations_exclude || [];
+            const savedLocs      = SAVED_SETTINGS.inventory_locations || [];
+            const savedExclude   = SAVED_SETTINGS.inventory_locations_exclude || [];
+            const savedClearance = SAVED_SETTINGS.clearance_locations || [];
 
             const items = data.map(loc => {
                 const isChecked = savedLocs.includes(loc.id) ? 'checked' : '';
@@ -1303,6 +1358,19 @@ function fetchLocations(companyId) {
                 });
                 excList.innerHTML = excItems.join('') || '<span class="text-warning">No locations found.</span>';
             }
+
+            // Populate clearance list with the same locations
+            if(clrList) {
+                const clrItems = data.map(loc => {
+                    const isChecked = savedClearance.includes(loc.id) ? 'checked' : '';
+                    return `
+                        <div class="form-check">
+                            <input class="form-check-input loc-clearance-check" type="checkbox" value="${loc.id}" id="clr_${loc.id}" ${isChecked}>
+                            <label class="form-check-label small" for="clr_${loc.id}">${loc.name}</label>
+                        </div>`;
+                });
+                clrList.innerHTML = clrItems.join('') || '<span class="text-warning">No locations found.</span>';
+            }
         });
 }
 
@@ -1323,6 +1391,13 @@ function saveSettings() {
         combine_committed: document.getElementById('checkCommitted').checked,
         inventory_locations: Array.from(document.querySelectorAll('.loc-check:checked')).map(cb => parseInt(cb.value)),
         inventory_locations_exclude: Array.from(document.querySelectorAll('.loc-exclude-check:checked')).map(cb => parseInt(cb.value)),
+
+        // Clearance
+        clearance_enabled: document.getElementById('clearanceEnabled').checked,
+        clearance_discount_pct: parseFloat(document.getElementById('clearanceDiscountPct').value) || 0,
+        clearance_collection_id: document.getElementById('clearanceCollectionId').value.trim() || null,
+        clearance_sku_suffix: document.getElementById('clearanceSkuSuffix').value.trim() || '-CLR',
+        clearance_locations: Array.from(document.querySelectorAll('.loc-clearance-check:checked')).map(cb => parseInt(cb.value)),
         
         // Products
         prod_auto_create: document.getElementById('prodAutoCreate').checked,
