@@ -264,6 +264,7 @@
             </button>
             <div class="text-muted small mt-2 fw-bold text-uppercase" style="font-size: 11px; letter-spacing: 0.5px;">Sync Triggers</div>
             <button onclick="triggerAction('/sync/inventory')" class="btn btn-secondary text-start">Force Inventory Sync</button>
+            <button onclick="triggerAction('/sync/clearance', 'POST')" class="btn btn-secondary text-start">🏷️ Force Clearance Sync (mirrors only)</button>
             <button onclick="triggerAction('/sync/products/master', 'POST')" class="btn btn-secondary text-start">Force Product Sync(Last 2 Days Updates)</button>
             <button onclick="if(confirm('⚠️ This will overwrite all Shopify product data with fresh Odoo data for your entire catalog. This may take 60+ minutes. Continue?')) triggerAction('/sync/products/full_catalog', 'POST')" class="btn btn-warning-subtle text-start">Full Catalog Resync (Heavy)</button>
             <button onclick="triggerAction('/sync/products/force_catchup', 'POST')" class="btn btn-secondary text-start">Force Map Repair (All Time)</button>

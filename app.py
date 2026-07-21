@@ -838,6 +838,18 @@ def run_product_sync(shop_url):
     _run_with_health('product', shop_url, sync_products_master)
 
 
+def run_clearance_sync(shop_url):
+    """Standalone clearance mirror sync (dashboard 'Force Clearance Sync'
+    button). Runs ONLY the clearance pass — it reads the existing ProductMap,
+    so it does not need a full inventory sync to run first."""
+    with app.app_context():
+        try:
+            from services.clearance import perform_clearance_sync
+            perform_clearance_sync(shop_url)
+        except Exception as e:
+            log_event('Clearance', 'Error', f"Clearance sync failed: {e}", shop_url=shop_url)
+
+
 def _job_safe(fn):
     """
     Decorator for non-critical background jobs.
@@ -1483,6 +1495,17 @@ def sync_inventory_endpoint():
     job = q_critical.enqueue(run_inventory_sync, shop_url, job_timeout=3600)
 
     return jsonify({"message": f"Full Inventory Sync Queued (Job ID: {job.get_id()})"})
+
+
+@app.route('/sync/clearance', methods=['GET', 'POST'])
+@require_shopify_session
+def sync_clearance_endpoint():
+    """Run ONLY the clearance mirror pass (no inventory/product/customer sweep)."""
+    shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+
+    job = q_critical.enqueue(run_clearance_sync, shop_url, job_timeout=3600)
+    return jsonify({"message": f"Clearance Sync Queued (Job ID: {job.get_id()})"})
 
 
 def task_force_name_repair(shop_url):
