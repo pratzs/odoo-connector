@@ -136,14 +136,16 @@ def _find_product_id_by_sku(sku):
 
 
 def _get_base_shopify_product(base_sku):
-    """Fetch the base Shopify product so a new mirror can copy its look
-    (images, vendor, type, description). Called only on mirror creation."""
-    try:
-        variants = shopify.Variant.find(params={'sku': base_sku})
-        if variants:
-            return shopify.Product.find(variants[0].product_id)
-    except Exception:
-        pass
+    """Fetch the base Shopify product for a SKU. Uses the GraphQL exact-SKU
+    lookup (shopify.Variant.find(params={'sku': ...}) is unreliable — it does
+    not filter server-side and can return the wrong product, which caused the
+    draft to target the wrong product)."""
+    pid = _find_product_id_by_sku(base_sku)
+    if pid:
+        try:
+            return shopify.Product.find(pid)
+        except Exception:
+            return None
     return None
 
 
@@ -297,11 +299,10 @@ def _upsert_mirror(shop_url, pid, base_sku, clr_sku, info,
         sp.tags = 'Clearance'
         sp.body_html = (getattr(base, 'body_html', None)
                         or info.get('description_sale') or '')
-        if base is not None:
-            if getattr(base, 'vendor', None):
-                sp.vendor = base.vendor
-            if getattr(base, 'product_type', None):
-                sp.product_type = base.product_type
+        # Deliberately NO vendor and NO product_type on the mirror: those are
+        # what the store's smart collections (Nestlé, Explore, vendor/type
+        # pages) match on, so leaving them blank keeps clearance items out of
+        # every collection except the manual Clearance one.
         sp.variants = [shopify.Variant({
             'option1': 'Default Title',
             'sku': clr_sku,
@@ -337,12 +338,12 @@ def _upsert_mirror(shop_url, pid, base_sku, clr_sku, info,
         if variant is not None:
             variant.price = str(clr_price)
             variant.inventory_management = 'shopify'
-        # Keep the 'Clearance' tag present (badge signal) even if it was
-        # stripped by a manual edit or an earlier version.
-        tags = [t.strip() for t in (sp.tags or '').split(',') if t.strip()]
-        if 'Clearance' not in tags:
-            tags.append('Clearance')
-            sp.tags = ", ".join(tags)
+        # Keep the mirror "inert" so smart collections can't pull it in:
+        # ONLY the Clearance tag (strips any 'New' etc. added by other apps),
+        # and no vendor / product_type. Re-asserted every sync.
+        sp.tags = 'Clearance'
+        sp.vendor = ''
+        sp.product_type = ''
         sp.save()
 
     variant = sp.variants[0]

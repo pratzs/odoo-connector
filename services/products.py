@@ -7,7 +7,7 @@ import math
 import re
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta
-from models import Shop, ProductMap, AppSetting, db
+from models import Shop, ProductMap, AppSetting, ClearanceMirror, db
 from utils import get_odoo_connection, log_event, setup_shopify_session, get_config, get_shop_company_id, q_default
 
 
@@ -568,6 +568,16 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
 
             action_log = "created"
     if sp.status == 'archived': sp.status = 'active'
+
+    # Respect the clearance pass: if it has drafted this product because only
+    # clearance stock remains, product sync must not flip it back to active.
+    try:
+        _clr = ClearanceMirror.query.filter_by(
+            shop_url=shop_url, base_sku=sku, base_drafted=True).first()
+        if _clr:
+            sp.status = 'draft'
+    except Exception:
+        pass
 
     if cfg['title']: sp.title = p['name']
     if cfg['vendor']: sp.vendor = vendor_name
