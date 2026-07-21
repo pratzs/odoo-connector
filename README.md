@@ -148,6 +148,17 @@ Shopify Store(s)
 4. Push the clearance quantity (pack-size divided, same as main sync) to the mirror's variant
 5. Any previously-active mirror whose clearance stock has dropped to 0 is zeroed and set to **draft** (kept, not deleted — it reactivates when stock returns)
 
+**Normal-product lifecycle** (so an out-of-stock normal listing doesn't sit alongside its clearance mirror):
+
+| Normal stock | Clearance stock | Normal product | Clearance mirror |
+|---|---|---|---|
+| > 0 | > 0 | active | active |
+| > 0 | 0 | active | draft |
+| **0** | **> 0** | **drafted** | active |
+| 0 | 0 | active (back up) | draft |
+
+The base product is drafted **only** when normal stock hits 0 while clearance stock exists, and re-activated as soon as normal stock returns or clearance runs out. The connector records `base_drafted` on the `clearance_mirror` row and re-activates **only** products it drafted itself — a product the merchant drafted for another reason is never touched. Normal stock is read from the main sync's target locations minus excludes (so the decision matches what Shopify shows), which means the clearance locations must be in the exclude list.
+
 **No double-counting:** the two location sets are disjoint (main sync excludes exactly what this pass includes), so a product stocked in both Pick/Bulk and Clearance shows the full quantity on its normal listing and the clearance quantity on the mirror.
 
 **Order routing:** a `{sku}-CLR` line in an order maps back to the *base* Odoo product — `services/orders.py` strips the clearance suffix up front (before the create-new-product step) so no junk product is created, and the discounted line price is preserved via `manual_price=True`. Which Odoo location the line decrements from is governed by Odoo's own delivery/picking rules (configure a stock rule to source from the clearance location).
@@ -362,6 +373,7 @@ ngrok http 5000
 | 56 | **Archive propagation: SKU reuse safety guard** | Archive propagation could incorrectly archive a Shopify product if a new active Odoo product was created with the same SKU as a just-archived one. Fix: before any archive action, check the Shopify product's primary variant SKU against the full set of currently active Odoo SKUs — if the SKU is still live, the product is skipped. If the active-SKU set cannot be fetched, the entire archive run aborts rather than risk false-archiving |
 | 57 | **Purge Junk: archive instead of permanent delete** | `emergency_purge_junk_products` was calling `sp.destroy()` — permanent, unrecoverable deletion. Changed to `sp.status = 'archived'; sp.save()` — fully reversible from Shopify Admin. Also improved validity check to inspect ALL variants (not just `variants[0]`) so pack products with multiple variant SKUs are correctly protected |
 | 58 | **Clearance Collection sync** | New `services/clearance.py` + `clearance_mirror` table. Second inventory pass sells Clearance + Damaged location stock as separate discounted `{sku}-CLR` mirror products (auto-created/drafted, priced at `list × (1 − clearance_discount_pct)`, added to a Clearance collection, with an earliest-lot `clearance.expiry_date` metafield). Main sync excludes those locations and skips `-CLR` SKUs (guardrail so it can't tombstone the mirrors). `services/orders.py` strips the `-CLR` suffix so clearance orders route to the base Odoo product at the discounted price (`manual_price=True`) without creating a junk product. Dashboard gains a Clearance Collection settings card. See Core Workflow #9 |
+| 59 | **Clearance: normal-product lifecycle** | The clearance pass now drafts the **normal** product when its normal-location stock is 0 but clearance stock exists (so only the clearance mirror is buyable), and re-activates it when normal stock returns or clearance runs out. Tracked via `base_drafted` / `base_shopify_product_id` on `clearance_mirror` (added by an idempotent startup `ALTER TABLE ADD COLUMN IF NOT EXISTS` since `db.create_all` doesn't add columns) — only products the connector itself drafted are ever re-activated, never merchant-drafted ones |
 
 ---
 

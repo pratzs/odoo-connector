@@ -218,11 +218,27 @@ db.init_app(app)
 
 # --- DB INIT ---
 with app.app_context():
-    try: 
+    try:
         db.create_all()
         print("Database tables created/verified.")
-    except Exception as e: 
+    except Exception as e:
         print(f"CRITICAL DB INIT ERROR: {e}")
+
+    # Lightweight column migrations — db.create_all() only creates missing
+    # TABLES, not missing columns on tables that already exist. Each ALTER is
+    # idempotent (IF NOT EXISTS on Postgres; the try/except covers other DBs).
+    from sqlalchemy import text
+    _column_migrations = [
+        "ALTER TABLE clearance_mirror ADD COLUMN IF NOT EXISTS base_shopify_product_id VARCHAR(50)",
+        "ALTER TABLE clearance_mirror ADD COLUMN IF NOT EXISTS base_drafted BOOLEAN DEFAULT FALSE",
+    ]
+    for _stmt in _column_migrations:
+        try:
+            db.session.execute(text(_stmt))
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            print(f"Column migration skipped ({_stmt[:60]}...): {e}")
 
 
 def verify_shopify(data, hmac_header):

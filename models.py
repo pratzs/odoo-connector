@@ -76,6 +76,13 @@ class ClearanceMirror(db.Model):
     inventory_item_id     = db.Column(db.String(50), nullable=True)
     last_qty              = db.Column(db.Integer, default=0)
     is_active             = db.Column(db.Boolean, default=True)
+    # Base (normal) product lifecycle: when a product has clearance stock but
+    # zero normal stock, the connector drafts the normal product so only the
+    # clearance mirror is buyable, then re-activates it when normal stock
+    # returns or clearance runs out. base_drafted records that WE drafted it —
+    # so a product the merchant drafted for another reason is never touched.
+    base_shopify_product_id = db.Column(db.String(50), nullable=True)
+    base_drafted          = db.Column(db.Boolean, default=False)
     last_synced_at        = db.Column(db.DateTime, default=datetime.utcnow)
 
 class CustomerMap(db.Model):

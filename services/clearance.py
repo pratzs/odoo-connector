@@ -147,6 +147,61 @@ def _get_base_shopify_product(base_sku):
     return None
 
 
+def _draft_base_product(shop_url, base_sku, row):
+    """
+    Draft the normal product because its only remaining stock is clearance
+    stock (sold via the mirror). Records base_drafted=True ONLY when we
+    actually transition it active->draft — so a product the merchant drafted
+    for some other reason is never claimed (and never auto-reactivated) by us.
+    Does not commit; the caller does.
+    """
+    prod = None
+    if row.base_shopify_product_id:
+        try:
+            prod = shopify.Product.find(int(row.base_shopify_product_id))
+        except Exception:
+            prod = None
+    if prod is None:
+        prod = _get_base_shopify_product(base_sku)
+    if prod is None:
+        return
+    row.base_shopify_product_id = str(prod.id)
+    if getattr(prod, 'status', None) == 'active':
+        prod.status = 'draft'
+        try:
+            prod.save()
+            row.base_drafted = True
+            log_event('Clearance', 'Info',
+                      f"Drafted normal product {base_sku} — only clearance stock remains",
+                      shop_url=shop_url)
+        except Exception as e:
+            log_event('Clearance', 'Warning', f"Could not draft {base_sku}: {e}", shop_url=shop_url)
+
+
+def _reactivate_base_if_ours(shop_url, row):
+    """Re-activate the normal product, but only if WE drafted it. Does not
+    commit; the caller does."""
+    if not row.base_drafted:
+        return
+    prod = None
+    if row.base_shopify_product_id:
+        try:
+            prod = shopify.Product.find(int(row.base_shopify_product_id))
+        except Exception:
+            prod = None
+    if prod is not None and getattr(prod, 'status', None) != 'active':
+        prod.status = 'active'
+        try:
+            prod.save()
+            log_event('Clearance', 'Info',
+                      f"Re-activated normal product {row.base_sku} — stock available again",
+                      shop_url=shop_url)
+        except Exception as e:
+            log_event('Clearance', 'Warning', f"Could not re-activate {row.base_sku}: {e}", shop_url=shop_url)
+            return
+    row.base_drafted = False
+
+
 def _write_expiry_metafield(product_id, expiry):
     """Write clearance.expiry_date (date) so the theme can show it. Clears it
     when there's no expiry so a stale value never lingers."""
@@ -197,8 +252,12 @@ def _add_to_collection(product_id, collection_id):
 
 def _upsert_mirror(shop_url, pid, base_sku, clr_sku, info,
                    clr_price, base_price, final_qty, expiry,
-                   shopify_location_id, collection_id):
-    """Create or update the mirror product + variant, push qty, write expiry."""
+                   shopify_location_id, collection_id, normal_qty=None):
+    """Create or update the mirror product + variant, push qty, write expiry.
+
+    normal_qty: the product's stock in the normal (Pick/Bulk) locations, used
+    to decide the base product's visibility. None = don't manage the base
+    product (normal stock couldn't be determined)."""
     row = ClearanceMirror.query.filter_by(shop_url=shop_url, base_sku=base_sku).first()
 
     sp = None
@@ -301,6 +360,14 @@ def _upsert_mirror(shop_url, pid, base_sku, clr_sku, info,
     row.last_qty = int(final_qty)
     row.is_active = True
     row.last_synced_at = datetime.utcnow()
+
+    # Normal-product lifecycle: hide it when its only stock is clearance,
+    # bring it back when normal stock returns.
+    if normal_qty is not None and normal_qty <= 0:
+        _draft_base_product(shop_url, base_sku, row)
+    else:
+        _reactivate_base_if_ours(shop_url, row)
+
     db.session.commit()
 
     return created
@@ -325,6 +392,9 @@ def _zero_out_stale(shop_url, active_base_skus, shopify_location_id):
                         p.save()
                 except Exception:
                     pass
+            # Clearance stock is gone — bring the normal product back if we
+            # had drafted it (only-clearance state has ended).
+            _reactivate_base_if_ours(shop_url, row)
             row.is_active = False
             row.last_qty = 0
             row.last_synced_at = datetime.utcnow()
@@ -441,6 +511,37 @@ def perform_clearance_sync(shop_url):
             log_event('Clearance', 'Error', f"Odoo product read failed: {e}", shop_url=shop_url)
             return
 
+    # Normal-location stock for the same products — decides whether the base
+    # product is hidden (only clearance left) or shown. Computed the same way
+    # the main sync computes displayed stock (target locations minus excludes),
+    # so the draft decision matches what Shopify actually shows. Requires the
+    # clearance locations to be in the exclude list (as the UI instructs).
+    target_locs = _int_list(get_config('inventory_locations', [], shop_url=shop_url))
+    exclude_locs = _int_list(get_config('inventory_locations_exclude', [], shop_url=shop_url))
+    manage_base = bool(target_locs)
+    normal_stock = {}
+    if in_stock_pids and target_locs:
+        try:
+            ndomain = [['product_id', 'in', in_stock_pids], ['location_id', 'child_of', target_locs]]
+            if exclude_locs:
+                ndomain.append(['location_id', 'not in', exclude_locs])
+            ngroups = odoo.models.execute_kw(
+                odoo.db, odoo.uid, odoo.password,
+                'stock.quant', 'read_group',
+                [ndomain, ['product_id', 'quantity'], ['product_id']])
+            for g in ngroups:
+                if g.get('product_id'):
+                    normal_stock[g['product_id'][0]] = float(g.get('quantity') or 0.0)
+        except Exception as e:
+            manage_base = False
+            log_event('Clearance', 'Warning',
+                      f"Normal-stock read failed — base products won't be drafted this run: {e}",
+                      shop_url=shop_url)
+    elif not target_locs:
+        log_event('Clearance', 'Info',
+                  'No inventory (normal) locations configured — skipping normal-product draft logic.',
+                  shop_url=shop_url)
+
     log_event('Clearance', 'Info',
               f"{len(in_stock_pids)} products with clearance stock "
               f"(locations {clearance_locs}, {discount_pct:.0f}% off).",
@@ -470,10 +571,11 @@ def perform_clearance_sync(shop_url):
         clr_price = round(base_price * price_factor, 2)
         clr_sku = f"{base_sku}{suffix}"
 
+        normal_qty = normal_stock.get(pid, 0.0) if manage_base else None
         try:
             _upsert_mirror(shop_url, pid, base_sku, clr_sku, info,
                            clr_price, base_price, final_qty, pid_expiry.get(pid),
-                           shopify_location_id, collection_id)
+                           shopify_location_id, collection_id, normal_qty=normal_qty)
             active_base_skus.add(base_sku)
             processed += 1
         except Exception as e:
