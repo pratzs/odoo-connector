@@ -202,35 +202,48 @@ def _reactivate_base_if_ours(shop_url, row):
     row.base_drafted = False
 
 
-def _write_expiry_metafield(product_id, expiry):
-    """Write clearance.expiry_date (date) so the theme can show it. Clears it
-    when there's no expiry so a stale value never lingers."""
-    import json as _json
+def _write_clearance_metafields(product_id, expiry):
+    """Write the theme-facing signals on the mirror product:
+      - clearance.is_clearance (boolean) — always true; the theme keys the
+        'Clearance' badge off this (product tag 'Clearance' is set too).
+      - clearance.expiry_date (date)     — earliest lot expiry, or cleared.
+    """
+    owner = f"gid://shopify/Product/{product_id}"
     client = shopify.GraphQL()
+
+    metafields = [{
+        'ownerId': owner,
+        'namespace': 'clearance',
+        'key': 'is_clearance',
+        'value': 'true',
+        'type': 'boolean',
+    }]
     if expiry:
-        mutation = """
-        mutation($metafields: [MetafieldsSetInput!]!) {
-          metafieldsSet(metafields: $metafields) {
-            userErrors { field message }
-          }
-        }"""
-        client.execute(mutation, {'metafields': [{
-            'ownerId': f"gid://shopify/Product/{product_id}",
+        metafields.append({
+            'ownerId': owner,
             'namespace': 'clearance',
             'key': 'expiry_date',
             'value': expiry,
             'type': 'date',
-        }]})
-    else:
-        mutation = """
-        mutation($metafields: [MetafieldIdentifierInput!]!) {
-          metafieldsDelete(metafields: $metafields) {
+        })
+
+    client.execute("""
+        mutation($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
             userErrors { field message }
           }
-        }"""
+        }""", {'metafields': metafields})
+
+    # No expiry → clear any stale value so the theme never shows an old date.
+    if not expiry:
         try:
-            client.execute(mutation, {'metafields': [{
-                'ownerId': f"gid://shopify/Product/{product_id}",
+            client.execute("""
+                mutation($metafields: [MetafieldIdentifierInput!]!) {
+                  metafieldsDelete(metafields: $metafields) {
+                    userErrors { field message }
+                  }
+                }""", {'metafields': [{
+                'ownerId': owner,
                 'namespace': 'clearance',
                 'key': 'expiry_date',
             }]})
@@ -324,6 +337,12 @@ def _upsert_mirror(shop_url, pid, base_sku, clr_sku, info,
         if variant is not None:
             variant.price = str(clr_price)
             variant.inventory_management = 'shopify'
+        # Keep the 'Clearance' tag present (badge signal) even if it was
+        # stripped by a manual edit or an earlier version.
+        tags = [t.strip() for t in (sp.tags or '').split(',') if t.strip()]
+        if 'Clearance' not in tags:
+            tags.append('Clearance')
+            sp.tags = ", ".join(tags)
         sp.save()
 
     variant = sp.variants[0]
@@ -343,9 +362,9 @@ def _upsert_mirror(shop_url, pid, base_sku, clr_sku, info,
     _set_inventory(shopify_location_id, inv_item_id, final_qty)
 
     try:
-        _write_expiry_metafield(sp.id, expiry)
+        _write_clearance_metafields(sp.id, expiry)
     except Exception as e:
-        log_event('Clearance', 'Warning', f"Expiry metafield failed for {clr_sku}: {e}", shop_url=shop_url)
+        log_event('Clearance', 'Warning', f"Clearance metafields failed for {clr_sku}: {e}", shop_url=shop_url)
 
     # --- Persist the mapping ---
     if not row:

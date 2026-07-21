@@ -144,7 +144,7 @@ Shopify Store(s)
 **Flow:**
 1. Query `stock.quant` for the configured clearance locations only (`location_id child_of clearance_locations`)
 2. Aggregate quantity per product; read the earliest lot `expiration_date` from `stock.lot`
-3. For each product with clearance stock, create/update the `{sku}-CLR` mirror: copy the base product's images/vendor/type, set price = `list_price × (1 − discount%)`, set `compare_at_price` to the original, add to the Clearance collection, write the `clearance.expiry_date` metafield
+3. For each product with clearance stock, create/update the `{sku}-CLR` mirror: copy the base product's images/vendor/type, set price = `list_price × (1 − discount%)`, set `compare_at_price` to the original, add to the Clearance collection, and write the badge signals — the `Clearance` product tag, `clearance.is_clearance` (boolean) and `clearance.expiry_date` (date) metafields (the theme renders a "Clearance" badge + expiry from these)
 4. Push the clearance quantity (pack-size divided, same as main sync) to the mirror's variant
 5. Any previously-active mirror whose clearance stock has dropped to 0 is zeroed and set to **draft** (kept, not deleted — it reactivates when stock returns)
 
@@ -374,6 +374,7 @@ ngrok http 5000
 | 57 | **Purge Junk: archive instead of permanent delete** | `emergency_purge_junk_products` was calling `sp.destroy()` — permanent, unrecoverable deletion. Changed to `sp.status = 'archived'; sp.save()` — fully reversible from Shopify Admin. Also improved validity check to inspect ALL variants (not just `variants[0]`) so pack products with multiple variant SKUs are correctly protected |
 | 58 | **Clearance Collection sync** | New `services/clearance.py` + `clearance_mirror` table. Second inventory pass sells Clearance + Damaged location stock as separate discounted `{sku}-CLR` mirror products (auto-created/drafted, priced at `list × (1 − clearance_discount_pct)`, added to a Clearance collection, with an earliest-lot `clearance.expiry_date` metafield). Main sync excludes those locations and skips `-CLR` SKUs (guardrail so it can't tombstone the mirrors). `services/orders.py` strips the `-CLR` suffix so clearance orders route to the base Odoo product at the discounted price (`manual_price=True`) without creating a junk product. Dashboard gains a Clearance Collection settings card. See Core Workflow #9 |
 | 59 | **Clearance: normal-product lifecycle** | The clearance pass now drafts the **normal** product when its normal-location stock is 0 but clearance stock exists (so only the clearance mirror is buyable), and re-activates it when normal stock returns or clearance runs out. Tracked via `base_drafted` / `base_shopify_product_id` on `clearance_mirror` (added by an idempotent startup `ALTER TABLE ADD COLUMN IF NOT EXISTS` since `db.create_all` doesn't add columns) — only products the connector itself drafted are ever re-activated, never merchant-drafted ones |
+| 60 | **Clearance: badge signals** | Mirror products now carry a `clearance.is_clearance` (boolean) metafield and keep the `Clearance` product tag on both create and update, alongside the existing `clearance.expiry_date` and Clearance-collection membership — so the storefront theme can render a "Clearance" badge + expiry. The badge markup itself is a theme (Liquid) change, not connector code |
 
 ---
 
