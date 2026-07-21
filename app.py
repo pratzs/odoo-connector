@@ -1457,8 +1457,9 @@ def kill_inventory_sync():
     except Exception as e:
         return jsonify({"error": f"Failed to inspect active jobs: {e}"}), 500
 
-    # Enqueue a fresh sync
-    new_job = q_critical.enqueue(perform_inventory_sync, shop_url, job_timeout=3600)
+    # Enqueue a fresh sync. Use run_inventory_sync (not perform_inventory_sync
+    # directly) so the chained clearance pass + health tracking also run.
+    new_job = q_critical.enqueue(run_inventory_sync, shop_url, job_timeout=3600)
     log_event('System', 'Info',
         f"Re-queued inventory sync as job {new_job.get_id()} after killing {len(killed)} active job(s).",
         shop_url=shop_url)
@@ -1477,9 +1478,10 @@ def sync_inventory_endpoint():
     shop_url = request.args.get('shop')
     if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
     
-    # ✅ FIX: Use q_critical
-    job = q_critical.enqueue(perform_inventory_sync, shop_url, job_timeout=3600)
-    
+    # Use run_inventory_sync (not perform_inventory_sync directly) so the
+    # chained clearance pass + health tracking also run on a manual force.
+    job = q_critical.enqueue(run_inventory_sync, shop_url, job_timeout=3600)
+
     return jsonify({"message": f"Full Inventory Sync Queued (Job ID: {job.get_id()})"})
 
 
