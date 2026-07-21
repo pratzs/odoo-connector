@@ -55,28 +55,51 @@ def _int_list(val):
     return out
 
 
-def _read_lot_expiry(odoo, lot_ids):
+def _read_lot_expiry(odoo, lot_ids, shop_url=None):
     """
-    Return {lot_id: 'YYYY-MM-DD'} for lots that have an expiration date.
-    Odoo renamed the model (stock.production.lot -> stock.lot) and the
-    expiration_date field only exists when the product_expiry module is
-    installed, so degrade gracefully if neither is present.
+    Return {lot_id: 'YYYY-MM-DD'} for lots that carry a best-before/expiry date.
+
+    Odoo's product_expiry module stores several dates on the lot; the merchant's
+    "Best before" is usually `use_date`, not `expiration_date`, so read all of
+    them and take the first populated one (use_date preferred). Model was
+    renamed stock.production.lot -> stock.lot. Degrades gracefully and logs a
+    sample so we can see which field is actually populated.
     """
     out = {}
     if not lot_ids:
         return out
+    pref = ['use_date', 'expiration_date', 'removal_date', 'life_date', 'alert_date']
     for model in ('stock.lot', 'stock.production.lot'):
-        try:
-            recs = odoo.models.execute_kw(
-                odoo.db, odoo.uid, odoo.password,
-                model, 'read', [lot_ids], {'fields': ['expiration_date']})
-            for r in recs:
-                exp = r.get('expiration_date')
-                if exp:
-                    out[r['id']] = str(exp)[:10]
-            return out
-        except Exception:
-            continue
+        recs = None
+        # Try progressively safer field sets — a field that doesn't exist makes
+        # the whole read fail, so fall back, and finally read all fields.
+        for fset in (['use_date', 'expiration_date', 'removal_date'],
+                     ['expiration_date'], None):
+            try:
+                kw = {'fields': fset} if fset else {}
+                recs = odoo.models.execute_kw(
+                    odoo.db, odoo.uid, odoo.password, model, 'read', [lot_ids], kw)
+                break
+            except Exception:
+                recs = None
+                continue
+        if recs is None:
+            continue  # model not present — try the other name
+        if recs and shop_url:
+            try:
+                s = {f: recs[0].get(f) for f in pref if f in recs[0]}
+                log_event('Clearance', 'Info',
+                          f"Expiry debug (model {model}, lot {recs[0].get('name')}): {s}",
+                          shop_url=shop_url)
+            except Exception:
+                pass
+        for r in recs:
+            for f in pref:
+                v = r.get(f)
+                if v:
+                    out[r['id']] = str(v)[:10]
+                    break
+        return out
     return out
 
 
@@ -498,7 +521,12 @@ def perform_clearance_sync(shop_url):
             pid_lots.setdefault(pid, set()).add(lot[0])
 
     # Earliest expiry per product (most conservative when multiple lots present)
-    lot_expiry = _read_lot_expiry(odoo, sorted({l for s in pid_lots.values() for l in s}))
+    all_lot_ids = sorted({l for s in pid_lots.values() for l in s})
+    log_event('Clearance', 'Info',
+              f"Expiry: {len(pid_lots)}/{len(pid_qty)} clearance products carry lots "
+              f"({len(all_lot_ids)} distinct lots).",
+              shop_url=shop_url)
+    lot_expiry = _read_lot_expiry(odoo, all_lot_ids, shop_url=shop_url)
     pid_expiry = {}
     for pid, lots in pid_lots.items():
         dates = [lot_expiry[l] for l in lots if lot_expiry.get(l)]
