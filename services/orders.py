@@ -184,6 +184,12 @@ def process_order_data(data, odoo_client, shop_url):
             ctx = {'allowed_company_ids': [int(company_id)], 'company_id': int(company_id)} if company_id else {}
 
             lines = []
+            # Clearance mirror products use SKU '{base}{suffix}' (default '-CLR').
+            # They don't exist in Odoo, so strip the suffix to route the line to
+            # the base product — otherwise the block below would create a junk
+            # Odoo product. The discounted Shopify line price is preserved via
+            # manual_price=True, so Odoo keeps the clearance price.
+            clearance_suffix = get_config('clearance_sku_suffix', '-CLR', shop_url=shop_url) or '-CLR'
             for item in data.get('line_items', []):
                 raw_sku = item.get('sku')
                 if not raw_sku: continue
@@ -193,6 +199,8 @@ def process_order_data(data, odoo_client, shop_url):
                 if sku.endswith('-UNIT'):
                     sku = sku.replace('-UNIT', '')
                     is_unit_variant = True
+                elif clearance_suffix and sku.endswith(clearance_suffix):
+                    sku = sku[:-len(clearance_suffix)]
 
                 product_id = None
                 p_domain = [['default_code', '=', sku]]

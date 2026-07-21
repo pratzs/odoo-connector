@@ -134,6 +134,26 @@ Shopify Store(s)
 3. Upserts `ProductMap` rows; syncs images (hash-checked to avoid redundant uploads)
 4. Raises on connection failure
 
+### 9. Clearance Collection Sync (Odoo → Shopify)
+
+**Trigger:** Runs automatically at the end of every inventory sync (fault-isolated — a clearance failure never affects inventory health)
+**Purpose:** Sells stock sitting in the Clearance + Damaged Odoo locations — which the main inventory sync deliberately *excludes* — as separate discounted products that live only in a Clearance collection.
+
+**Why separate products (not variants):** Shopify allows one price and one inventory pool per product. To show clearance stock at a different price *and* only in one collection, it must be its own product. `perform_clearance_sync` (`services/clearance.py`) auto-manages a mirror product per base SKU: `{sku}-CLR`.
+
+**Flow:**
+1. Query `stock.quant` for the configured clearance locations only (`location_id child_of clearance_locations`)
+2. Aggregate quantity per product; read the earliest lot `expiration_date` from `stock.lot`
+3. For each product with clearance stock, create/update the `{sku}-CLR` mirror: copy the base product's images/vendor/type, set price = `list_price × (1 − discount%)`, set `compare_at_price` to the original, add to the Clearance collection, write the `clearance.expiry_date` metafield
+4. Push the clearance quantity (pack-size divided, same as main sync) to the mirror's variant
+5. Any previously-active mirror whose clearance stock has dropped to 0 is zeroed and set to **draft** (kept, not deleted — it reactivates when stock returns)
+
+**No double-counting:** the two location sets are disjoint (main sync excludes exactly what this pass includes), so a product stocked in both Pick/Bulk and Clearance shows the full quantity on its normal listing and the clearance quantity on the mirror.
+
+**Order routing:** a `{sku}-CLR` line in an order maps back to the *base* Odoo product — `services/orders.py` strips the clearance suffix up front (before the create-new-product step) so no junk product is created, and the discounted line price is preserved via `manual_price=True`. Which Odoo location the line decrements from is governed by Odoo's own delivery/picking rules (configure a stock rule to source from the clearance location).
+
+**Settings** (`app_settings`): `clearance_enabled`, `clearance_locations`, `clearance_discount_pct` (default 40), `clearance_collection_id`, `clearance_sku_suffix` (default `-CLR`).
+
 ---
 
 ## Scheduling & Automation
@@ -198,6 +218,7 @@ Dashboard JS polls this endpoint every 30 seconds and renders color-coded dots (
 | `sync_logs`         | Append-only event log, scoped per shop                   |
 | `app_settings`      | Key-value config store per shop (scan mode, alert email, etc.) |
 | `sync_health`       | Per-entity health tracking: attempt time, success time, failure count |
+| `clearance_mirror`  | Bridges a base SKU to its auto-managed `{sku}-CLR` clearance mirror (Shopify product/variant/inventory-item IDs, last qty, active flag) |
 
 ---
 
@@ -340,6 +361,7 @@ ngrok http 5000
 | 55 | **Archive propagation: Odoo → Shopify** | Products archived in Odoo were silently ignored — they stayed live and purchasable in Shopify forever. Added `_archive_odoo_products_in_shopify()`: delta mode runs on every 24h sync (catches newly archived products), full mode runs on Force Full Resync (compares all ProductMap entries against active Odoo IDs — handles the one-time migration of bulk-archived products) |
 | 56 | **Archive propagation: SKU reuse safety guard** | Archive propagation could incorrectly archive a Shopify product if a new active Odoo product was created with the same SKU as a just-archived one. Fix: before any archive action, check the Shopify product's primary variant SKU against the full set of currently active Odoo SKUs — if the SKU is still live, the product is skipped. If the active-SKU set cannot be fetched, the entire archive run aborts rather than risk false-archiving |
 | 57 | **Purge Junk: archive instead of permanent delete** | `emergency_purge_junk_products` was calling `sp.destroy()` — permanent, unrecoverable deletion. Changed to `sp.status = 'archived'; sp.save()` — fully reversible from Shopify Admin. Also improved validity check to inspect ALL variants (not just `variants[0]`) so pack products with multiple variant SKUs are correctly protected |
+| 58 | **Clearance Collection sync** | New `services/clearance.py` + `clearance_mirror` table. Second inventory pass sells Clearance + Damaged location stock as separate discounted `{sku}-CLR` mirror products (auto-created/drafted, priced at `list × (1 − clearance_discount_pct)`, added to a Clearance collection, with an earliest-lot `clearance.expiry_date` metafield). Main sync excludes those locations and skips `-CLR` SKUs (guardrail so it can't tombstone the mirrors). `services/orders.py` strips the `-CLR` suffix so clearance orders route to the base Odoo product at the discounted price (`manual_price=True`) without creating a junk product. Dashboard gains a Clearance Collection settings card. See Core Workflow #9 |
 
 ---
 
