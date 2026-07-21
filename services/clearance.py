@@ -157,14 +157,9 @@ def _draft_base_product(shop_url, base_sku, row):
     for some other reason is never claimed (and never auto-reactivated) by us.
     Does not commit; the caller does.
     """
-    prod = None
-    if row.base_shopify_product_id:
-        try:
-            prod = shopify.Product.find(int(row.base_shopify_product_id))
-        except Exception:
-            prod = None
-    if prod is None:
-        prod = _get_base_shopify_product(base_sku)
+    # Always resolve the base fresh by SKU (do NOT trust a cached
+    # base_shopify_product_id — an earlier bug cached the wrong product id).
+    prod = _get_base_shopify_product(base_sku)
     if prod is None:
         return
     row.base_shopify_product_id = str(prod.id)
@@ -185,12 +180,8 @@ def _reactivate_base_if_ours(shop_url, row):
     commit; the caller does."""
     if not row.base_drafted:
         return
-    prod = None
-    if row.base_shopify_product_id:
-        try:
-            prod = shopify.Product.find(int(row.base_shopify_product_id))
-        except Exception:
-            prod = None
+    # Resolve fresh by SKU (ignore any stale/wrong cached id).
+    prod = _get_base_shopify_product(row.base_sku)
     if prod is not None and getattr(prod, 'status', None) != 'active':
         prod.status = 'active'
         try:
