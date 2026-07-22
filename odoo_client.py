@@ -131,27 +131,67 @@ class OdooClient:
         # to share Shopify's field names, which is why only the street line was empty).
         # Fall back to 'street'/'street2' too, in case a caller ever passes an
         # already-Odoo-shaped dict instead of a raw Shopify address.
-        street = address_data.get('address1') or address_data.get('street')
-        street2 = address_data.get('address2') or address_data.get('street2')
+        street = (address_data.get('address1') or address_data.get('street') or '').strip()
+        street2 = (address_data.get('address2') or address_data.get('street2') or '').strip()
+        city = (address_data.get('city') or '').strip()
+        zip_code = (address_data.get('zip') or '').strip()
 
-        domain = [['parent_id', '=', parent_id], ['type', '=', type], ['street', '=', street], ['active', '=', True]]
-        existing = self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search', [domain])
-        if existing: return existing[0]
+        # Identify "the same real-world delivery address" by zip (+ city), not by an
+        # exact string match on the free-text street line. Shopify's street text can
+        # vary slightly between orders from the same customer (whitespace, abbreviations,
+        # capitalisation) even when the actual delivery location hasn't changed — matching
+        # on street alone was silently creating a fresh duplicate child every time the
+        # text didn't match byte-for-byte. Zip is the stable identifier for a location;
+        # fall back to an exact street match only when there's no zip to go on.
+        existing = None
+        if zip_code:
+            domain = [['parent_id', '=', parent_id], ['type', '=', type], ['zip', '=', zip_code], ['active', '=', True]]
+            if city:
+                domain.append(['city', '=', city])
+            found = self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search', [domain], {'limit': 1})
+            if found:
+                existing = found[0]
+        if existing is None and street:
+            domain = [['parent_id', '=', parent_id], ['type', '=', type], ['street', '=', street], ['active', '=', True]]
+            found = self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search', [domain], {'limit': 1})
+            if found:
+                existing = found[0]
 
         vals = {
-            'parent_id': parent_id, 'type': type, 'name': address_data.get('name') or "Delivery Address",
-            'street': street, 'street2': street2, 'city': address_data.get('city'), 'zip': address_data.get('zip'),
-            'country_code': address_data.get('country_code'), 'phone': address_data.get('phone'), 'email': address_data.get('email')
+            'name': address_data.get('name') or "Delivery Address",
+            'street': street or False, 'street2': street2 or False,
+            'city': city or False, 'zip': zip_code or False,
+            'country_code': address_data.get('country_code'),
+            'phone': address_data.get('phone'), 'email': address_data.get('email'),
         }
         self._resolve_country(vals)
+
+        if existing:
+            # Self-heal: push the latest details onto the existing record (e.g. an
+            # old blank-street contact from before this fix gets the correct street
+            # the next time this customer orders, instead of staying blank forever
+            # or spawning a duplicate alongside it).
+            # Exclude blanks (None/''/False) — only ever ADD/refresh fields this
+            # order actually supplied, never clear a previously-good value just
+            # because this particular order's payload happened to omit it.
+            update_vals = {k: v for k, v in vals.items() if v not in (None, '', False)}
+            if update_vals:
+                try:
+                    self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'write', [[existing], update_vals])
+                except Exception as e:
+                    print(f"Delivery address update error ({existing}): {e}")
+            return existing
+
+        vals['parent_id'] = parent_id
+        vals['type'] = type
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'create', [vals])
 
     def _resolve_country(self, vals):
-        if vals.get('country_code'):
-            ids = self.models.execute_kw(self.db, self.uid, self.password, 'res.country', 'search', [[['code', '=', vals['country_code']]]])
-            if not ids: ids = self.models.execute_kw(self.db, self.uid, self.password, 'res.country', 'search', [[['name', 'ilike', vals['country_code']]]])
+        code = vals.pop('country_code', None)
+        if code:
+            ids = self.models.execute_kw(self.db, self.uid, self.password, 'res.country', 'search', [[['code', '=', code]]])
+            if not ids: ids = self.models.execute_kw(self.db, self.uid, self.password, 'res.country', 'search', [[['name', 'ilike', code]]])
             if ids: vals['country_id'] = ids[0]
-            del vals['country_code']
 
     # --- PRODUCT METHODS ---
 
