@@ -126,13 +126,21 @@ class OdooClient:
         return self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'create', [vals])
 
     def find_or_create_child_address(self, parent_id, address_data, type='delivery'):
-        domain = [['parent_id', '=', parent_id], ['type', '=', type], ['street', '=', address_data.get('street')], ['active', '=', True]]
+        # Shopify's address objects use 'address1'/'address2', not 'street'/'street2' —
+        # reading 'street' directly always came back blank (city/zip/country_code happen
+        # to share Shopify's field names, which is why only the street line was empty).
+        # Fall back to 'street'/'street2' too, in case a caller ever passes an
+        # already-Odoo-shaped dict instead of a raw Shopify address.
+        street = address_data.get('address1') or address_data.get('street')
+        street2 = address_data.get('address2') or address_data.get('street2')
+
+        domain = [['parent_id', '=', parent_id], ['type', '=', type], ['street', '=', street], ['active', '=', True]]
         existing = self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search', [domain])
         if existing: return existing[0]
-        
+
         vals = {
             'parent_id': parent_id, 'type': type, 'name': address_data.get('name') or "Delivery Address",
-            'street': address_data.get('street'), 'city': address_data.get('city'), 'zip': address_data.get('zip'),
+            'street': street, 'street2': street2, 'city': address_data.get('city'), 'zip': address_data.get('zip'),
             'country_code': address_data.get('country_code'), 'phone': address_data.get('phone'), 'email': address_data.get('email')
         }
         self._resolve_country(vals)
