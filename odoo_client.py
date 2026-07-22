@@ -136,24 +136,29 @@ class OdooClient:
         city = (address_data.get('city') or '').strip()
         zip_code = (address_data.get('zip') or '').strip()
 
-        # Identify "the same real-world delivery address" by zip (+ city), not by an
-        # exact string match on the free-text street line. Shopify's street text can
-        # vary slightly between orders from the same customer (whitespace, abbreviations,
-        # capitalisation) even when the actual delivery location hasn't changed — matching
-        # on street alone was silently creating a fresh duplicate child every time the
-        # text didn't match byte-for-byte. Zip is the stable identifier for a location;
-        # fall back to an exact street match only when there's no zip to go on.
+        # Identify "the same real-world delivery address" by zip ALONE — not by an
+        # exact string match on the free-text street line, and not requiring city to
+        # match either. Real-world NZ addresses routinely use inconsistent locality
+        # names for the same postcode (e.g. "Kapiti" vs "Paraparaumu" for the same
+        # 5032 area), so even zip+city was still letting duplicates through. Zip is
+        # the one stable, structured identifier Shopify sends; everything else is
+        # free text prone to drift between orders from the same customer even when
+        # the delivery location hasn't changed. Priority is "never duplicate" over
+        # perfectly distinguishing two genuinely different sites that happen to
+        # share a postcode — rare, and the self-heal update below just keeps that
+        # single record in sync with whichever order touched it last.
+        # Fall back to an exact street match only when there's no zip to go on at all.
         existing = None
         if zip_code:
             domain = [['parent_id', '=', parent_id], ['type', '=', type], ['zip', '=', zip_code], ['active', '=', True]]
-            if city:
-                domain.append(['city', '=', city])
-            found = self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search', [domain], {'limit': 1})
+            found = self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search',
+                                           [domain], {'limit': 1, 'order': 'id desc'})
             if found:
                 existing = found[0]
         if existing is None and street:
-            domain = [['parent_id', '=', parent_id], ['type', '=', type], ['street', '=', street], ['active', '=', True]]
-            found = self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search', [domain], {'limit': 1})
+            domain = [['parent_id', '=', parent_id], ['type', '=', type], ['street', 'ilike', street], ['active', '=', True]]
+            found = self.models.execute_kw(self.db, self.uid, self.password, 'res.partner', 'search',
+                                           [domain], {'limit': 1, 'order': 'id desc'})
             if found:
                 existing = found[0]
 
