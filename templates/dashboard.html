@@ -530,23 +530,29 @@
                         </div>
 
                         <div class="row">
-                            <div class="col-md-4 mb-3">
+                            <div class="col-md-3 mb-3">
                                 <label class="form-label-sm">Discount %</label>
                                 <input type="number" min="0" max="100" step="1" class="form-control" id="clearanceDiscountPct"
                                        value="{{ config.clearance_discount_pct if config.clearance_discount_pct is not none else 40 }}">
                                 <div class="form-text">Mirror price = list price − this %. Set 40 if a store-wide 10% app makes it 50%.</div>
                             </div>
-                            <div class="col-md-4 mb-3">
+                            <div class="col-md-3 mb-3">
                                 <label class="form-label-sm">Clearance Collection ID</label>
                                 <input type="number" class="form-control" id="clearanceCollectionId"
                                        value="{{ config.clearance_collection_id or '' }}" placeholder="e.g. 654321987">
                                 <div class="form-text">Numeric ID of the manual Shopify collection mirrors are added to.</div>
                             </div>
-                            <div class="col-md-4 mb-3">
+                            <div class="col-md-3 mb-3">
                                 <label class="form-label-sm">Mirror SKU Suffix</label>
                                 <input type="text" class="form-control" id="clearanceSkuSuffix"
                                        value="{{ config.clearance_sku_suffix or '-CLR' }}">
                                 <div class="form-text">Appended to the base SKU for the clearance product.</div>
+                            </div>
+                            <div class="col-md-3 mb-3">
+                                <label class="form-label-sm text-danger">Expiry Cutoff (Days)</label>
+                                <input type="number" min="0" step="1" class="form-control" id="clearanceExpiryCutoffDays"
+                                       value="{{ config.clearance_expiry_cutoff_days if config.clearance_expiry_cutoff_days is not none else 15 }}">
+                                <div class="form-text">Food-safety cutoff. Stock within this many days of its best-before (or already past it) is never sold — excluded from the clearance mirror entirely, even if plenty is sitting in Odoo. Lots with no date are unaffected.</div>
                             </div>
                         </div>
 
@@ -1398,6 +1404,7 @@ function saveSettings() {
         clearance_discount_pct: parseFloat(document.getElementById('clearanceDiscountPct').value) || 0,
         clearance_collection_id: document.getElementById('clearanceCollectionId').value.trim() || null,
         clearance_sku_suffix: document.getElementById('clearanceSkuSuffix').value.trim() || '-CLR',
+        clearance_expiry_cutoff_days: parseInt(document.getElementById('clearanceExpiryCutoffDays').value) || 0,
         clearance_locations: Array.from(document.querySelectorAll('.loc-clearance-check:checked')).map(cb => parseInt(cb.value)),
         
         // Products

@@ -23,6 +23,18 @@ manual_price=True. No order-side code is needed here.
 
 Mirrors are tracked in the ClearanceMirror table so stale ones (clearance stock
 gone to 0) can be zeroed out and set to draft.
+
+Food-safety cutoff: any lot within `clearance_expiry_cutoff_days` (default 15)
+of its best-before date, or already past it, is excluded from the sellable
+quantity entirely — it never reaches the mirror's stock count or the displayed
+expiry date, regardless of how much of it sits in Odoo. A lot with NO expiry
+date at all is unaffected (still sellable) — the cutoff only ever removes stock
+that carries a date and falls inside the window. If that exclusion drops a
+product's sellable clearance quantity to 0, it is treated exactly like normal
+stock running out: the mirror is zeroed/drafted and, if the base product had
+been hidden because only clearance stock remained, the base product is
+restored to active (showing its normal 0-stock state) via the existing
+zero-out/reactivate lifecycle — no separate code path needed.
 """
 
 import math
@@ -468,6 +480,15 @@ def perform_clearance_sync(shop_url):
     suffix = get_config('clearance_sku_suffix', '-CLR', shop_url=shop_url) or '-CLR'
     collection_id = get_config('clearance_collection_id', None, shop_url=shop_url)
 
+    # Food-safety cutoff: never sell stock that's already expired or expiring too
+    # soon to be legally sellable. A lot with no expiry date at all is still fine
+    # to sell (unchanged) — this only excludes lots that DO carry a date and fall
+    # inside the cutoff window.
+    try:
+        expiry_cutoff_days = int(get_config('clearance_expiry_cutoff_days', 15, shop_url=shop_url))
+    except (TypeError, ValueError):
+        expiry_cutoff_days = 15
+
     odoo = get_odoo_connection(shop_url)
     if not odoo or not setup_shopify_session(shop_url):
         log_event('Clearance', 'Error', 'Connection failed (Odoo or Shopify).', shop_url=shop_url)
@@ -508,30 +529,67 @@ def perform_clearance_sync(shop_url):
         log_event('Clearance', 'Error', f"Odoo clearance stock fetch failed: {e}", shop_url=shop_url)
         return
 
-    pid_qty = {}
-    pid_lots = {}
+    # Keep quantity per LOT (not aggregated yet) — the expiry cutoff below needs
+    # to exclude specific lots' quantity, not just tag the product with a date.
+    pid_lot_rows = {}   # pid -> [(lot_id_or_None, qty), ...]
+    all_lot_ids_seen = set()
     for q in quants:
         prod = q.get('product_id')
         if not prod:
             continue
         pid = prod[0]
-        pid_qty[pid] = pid_qty.get(pid, 0.0) + float(q.get('quantity') or 0.0)
         lot = q.get('lot_id')
-        if lot and lot[0]:
-            pid_lots.setdefault(pid, set()).add(lot[0])
+        lot_id = lot[0] if lot and lot[0] else None
+        if lot_id:
+            all_lot_ids_seen.add(lot_id)
+        pid_lot_rows.setdefault(pid, []).append((lot_id, float(q.get('quantity') or 0.0)))
 
-    # Earliest expiry per product (most conservative when multiple lots present)
-    all_lot_ids = sorted({l for s in pid_lots.values() for l in s})
     log_event('Clearance', 'Info',
-              f"Expiry: {len(pid_lots)}/{len(pid_qty)} clearance products carry lots "
-              f"({len(all_lot_ids)} distinct lots).",
+              f"Expiry: {sum(1 for rows in pid_lot_rows.values() if any(l for l, _ in rows))}/"
+              f"{len(pid_lot_rows)} clearance products carry lots ({len(all_lot_ids_seen)} distinct lots).",
               shop_url=shop_url)
-    lot_expiry = _read_lot_expiry(odoo, all_lot_ids, shop_url=shop_url)
+    lot_expiry = _read_lot_expiry(odoo, sorted(all_lot_ids_seen), shop_url=shop_url)
+
+    # Filter out lots that are expired or within the cutoff window — that stock
+    # is NOT sellable and must not appear in the mirror's quantity or the
+    # displayed "Best before" date, no matter how much of it sits in Odoo.
+    today = datetime.utcnow().date()
+    pid_qty = {}
     pid_expiry = {}
-    for pid, lots in pid_lots.items():
-        dates = [lot_expiry[l] for l in lots if lot_expiry.get(l)]
-        if dates:
-            pid_expiry[pid] = min(dates)
+    excluded_products = {}  # base_sku-less pid -> excluded qty, for the audit log
+    for pid, rows in pid_lot_rows.items():
+        sellable_qty = 0.0
+        sellable_expiries = []
+        excluded_qty = 0.0
+        for lot_id, qty in rows:
+            exp_str = lot_expiry.get(lot_id) if lot_id else None
+            exp_date = None
+            if exp_str:
+                try:
+                    exp_date = datetime.strptime(exp_str, '%Y-%m-%d').date()
+                except ValueError:
+                    exp_date = None
+            if exp_date is not None and (exp_date - today).days <= expiry_cutoff_days:
+                excluded_qty += qty
+                continue
+            sellable_qty += qty
+            if exp_str:
+                sellable_expiries.append(exp_str)
+        if sellable_qty > 0:
+            pid_qty[pid] = sellable_qty
+            if sellable_expiries:
+                pid_expiry[pid] = min(sellable_expiries)
+        if excluded_qty > 0:
+            excluded_products[pid] = excluded_qty
+
+    if excluded_products:
+        total_excluded_units = sum(excluded_products.values())
+        fully_blocked = sum(1 for pid in excluded_products if pid_qty.get(pid, 0) <= 0)
+        log_event('Clearance', 'Warning',
+                  f"Expiry safety cutoff ({expiry_cutoff_days} days): {len(excluded_products)} product(s), "
+                  f"{total_excluded_units:.0f} unit(s) excluded from sale — expired or expiring too soon. "
+                  f"{fully_blocked} product(s) fully removed from Clearance.",
+                  shop_url=shop_url)
 
     in_stock_pids = [pid for pid, q in pid_qty.items() if q > 0]
 
