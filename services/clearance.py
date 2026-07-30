@@ -24,17 +24,26 @@ manual_price=True. No order-side code is needed here.
 Mirrors are tracked in the ClearanceMirror table so stale ones (clearance stock
 gone to 0) can be zeroed out and set to draft.
 
-Food-safety cutoff: any lot within `clearance_expiry_cutoff_days` (default 15)
-of its best-before date, or already past it, is excluded from the sellable
-quantity entirely — it never reaches the mirror's stock count or the displayed
-expiry date, regardless of how much of it sits in Odoo. A lot with NO expiry
-date at all is unaffected (still sellable) — the cutoff only ever removes stock
-that carries a date and falls inside the window. If that exclusion drops a
-product's sellable clearance quantity to 0, it is treated exactly like normal
-stock running out: the mirror is zeroed/drafted and, if the base product had
-been hidden because only clearance stock remained, the base product is
-restored to active (showing its normal 0-stock state) via the existing
-zero-out/reactivate lifecycle — no separate code path needed.
+A lot must clear TWO filters to be sold as clearance:
+
+  1. Date required: the lot must carry a best-before date. Stock with no date
+     is never mirrored into Clearance — the date is what qualifies stock for
+     the collection, and a dated "Clearance" badge is the whole point of the
+     mirror. Dateless stock stays on the normal listing, untouched.
+  2. Food-safety cutoff: any lot within `clearance_expiry_cutoff_days`
+     (default 15) of its best-before date, or already past it, is excluded
+     from the sellable quantity entirely — it never reaches the mirror's stock
+     count or the displayed expiry date, regardless of how much sits in Odoo.
+
+Both filters are applied per LOT, not per product, so a mixed batch sells only
+the lots that qualify. Because filter 1 runs first, every live mirror is
+guaranteed to carry an expiry date.
+
+If either filter drops a product's sellable clearance quantity to 0, it is
+treated exactly like normal stock running out: the mirror is zeroed/drafted
+and, if the base product had been hidden because only clearance stock
+remained, the base product is restored to active (showing its normal stock)
+via the existing zero-out/reactivate lifecycle — no separate code path needed.
 """
 
 import math
@@ -113,6 +122,52 @@ def _read_lot_expiry(odoo, lot_ids, shop_url=None):
                     break
         return out
     return out
+
+
+def _split_lots_by_expiry(rows, lot_expiry, today, cutoff_days):
+    """
+    Decide how much of one product's clearance stock is actually sellable.
+
+    Pure function (no Odoo/Shopify/db) so the rules can be tested directly.
+
+    `rows` is [(lot_id_or_None, qty), ...] for a single product.
+
+    A lot must clear both filters to be sold as clearance:
+      1. It must carry a parseable best-before date. No lot, no populated date
+         field, or an unparseable one → held out of Clearance entirely; that
+         stock stays on the normal listing.
+      2. Its date must be more than `cutoff_days` away (food-safety).
+
+    Returns (sellable_qty, earliest_sellable_expiry_or_None,
+             excluded_qty, undated_qty). Because filter 1 runs first, the
+    expiry is never None whenever sellable_qty > 0.
+    """
+    sellable_qty = 0.0
+    sellable_expiries = []
+    excluded_qty = 0.0
+    undated_qty = 0.0
+
+    for lot_id, qty in rows:
+        exp_str = lot_expiry.get(lot_id) if lot_id else None
+        exp_date = None
+        if exp_str:
+            try:
+                exp_date = datetime.strptime(str(exp_str)[:10], '%Y-%m-%d').date()
+            except (ValueError, TypeError):
+                exp_date = None
+        # Filter 1 — dateless stock is not clearance material.
+        if exp_date is None:
+            undated_qty += qty
+            continue
+        # Filter 2 — food-safety cutoff.
+        if (exp_date - today).days <= cutoff_days:
+            excluded_qty += qty
+            continue
+        sellable_qty += qty
+        sellable_expiries.append(str(exp_str)[:10])
+
+    expiry = min(sellable_expiries) if sellable_expiries else None
+    return sellable_qty, expiry, excluded_qty, undated_qty
 
 
 def _resolve_shopify_location_id(shop_url):
@@ -481,9 +536,9 @@ def perform_clearance_sync(shop_url):
     collection_id = get_config('clearance_collection_id', None, shop_url=shop_url)
 
     # Food-safety cutoff: never sell stock that's already expired or expiring too
-    # soon to be legally sellable. A lot with no expiry date at all is still fine
-    # to sell (unchanged) — this only excludes lots that DO carry a date and fall
-    # inside the cutoff window.
+    # soon to be legally sellable. Applies to lots that carry a date; lots with
+    # no date are held out of Clearance entirely by the date-required filter
+    # below, so they never reach this check.
     try:
         expiry_cutoff_days = int(get_config('clearance_expiry_cutoff_days', 15, shop_url=shop_url))
     except (TypeError, ValueError):
@@ -550,37 +605,40 @@ def perform_clearance_sync(shop_url):
               shop_url=shop_url)
     lot_expiry = _read_lot_expiry(odoo, sorted(all_lot_ids_seen), shop_url=shop_url)
 
-    # Filter out lots that are expired or within the cutoff window — that stock
-    # is NOT sellable and must not appear in the mirror's quantity or the
-    # displayed "Best before" date, no matter how much of it sits in Odoo.
+    # Two independent filters run per lot, and a lot must pass both to be sold
+    # as clearance:
+    #
+    #   1. It must CARRY a best-before date. Dateless stock is never clearance —
+    #      the date is what qualifies stock for the Clearance collection, and a
+    #      mirror with no date would render a dateless "Clearance" badge. That
+    #      stock stays on the normal listing, untouched.
+    #   2. Its date must sit outside the food-safety cutoff window.
+    #
+    # Filter 1 is why every live mirror is guaranteed to have an expiry date.
     today = datetime.utcnow().date()
     pid_qty = {}
     pid_expiry = {}
-    excluded_products = {}  # base_sku-less pid -> excluded qty, for the audit log
+    excluded_products = {}  # pid -> qty withheld for being expired/near-expiry
+    undated_products = {}   # pid -> qty withheld for carrying no date at all
     for pid, rows in pid_lot_rows.items():
-        sellable_qty = 0.0
-        sellable_expiries = []
-        excluded_qty = 0.0
-        for lot_id, qty in rows:
-            exp_str = lot_expiry.get(lot_id) if lot_id else None
-            exp_date = None
-            if exp_str:
-                try:
-                    exp_date = datetime.strptime(exp_str, '%Y-%m-%d').date()
-                except ValueError:
-                    exp_date = None
-            if exp_date is not None and (exp_date - today).days <= expiry_cutoff_days:
-                excluded_qty += qty
-                continue
-            sellable_qty += qty
-            if exp_str:
-                sellable_expiries.append(exp_str)
+        sellable_qty, expiry, excluded_qty, undated_qty = _split_lots_by_expiry(
+            rows, lot_expiry, today, expiry_cutoff_days)
         if sellable_qty > 0:
             pid_qty[pid] = sellable_qty
-            if sellable_expiries:
-                pid_expiry[pid] = min(sellable_expiries)
+            pid_expiry[pid] = expiry
         if excluded_qty > 0:
             excluded_products[pid] = excluded_qty
+        if undated_qty > 0:
+            undated_products[pid] = undated_qty
+
+    if undated_products:
+        total_undated_units = sum(undated_products.values())
+        fully_undated = sum(1 for pid in undated_products if pid_qty.get(pid, 0) <= 0)
+        log_event('Clearance', 'Info',
+                  f"No best-before date: {len(undated_products)} product(s), "
+                  f"{total_undated_units:.0f} unit(s) held back from Clearance. "
+                  f"{fully_undated} product(s) kept entirely as normal listings.",
+                  shop_url=shop_url)
 
     if excluded_products:
         total_excluded_units = sum(excluded_products.values())
