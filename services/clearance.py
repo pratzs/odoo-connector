@@ -61,6 +61,11 @@ A mixed batch (lots at different distances from expiry) prices the WHOLE
 mirror off the most urgent qualifying lot rather than under-discounting the
 near-expiry portion — the same one-price-per-mirror trade-off already
 accepted for the expiry badge itself.
+
+Manual price override: a per-SKU price set via the dashboard (ClearanceMirror.
+manual_price, see set_manual_price) skips the tiered calculation entirely for
+that SKU on every sync until cleared — for cases where a specific product
+needs hand-set pricing instead of the automatic tiers.
 """
 
 import math
@@ -386,6 +391,80 @@ def _add_to_collection(product_id, collection_id):
         pass
 
 
+def set_manual_price(shop_url, base_sku, price):
+    """
+    Dashboard "Manual Price Override" action. Sets (or clears, price=None) a
+    per-SKU price that permanently overrides the tiered discount calculation
+    for that clearance mirror — every future sync respects it via the check
+    in _upsert_mirror, until it's cleared again. Applies immediately here too
+    (reactivates the mirror + pushes the price to Shopify right now),
+    independent of whether clearance_enabled is on — this is for the "just
+    this one SKU, right now" case, e.g. while the rest of clearance is paused.
+
+    Only re-prices/reactivates an EXISTING mirror — it does not create one
+    from scratch, since that needs Odoo stock/qty context this function
+    doesn't have. A SKU that has never been through a clearance sync has no
+    mirror product yet to price.
+
+    Returns (ok: bool, message: str) for the dashboard to show directly.
+    """
+    row = ClearanceMirror.query.filter_by(shop_url=shop_url, base_sku=base_sku).first()
+    if not row:
+        return False, (f"No clearance mirror found for SKU '{base_sku}' — it has never "
+                       f"been through a clearance sync, so there's no mirror product to price yet.")
+
+    row.manual_price = price
+    db.session.commit()
+
+    if price is None:
+        log_event('Clearance', 'Info', f"Manual price override cleared for {base_sku}.", shop_url=shop_url)
+        return True, f"Manual override cleared for {base_sku} — it'll use the tiered discount on its next sync."
+
+    if not setup_shopify_session(shop_url):
+        return True, f"Override saved for {base_sku}, but couldn't reach Shopify to apply it right now — it'll apply on the next sync."
+
+    sp = None
+    if row.shopify_product_id:
+        try:
+            sp = shopify.Product.find(int(row.shopify_product_id))
+        except Exception:
+            sp = None
+    if sp is None:
+        existing_id = _find_product_id_by_sku(row.clr_sku)
+        if existing_id:
+            try:
+                sp = shopify.Product.find(existing_id)
+            except Exception:
+                sp = None
+    if sp is None:
+        return True, f"Override saved for {base_sku}, but its Shopify mirror couldn't be found to apply it now."
+
+    try:
+        if sp.status != 'active':
+            sp.status = 'active'
+        variant = None
+        for v in (sp.variants or []):
+            if (v.sku or '').strip() == row.clr_sku:
+                variant = v
+                break
+        if variant is None and sp.variants:
+            variant = sp.variants[0]
+        if variant is not None:
+            variant.price = str(price)
+        sp.save()
+        row.is_active = True
+        row.shopify_product_id = str(sp.id)
+        row.last_synced_at = datetime.utcnow()
+        db.session.commit()
+    except Exception as e:
+        return False, f"Override saved for {base_sku}, but applying it to Shopify failed: {e}"
+
+    log_event('Clearance', 'Success',
+              f"Manual price ${price} applied to {base_sku} ({row.clr_sku}), reactivated.",
+              shop_url=shop_url)
+    return True, f"{base_sku} is live at ${price:.2f}."
+
+
 def _upsert_mirror(shop_url, pid, base_sku, clr_sku, info,
                    clr_price, base_price, final_qty, expiry,
                    shopify_location_id, collection_id, normal_qty=None):
@@ -395,6 +474,13 @@ def _upsert_mirror(shop_url, pid, base_sku, clr_sku, info,
     to decide the base product's visibility. None = don't manage the base
     product (normal stock couldn't be determined)."""
     row = ClearanceMirror.query.filter_by(shop_url=shop_url, base_sku=base_sku).first()
+
+    # Manual price override (set from the dashboard) takes priority over the
+    # tiered discount calculation the caller passed in — every sync respects
+    # it until it's explicitly cleared, so a manually-priced SKU is never
+    # silently reset back to the auto-calculated price.
+    if row and row.manual_price is not None:
+        clr_price = float(row.manual_price)
 
     sp = None
     if row and row.shopify_product_id:

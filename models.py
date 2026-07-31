@@ -84,6 +84,11 @@ class ClearanceMirror(db.Model):
     base_shopify_product_id = db.Column(db.String(50), nullable=True)
     base_drafted          = db.Column(db.Boolean, default=False)
     last_synced_at        = db.Column(db.DateTime, default=datetime.utcnow)
+    # Manual price override: when set, the clearance sync's tiered-discount
+    # calculation is skipped for this SKU and this price is used instead —
+    # set/changed from the dashboard, survives every future sync untouched
+    # until cleared (set back to NULL).
+    manual_price          = db.Column(db.Numeric(10, 2), nullable=True)
 
 class CustomerMap(db.Model):
     __tablename__ = 'customer_map'

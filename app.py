@@ -231,6 +231,7 @@ with app.app_context():
     _column_migrations = [
         "ALTER TABLE clearance_mirror ADD COLUMN IF NOT EXISTS base_shopify_product_id VARCHAR(50)",
         "ALTER TABLE clearance_mirror ADD COLUMN IF NOT EXISTS base_drafted BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE clearance_mirror ADD COLUMN IF NOT EXISTS manual_price NUMERIC(10, 2)",
     ]
     for _stmt in _column_migrations:
         try:
@@ -1532,6 +1533,35 @@ def deactivate_clearance_endpoint():
 
     job = q_critical.enqueue(run_clearance_deactivate, shop_url, job_timeout=3600)
     return jsonify({"message": f"Clearance Deactivate Queued (Job ID: {job.get_id()})"})
+
+
+@app.route('/clearance/manual_price', methods=['POST'])
+@require_shopify_session
+def set_clearance_manual_price_endpoint():
+    """Dashboard 'Manual Price Override' control. Sets or clears (price
+    omitted/blank) a per-SKU price that overrides the tiered discount, and
+    applies it to Shopify immediately — independent of clearance_enabled, so
+    it works even while the rest of clearance is paused. Runs inline (single
+    Shopify call, not a full sync) so the dashboard gets an immediate result."""
+    shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+
+    data = request.get_json(silent=True) or {}
+    base_sku = (data.get('base_sku') or '').strip()
+    if not base_sku:
+        return jsonify({"error": "Missing base_sku"}), 400
+
+    raw_price = data.get('price')
+    price = None
+    if raw_price not in (None, ''):
+        try:
+            price = float(raw_price)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid price"}), 400
+
+    from services.clearance import set_manual_price
+    ok, message = set_manual_price(shop_url, base_sku, price)
+    return jsonify({"ok": ok, "message": message}), (200 if ok else 400)
 
 
 def task_force_name_repair(shop_url):

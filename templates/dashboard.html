@@ -584,6 +584,23 @@
                             <div class="form-text mb-2">Check the Clearance + Damaged locations. These should also be excluded above so they don't show on normal listings.</div>
                             <div id="locationClearanceList" class="small text-muted">Select a company above first.</div>
                         </div>
+
+                        <div class="bg-light p-3 rounded border mt-3">
+                            <label class="form-label-sm fw-semibold mb-1">Manual Price Override</label>
+                            <div class="form-text mb-2">Pin one SKU's clearance price by hand — skips the tiered discount for it, applies immediately (reactivates the mirror if it was drafted/paused), and stays until you clear it. Works even while clearance sync is disabled/paused.</div>
+                            <div class="row g-2">
+                                <div class="col-md-4">
+                                    <input type="text" class="form-control form-control-sm" id="manualPriceSku" placeholder="Base SKU, e.g. OBRIEN-001">
+                                </div>
+                                <div class="col-md-3">
+                                    <input type="number" min="0" step="0.01" class="form-control form-control-sm" id="manualPriceValue" placeholder="Price $">
+                                </div>
+                                <div class="col-md-5">
+                                    <button type="button" class="btn btn-sm btn-primary" onclick="applyManualClearancePrice()">Apply</button>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="clearManualClearancePrice()">Clear override</button>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1519,6 +1536,30 @@ function triggerAction(url, method='GET') {
         })
         .then(data => showToast(data.message || data.error))
         .catch(e => showToast("Error: " + (e.message || "Could not reach server")));
+}
+
+function _postManualClearancePrice(price) {
+    const sku = document.getElementById('manualPriceSku').value.trim();
+    if (!sku) { showToast("Enter a base SKU first."); return; }
+    showToast("Applying...");
+    fetch(`/clearance/manual_price?shop=${CURRENT_SHOP_URL}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ base_sku: sku, price: price })
+    })
+        .then(r => r.json().then(data => ({ status: r.status, data })))
+        .then(({ data }) => showToast(data.message || data.error))
+        .catch(e => showToast("Error: " + (e.message || "Could not reach server")));
+}
+
+function applyManualClearancePrice() {
+    const priceInput = document.getElementById('manualPriceValue').value.trim();
+    if (!priceInput) { showToast("Enter a price first."); return; }
+    _postManualClearancePrice(parseFloat(priceInput));
+}
+
+function clearManualClearancePrice() {
+    _postManualClearancePrice(null);
 }
 
 function openOrderImportModal() {
