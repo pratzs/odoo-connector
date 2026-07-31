@@ -530,12 +530,28 @@
                         </div>
 
                         <div class="row">
-                            <div class="col-md-3 mb-3">
-                                <label class="form-label-sm">Discount %</label>
-                                <input type="number" min="0" max="100" step="1" class="form-control" id="clearanceDiscountPct"
-                                       value="{{ config.clearance_discount_pct if config.clearance_discount_pct is not none else 40 }}">
-                                <div class="form-text">Mirror price = list price − this %. Set 40 if a store-wide 10% app makes it 50%.</div>
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label-sm">Discount % — ≤30 days left</label>
+                                <input type="number" min="0" max="100" step="1" class="form-control" id="clearanceDiscountPct30"
+                                       value="{{ config.clearance_discount_pct_30 if config.clearance_discount_pct_30 is not none else 50 }}">
+                                <div class="form-text">Steepest tier — soonest-expiring lot for the product is 30 days or less from its best-before date.</div>
                             </div>
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label-sm">Discount % — ≤60 days left</label>
+                                <input type="number" min="0" max="100" step="1" class="form-control" id="clearanceDiscountPct60"
+                                       value="{{ config.clearance_discount_pct_60 if config.clearance_discount_pct_60 is not none else 40 }}">
+                                <div class="form-text">31–60 days from best-before.</div>
+                            </div>
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label-sm">Discount % — ≤90 days left</label>
+                                <input type="number" min="0" max="100" step="1" class="form-control" id="clearanceDiscountPct90"
+                                       value="{{ config.clearance_discount_pct_90 if config.clearance_discount_pct_90 is not none else 30 }}">
+                                <div class="form-text">61–90 days from best-before (also the floor beyond 90 days).</div>
+                            </div>
+                        </div>
+                        <div class="form-text mb-3">Mirror price = list price − the tier % for that product's soonest sellable lot. A mixed batch (multiple lots at different distances from expiry) prices the whole mirror at the more urgent tier.</div>
+
+                        <div class="row">
                             <div class="col-md-3 mb-3">
                                 <label class="form-label-sm">Clearance Collection ID</label>
                                 <input type="number" class="form-control" id="clearanceCollectionId"
@@ -552,7 +568,7 @@
                                 <label class="form-label-sm text-danger">Expiry Cutoff (Days)</label>
                                 <input type="number" min="0" step="1" class="form-control" id="clearanceExpiryCutoffDays"
                                        value="{{ config.clearance_expiry_cutoff_days if config.clearance_expiry_cutoff_days is not none else 15 }}">
-                                <div class="form-text">Food-safety cutoff. Stock within this many days of its best-before (or already past it) is never sold — excluded from the clearance mirror entirely, even if plenty is sitting in Odoo. Lots with no date are unaffected.</div>
+                                <div class="form-text">Food-safety cutoff. Stock within this many days of its best-before (or already past it) is never sold — excluded from the clearance mirror entirely, even if plenty is sitting in Odoo. Lots with no date are held out of Clearance entirely too (see note above).</div>
                             </div>
                         </div>
 
@@ -1401,7 +1417,9 @@ function saveSettings() {
 
         // Clearance
         clearance_enabled: document.getElementById('clearanceEnabled').checked,
-        clearance_discount_pct: parseFloat(document.getElementById('clearanceDiscountPct').value) || 0,
+        clearance_discount_pct_30: parseFloat(document.getElementById('clearanceDiscountPct30').value) || 0,
+        clearance_discount_pct_60: parseFloat(document.getElementById('clearanceDiscountPct60').value) || 0,
+        clearance_discount_pct_90: parseFloat(document.getElementById('clearanceDiscountPct90').value) || 0,
         clearance_collection_id: document.getElementById('clearanceCollectionId').value.trim() || null,
         clearance_sku_suffix: document.getElementById('clearanceSkuSuffix').value.trim() || '-CLR',
         clearance_expiry_cutoff_days: parseInt(document.getElementById('clearanceExpiryCutoffDays').value) || 0,

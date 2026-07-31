@@ -7,7 +7,8 @@ second pass and does the mirror of that: it takes the stock sitting in the
 Clearance + Damaged locations and pushes it onto a *separate* Shopify product
 per SKU ('{base_sku}{suffix}', e.g. 'ABC123-CLR') so that clearance stock can:
 
-  - carry its own discounted price (clearance_discount_pct, default 40%),
+  - carry its own discounted price, steeper the closer it is to expiry (see
+    the tiered discount below),
   - live only in the Clearance collection (not the main catalogue),
   - surface an expiry date pulled from the Odoo lot(s).
 
@@ -44,6 +45,22 @@ treated exactly like normal stock running out: the mirror is zeroed/drafted
 and, if the base product had been hidden because only clearance stock
 remained, the base product is restored to active (showing its normal stock)
 via the existing zero-out/reactivate lifecycle — no separate code path needed.
+
+Tiered discount: the mirror's price is NOT a single flat percentage — it
+steepens the closer the product's SOONEST sellable lot is to its best-before
+date (the same date shown on the "Best before" badge, so date and discount
+always agree):
+
+  <= 30 days left  -> clearance_discount_pct_30 (default 50%)
+  <= 60 days left  -> clearance_discount_pct_60 (default 40%)
+  <= 90 days left  -> clearance_discount_pct_90 (default 30%, also the floor
+                       for anything further out than 90 days, though that
+                       isn't expected in practice)
+
+A mixed batch (lots at different distances from expiry) prices the WHOLE
+mirror off the most urgent qualifying lot rather than under-discounting the
+near-expiry portion — the same one-price-per-mirror trade-off already
+accepted for the expiry badge itself.
 """
 
 import math
@@ -168,6 +185,29 @@ def _split_lots_by_expiry(rows, lot_expiry, today, cutoff_days):
 
     expiry = min(sellable_expiries) if sellable_expiries else None
     return sellable_qty, expiry, excluded_qty, undated_qty
+
+
+def _discount_pct_for_days(days_left, pct_30, pct_60, pct_90):
+    """
+    Steeper discount the closer a product's SOONEST sellable lot is to its
+    best-before date. Pure function — no Odoo/Shopify/db.
+
+    `days_left` is always > the food-safety cutoff by the time pricing runs
+    (anything within the cutoff was already excluded from `in_stock_pids`
+    upstream), so this only ever prices genuinely sellable stock.
+
+    Bands mirror the cutoff's own boundary style (<=, same edge each side):
+      <= 30 days  -> pct_30 (steepest)
+      <= 60 days  -> pct_60
+      <= 90 days  -> pct_90
+      >  90 days  -> pct_90 (floor — clearance stock isn't expected to sit
+                     this far out, but still gets at least the base discount)
+    """
+    if days_left <= 30:
+        return pct_30
+    if days_left <= 60:
+        return pct_60
+    return pct_90
 
 
 def _resolve_shopify_location_id(shop_url):
@@ -526,12 +566,16 @@ def perform_clearance_sync(shop_url):
 
     log_event('Clearance', 'Info', 'Starting Clearance Sync...', shop_url=shop_url)
 
-    # Discount + naming config
-    try:
-        discount_pct = float(get_config('clearance_discount_pct', 40, shop_url=shop_url))
-    except (TypeError, ValueError):
-        discount_pct = 40.0
-    price_factor = max(0.0, 1.0 - discount_pct / 100.0)
+    # Tiered discount — steeper the closer a product's soonest sellable lot is
+    # to its best-before date. Replaces the old single flat clearance_discount_pct.
+    def _tier_pct(key, default):
+        try:
+            return float(get_config(key, default, shop_url=shop_url))
+        except (TypeError, ValueError):
+            return default
+    tier_pct_30 = _tier_pct('clearance_discount_pct_30', 50.0)
+    tier_pct_60 = _tier_pct('clearance_discount_pct_60', 40.0)
+    tier_pct_90 = _tier_pct('clearance_discount_pct_90', 30.0)
     suffix = get_config('clearance_sku_suffix', '-CLR', shop_url=shop_url) or '-CLR'
     collection_id = get_config('clearance_collection_id', None, shop_url=shop_url)
 
@@ -699,7 +743,8 @@ def perform_clearance_sync(shop_url):
 
     log_event('Clearance', 'Info',
               f"{len(in_stock_pids)} products with clearance stock "
-              f"(locations {clearance_locs}, {discount_pct:.0f}% off).",
+              f"(locations {clearance_locs}, tiered discount: "
+              f"<=30d {tier_pct_30:.0f}%, <=60d {tier_pct_60:.0f}%, <=90d {tier_pct_90:.0f}%).",
               shop_url=shop_url)
 
     processed = 0
@@ -721,6 +766,22 @@ def perform_clearance_sync(shop_url):
         final_qty = int(final_qty)
         if final_qty <= 0:
             continue
+
+        # Price off the SOONEST sellable lot's expiry — the same date already
+        # shown on the "Best before" badge, so the displayed date and the
+        # applied discount always agree. A mixed batch (some lots further out
+        # than others) prices the whole mirror at the more urgent tier rather
+        # than under-discounting the near-expiry portion.
+        expiry_str = pid_expiry.get(pid)
+        days_left = None
+        if expiry_str:
+            try:
+                days_left = (datetime.strptime(expiry_str, '%Y-%m-%d').date() - today).days
+            except (ValueError, TypeError):
+                days_left = None
+        discount_pct = (_discount_pct_for_days(days_left, tier_pct_30, tier_pct_60, tier_pct_90)
+                        if days_left is not None else tier_pct_90)
+        price_factor = max(0.0, 1.0 - discount_pct / 100.0)
 
         base_price = float(info.get('list_price') or 0.0)
         clr_price = round(base_price * price_factor, 2)
