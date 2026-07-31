@@ -70,7 +70,7 @@ from datetime import datetime
 from models import db, ProductMap, ClearanceMirror
 from utils import (
     get_odoo_connection, log_event, setup_shopify_session,
-    get_config, get_shop_company_id,
+    get_config, set_config, get_shop_company_id,
 )
 
 
@@ -545,6 +545,46 @@ def _zero_out_stale(shop_url, active_base_skus, shopify_location_id):
             db.session.rollback()
             log_event('Clearance', 'Warning',
                       f"Zero-out failed for {row.clr_sku}: {e}", shop_url=shop_url)
+    return drafted
+
+
+def deactivate_clearance_mirrors(shop_url):
+    """
+    "Pause Clearance" — hides every currently-active mirror and turns the
+    feature off, in one call. Unlike perform_clearance_sync, this does NOT
+    early-return on clearance_enabled, since the entire point is to be
+    callable to turn it off (a disabled sync no-ops and never runs
+    _zero_out_stale, so simply flipping clearance_enabled off on its own
+    would leave existing mirrors live and discounted — this is what actually
+    retracts them).
+
+    Reuses _zero_out_stale with an EMPTY active_base_skus set, so every
+    is_active mirror row is treated as stale: drafted + zeroed, and any base
+    product the connector drafted for having only clearance stock is
+    reactivated. No saved settings (locations, discount tiers, collection id,
+    suffix, cutoff days) are touched — re-enabling later (check the box, then
+    either wait for the next scheduled sync or hit Force Clearance Sync)
+    brings everything straight back exactly as configured.
+
+    Returns the number of mirrors drafted, or -1 if it couldn't even start
+    (no Shopify session / no active location).
+    """
+    if not setup_shopify_session(shop_url):
+        log_event('Clearance', 'Error', 'Deactivate failed: could not start Shopify session.', shop_url=shop_url)
+        return -1
+
+    shopify_location_id = _resolve_shopify_location_id(shop_url)
+    if not shopify_location_id:
+        log_event('Clearance', 'Error', 'Deactivate failed: no active Shopify location found.', shop_url=shop_url)
+        return -1
+
+    drafted = _zero_out_stale(shop_url, set(), shopify_location_id)
+    set_config('clearance_enabled', False, shop_url=shop_url)
+
+    log_event('Clearance', 'Success',
+              f"Clearance paused — {drafted} mirror(s) drafted/hidden, sync disabled. "
+              f"Settings kept as-is; re-enable + sync to bring it all back.",
+              shop_url=shop_url)
     return drafted
 
 

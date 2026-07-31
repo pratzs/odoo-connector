@@ -850,6 +850,19 @@ def run_clearance_sync(shop_url):
             log_event('Clearance', 'Error', f"Clearance sync failed: {e}", shop_url=shop_url)
 
 
+def run_clearance_deactivate(shop_url):
+    """Standalone job for the dashboard 'Pause Clearance' button — drafts
+    every currently-active mirror, restores any base product drafted for
+    having only clearance stock, and turns clearance_enabled off. Settings
+    are left as-is so re-enabling is a checkbox + Force Sync away."""
+    with app.app_context():
+        try:
+            from services.clearance import deactivate_clearance_mirrors
+            deactivate_clearance_mirrors(shop_url)
+        except Exception as e:
+            log_event('Clearance', 'Error', f"Clearance deactivate failed: {e}", shop_url=shop_url)
+
+
 def _job_safe(fn):
     """
     Decorator for non-critical background jobs.
@@ -1506,6 +1519,19 @@ def sync_clearance_endpoint():
 
     job = q_critical.enqueue(run_clearance_sync, shop_url, job_timeout=3600)
     return jsonify({"message": f"Clearance Sync Queued (Job ID: {job.get_id()})"})
+
+
+@app.route('/sync/clearance/deactivate', methods=['GET', 'POST'])
+@require_shopify_session
+def deactivate_clearance_endpoint():
+    """Draft every active clearance mirror, restore any base product hidden
+    for it, and disable clearance sync — one click, fully reversible (all
+    settings kept; re-enable + sync brings it straight back)."""
+    shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+
+    job = q_critical.enqueue(run_clearance_deactivate, shop_url, job_timeout=3600)
+    return jsonify({"message": f"Clearance Deactivate Queued (Job ID: {job.get_id()})"})
 
 
 def task_force_name_repair(shop_url):
