@@ -1553,6 +1553,20 @@ def search_products_endpoint():
     return jsonify({"results": results})
 
 
+@app.route('/clearance/manual_prices', methods=['GET'])
+@require_shopify_session
+def list_clearance_manual_prices_endpoint():
+    """Dashboard 'Active Manual Overrides' list — lets the merchant see every
+    SKU currently pinned to a hand-set price, since the SKU/price boxes clear
+    after each Apply and setting many overrides in a row is easy to lose
+    track of otherwise."""
+    shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+
+    from services.clearance import list_manual_price_overrides
+    return jsonify({"overrides": list_manual_price_overrides(shop_url)})
+
+
 @app.route('/clearance/manual_price', methods=['POST'])
 @require_shopify_session
 def set_clearance_manual_price_endpoint():

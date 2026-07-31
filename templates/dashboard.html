@@ -609,6 +609,11 @@
                                     <button type="button" class="btn btn-sm btn-outline-secondary" onclick="clearManualClearancePrice()">Clear override</button>
                                 </div>
                             </div>
+
+                            <div class="mt-2 pt-2 border-top">
+                                <div class="small fw-semibold mb-1">Active overrides</div>
+                                <div id="manualPriceOverridesList" class="small text-muted">Loading...</div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1305,8 +1310,9 @@ document.addEventListener("DOMContentLoaded", function() {
         }
 
     // --- C. Final Startup Logic ---
-    toggleTagFields(); 
+    toggleTagFields();
     if(CURRENT_SHOP_URL) fetchCompanies();
+    if(CURRENT_SHOP_URL) loadManualPriceOverrides();
     handleNavigation(); // Corrected from handleSidebarNavigation
 });
 
@@ -1547,8 +1553,8 @@ function triggerAction(url, method='GET') {
         .catch(e => showToast("Error: " + (e.message || "Could not reach server")));
 }
 
-function _postManualClearancePrice(price) {
-    const sku = document.getElementById('manualPriceSku').value.trim();
+function _postManualClearancePrice(price, skuOverride) {
+    const sku = skuOverride || document.getElementById('manualPriceSku').value.trim();
     if (!sku) { showToast("Enter a base SKU first."); return; }
     showToast("Applying...");
     fetch(`/clearance/manual_price?shop=${CURRENT_SHOP_URL}`, {
@@ -1557,8 +1563,37 @@ function _postManualClearancePrice(price) {
         body: JSON.stringify({ base_sku: sku, price: price })
     })
         .then(r => r.json().then(data => ({ status: r.status, data })))
-        .then(({ data }) => showToast(data.message || data.error))
+        .then(({ data }) => { showToast(data.message || data.error); loadManualPriceOverrides(); })
         .catch(e => showToast("Error: " + (e.message || "Could not reach server")));
+}
+
+function loadManualPriceOverrides() {
+    const el = document.getElementById('manualPriceOverridesList');
+    if (!el) return;
+    fetch(`/clearance/manual_prices?shop=${CURRENT_SHOP_URL}`)
+        .then(r => r.json())
+        .then(data => {
+            const rows = data.overrides || [];
+            if (!rows.length) { el.innerHTML = 'None set.'; return; }
+            el.innerHTML = rows.map(r => `
+                <div class="d-flex justify-content-between align-items-center border-bottom py-1">
+                  <span><code>${r.base_sku}</code> → $${r.manual_price.toFixed(2)}${r.is_active ? '' : ' <span class="text-muted">(mirror currently drafted)</span>'}</span>
+                  <span>
+                    <button type="button" class="btn btn-outline-secondary btn-sm py-0" onclick="editManualOverride('${r.base_sku}', ${r.manual_price})">Edit</button>
+                    <button type="button" class="btn btn-outline-danger btn-sm py-0" onclick="quickClearOverride('${r.base_sku}')">Clear</button>
+                  </span>
+                </div>`).join('');
+        })
+        .catch(() => { el.innerHTML = '<span class="text-danger">Could not load overrides.</span>'; });
+}
+
+function editManualOverride(sku, price) {
+    document.getElementById('manualPriceSku').value = sku;
+    document.getElementById('manualPriceValue').value = price;
+}
+
+function quickClearOverride(sku) {
+    _postManualClearancePrice(null, sku);
 }
 
 function applyManualClearancePrice() {

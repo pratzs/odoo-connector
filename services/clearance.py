@@ -391,6 +391,20 @@ def _add_to_collection(product_id, collection_id):
         pass
 
 
+def list_manual_price_overrides(shop_url):
+    """Dashboard 'Active Manual Overrides' list — every SKU currently pinned
+    to a hand-set clearance price. Without this, setting overrides on many
+    SKUs one at a time is easy to lose track of, since the SKU/price boxes
+    clear after each Apply — this is the record of what's actually pinned."""
+    rows = ClearanceMirror.query.filter(
+        ClearanceMirror.shop_url == shop_url,
+        ClearanceMirror.manual_price.isnot(None),
+    ).order_by(ClearanceMirror.base_sku).all()
+    return [{'base_sku': r.base_sku, 'clr_sku': r.clr_sku,
+             'manual_price': float(r.manual_price), 'is_active': r.is_active}
+            for r in rows]
+
+
 def set_manual_price(shop_url, base_sku, price):
     """
     Dashboard "Manual Price Override" action. Sets (or clears, price=None) a
