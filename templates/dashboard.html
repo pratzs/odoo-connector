@@ -588,6 +588,15 @@
                         <div class="bg-light p-3 rounded border mt-3">
                             <label class="form-label-sm fw-semibold mb-1">Manual Price Override</label>
                             <div class="form-text mb-2">Pin one SKU's clearance price by hand — skips the tiered discount for it, applies immediately (reactivates the mirror if it was drafted/paused), and stays until you clear it. Works even while clearance sync is disabled/paused.</div>
+
+                            <div class="row g-2 mb-2">
+                                <div class="col-md-7">
+                                    <input type="text" class="form-control form-control-sm" id="productSearchQuery"
+                                           placeholder="Find SKU by name (e.g. obrien)" oninput="searchProductsDebounced()">
+                                </div>
+                            </div>
+                            <div id="productSearchResults" class="small mb-2"></div>
+
                             <div class="row g-2">
                                 <div class="col-md-4">
                                     <input type="text" class="form-control form-control-sm" id="manualPriceSku" placeholder="Base SKU, e.g. OBRIEN-001">
@@ -1560,6 +1569,34 @@ function applyManualClearancePrice() {
 
 function clearManualClearancePrice() {
     _postManualClearancePrice(null);
+}
+
+let _productSearchTimer = null;
+function searchProductsDebounced() {
+    clearTimeout(_productSearchTimer);
+    _productSearchTimer = setTimeout(runProductSearch, 350);
+}
+
+function runProductSearch() {
+    const q = document.getElementById('productSearchQuery').value.trim();
+    const resultsEl = document.getElementById('productSearchResults');
+    if (q.length < 2) { resultsEl.innerHTML = ''; return; }
+    resultsEl.innerHTML = '<span class="text-muted">Searching...</span>';
+    fetch(`/api/products/search?shop=${CURRENT_SHOP_URL}&q=${encodeURIComponent(q)}`)
+        .then(r => r.json())
+        .then(data => {
+            const results = data.results || [];
+            if (!results.length) { resultsEl.innerHTML = '<span class="text-muted">No matches.</span>'; return; }
+            resultsEl.innerHTML = results.map(r => {
+                const sku = (r.sku || '').replace(/'/g, "\\'");
+                const price = r.list_price != null ? `$${Number(r.list_price).toFixed(2)}` : '';
+                return `<div class="d-flex justify-content-between align-items-center border-bottom py-1">
+                          <span><code>${r.sku || '(no SKU)'}</code> — ${r.name || ''} <span class="text-muted">${price}</span></span>
+                          <button type="button" class="btn btn-outline-primary btn-sm py-0" onclick="document.getElementById('manualPriceSku').value='${sku}'">Use</button>
+                        </div>`;
+            }).join('');
+        })
+        .catch(() => { resultsEl.innerHTML = '<span class="text-danger">Search failed.</span>'; });
 }
 
 function openOrderImportModal() {

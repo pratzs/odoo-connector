@@ -254,6 +254,31 @@ def get_odoo_connection(shop_url):
         return None
 
 
+def search_odoo_products(shop_url, query, limit=25):
+    """
+    Look up Odoo products by name (fuzzy) so the dashboard can find a base
+    SKU without leaving the app — e.g. "which SKU is the O'Brien Brown Ale"
+    before setting a manual clearance price. Read-only; talks to Odoo through
+    the shop's own already-configured connection, same as every sync.
+
+    Returns a list of {sku, name, list_price} dicts (empty on any failure).
+    """
+    odoo = get_odoo_connection(shop_url)
+    if not odoo or not query:
+        return []
+    try:
+        recs = odoo.models.execute_kw(
+            odoo.db, odoo.uid, odoo.password,
+            'product.product', 'search_read',
+            [[['name', 'ilike', query], ['default_code', '!=', False]]],
+            {'fields': ['default_code', 'name', 'list_price'], 'limit': limit})
+        return [{'sku': r.get('default_code'), 'name': r.get('name'),
+                 'list_price': r.get('list_price')} for r in recs]
+    except Exception as e:
+        log_event('System', 'Error', f"Product search failed: {e}", shop_url=shop_url)
+        return []
+
+
 def send_inventory_alert(shop_url, email_address, discrepancies):
     """
     Sends an automated email when Odoo and Shopify stock do not match.

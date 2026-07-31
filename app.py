@@ -46,7 +46,8 @@ from utils import (
     get_odoo_connection,
     setup_shopify_session,
     automate_webhook_registration,
-    send_inventory_alert 
+    send_inventory_alert,
+    search_odoo_products
 )
 # --- SERVICES ---
 from services.orders import process_order_data
@@ -1533,6 +1534,23 @@ def deactivate_clearance_endpoint():
 
     job = q_critical.enqueue(run_clearance_deactivate, shop_url, job_timeout=3600)
     return jsonify({"message": f"Clearance Deactivate Queued (Job ID: {job.get_id()})"})
+
+
+@app.route('/api/products/search', methods=['GET'])
+@require_shopify_session
+def search_products_endpoint():
+    """Dashboard 'Find SKU by name' lookup — read-only Odoo product search by
+    name, so a base SKU can be found without leaving the app (e.g. before
+    setting a manual clearance price). Uses the shop's own Odoo connection."""
+    shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+
+    q = (request.args.get('q') or '').strip()
+    if not q or len(q) < 2:
+        return jsonify({"results": []})
+
+    results = search_odoo_products(shop_url, q)
+    return jsonify({"results": results})
 
 
 @app.route('/clearance/manual_price', methods=['POST'])
