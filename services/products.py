@@ -869,7 +869,16 @@ def _archive_odoo_products_in_shopify(shop_url, odoo, cutoff_str=None, full=Fals
             ProductMap.shopify_variant_id != None
         ).all()
 
-        stale_maps = [m for m in all_maps if m.odoo_product_id not in active_odoo_ids]
+        # Snapshot into plain tuples up front — _release_sku() commits mid-loop,
+        # which expires every ORM object in the session (SQLAlchemy's default
+        # expire_on_commit). Pack products put 2 rows under the same odoo_product_id,
+        # so the second row is often deleted by the first row's release call before
+        # its own turn comes up, and touching its expired attributes afterwards
+        # raises ObjectDeletedError instead of just being a harmless re-delete.
+        stale_maps = [
+            (m.odoo_product_id, m.sku, m.shopify_variant_id)
+            for m in all_maps if m.odoo_product_id not in active_odoo_ids
+        ]
 
         if not stale_maps:
             log_event('Product Sync', 'Info', "Archive full-check: no stale products found.", shop_url=shop_url)
@@ -883,9 +892,9 @@ def _archive_odoo_products_in_shopify(shop_url, odoo, cutoff_str=None, full=Fals
         # Pack products produce 2 ProductMap rows for the same Shopify product.
         # seen_shopify_ids ensures we only archive each Shopify product once.
         seen_shopify_ids = set()
-        for pm in stale_maps:
+        for stale_odoo_id, sku, shopify_variant_id in stale_maps:
             try:
-                variant = shopify.Variant.find(int(pm.shopify_variant_id))
+                variant = shopify.Variant.find(int(shopify_variant_id))
                 product_id = variant.product_id
                 if product_id not in seen_shopify_ids:
                     seen_shopify_ids.add(product_id)
@@ -895,17 +904,17 @@ def _archive_odoo_products_in_shopify(shop_url, odoo, cutoff_str=None, full=Fals
                         sp.status = 'archived'
                         sp.save()
                         archived_count += 1
-                        handover = pm.sku in active_sku_set
+                        handover = sku in active_sku_set
                         reason = "SKU reused by a new Odoo product" if handover else "inactive in Odoo"
                         log_event('Product Sync', 'Info',
-                            f"Archived Shopify product: {pm.sku} ({reason})", shop_url=shop_url)
+                            f"Archived Shopify product: {sku} ({reason})", shop_url=shop_url)
             except Exception as e:
                 log_event('Product Sync', 'Warning',
-                    f"Could not archive Shopify product for SKU {pm.sku}: {e}", shop_url=shop_url)
+                    f"Could not archive Shopify product for SKU {sku}: {e}", shop_url=shop_url)
             finally:
                 # Release the stale mapping regardless of whether the Shopify
                 # side succeeded — a leftover row blocks the new product forever.
-                _release_sku(pm.odoo_product_id, pm.sku)
+                _release_sku(stale_odoo_id, sku)
 
     else:
         # ── Delta: products archived in Odoo since cutoff_str ───────────────
