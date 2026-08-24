@@ -128,15 +128,10 @@ def sync_products_master(shop_url):
             log_event('Product Sync', 'Error', f"Search Failed: {e}", shop_url=shop_url)
             return
 
-        BATCH_SIZE = 50
-        chunks = [product_ids[i:i + BATCH_SIZE] for i in range(0, len(product_ids), BATCH_SIZE)]
-
-        for index, batch_ids in enumerate(chunks):
-            q_default.enqueue(sync_product_batch_task, shop_url, batch_ids, f"Batch {index+1}/{len(chunks)}", job_timeout=3600)
-
-        log_event('Product Sync', 'Success', f"Queued {len(chunks)} batches.", shop_url=shop_url)
-
-        # Archive in Shopify any products archived in Odoo since the last sync
+        # Archive in Shopify any products archived in Odoo since the last sync,
+        # and release their ProductMap rows — BEFORE queuing new-product batches,
+        # so a SKU reused by a new Odoo product is free to claim it below rather
+        # than racing an RQ worker that hasn't picked up this cleanup yet.
         try:
             archived = _archive_odoo_products_in_shopify(shop_url, odoo, cutoff_str=cutoff_str)
             if archived:
@@ -144,6 +139,14 @@ def sync_products_master(shop_url):
                     f"Archived {archived} Shopify product(s) that were archived in Odoo.", shop_url=shop_url)
         except Exception as e:
             log_event('Product Sync', 'Warning', f"Archive propagation error: {e}", shop_url=shop_url)
+
+        BATCH_SIZE = 50
+        chunks = [product_ids[i:i + BATCH_SIZE] for i in range(0, len(product_ids), BATCH_SIZE)]
+
+        for index, batch_ids in enumerate(chunks):
+            q_default.enqueue(sync_product_batch_task, shop_url, batch_ids, f"Batch {index+1}/{len(chunks)}", job_timeout=3600)
+
+        log_event('Product Sync', 'Success', f"Queued {len(chunks)} batches.", shop_url=shop_url)
 
 
 # =====================================================
@@ -179,6 +182,18 @@ def sync_all_products_absolute_master(shop_url):
             log_event('Product Sync', 'Error', f"Full Catalog Search Failed: {e}", shop_url=shop_url)
             return
 
+        # Full mode: compare ALL ProductMap entries against currently active Odoo products,
+        # archive any Shopify products whose Odoo product has been deactivated, and release
+        # their ProductMap rows — BEFORE queuing new-product batches below, so a SKU reused
+        # by a new Odoo product is free to claim it instead of racing an RQ worker.
+        try:
+            archived = _archive_odoo_products_in_shopify(shop_url, odoo, full=True)
+            if archived:
+                log_event('Product Sync', 'Warning',
+                    f"FULL RESYNC: Archived {archived} Shopify product(s) — no longer active in Odoo.", shop_url=shop_url)
+        except Exception as e:
+            log_event('Product Sync', 'Warning', f"Full archive propagation error: {e}", shop_url=shop_url)
+
         BATCH_SIZE = 50
         chunks = [product_ids[i:i + BATCH_SIZE] for i in range(0, len(product_ids), BATCH_SIZE)]
 
@@ -187,17 +202,6 @@ def sync_all_products_absolute_master(shop_url):
             q_default.enqueue(sync_product_batch_task, shop_url, batch_ids, f"Full Resync Batch {index+1}/{len(chunks)}", job_timeout=3600)
 
         log_event('Product Sync', 'Success', f"Queued FULL CATALOG sync. {len(chunks)} batches processing.", shop_url=shop_url)
-
-        # Full mode: compare ALL ProductMap entries against currently active Odoo products
-        # and archive any Shopify products whose Odoo product has been deactivated.
-        # This handles products archived before this feature existed (e.g. the current 700).
-        try:
-            archived = _archive_odoo_products_in_shopify(shop_url, odoo, full=True)
-            if archived:
-                log_event('Product Sync', 'Warning',
-                    f"FULL RESYNC: Archived {archived} Shopify product(s) — no longer active in Odoo.", shop_url=shop_url)
-        except Exception as e:
-            log_event('Product Sync', 'Warning', f"Full archive propagation error: {e}", shop_url=shop_url)
 
 
 # =====================================================
@@ -800,12 +804,15 @@ def _archive_odoo_products_in_shopify(shop_url, odoo, cutoff_str=None, full=Fals
         Any Shopify product mapped to a now-inactive Odoo product gets archived.
         Use for the one-time migration of products archived before this feature.
 
-    SKU REUSE SAFETY:
-        Before archiving any Shopify product, the function checks the product's
-        primary variant SKU against a live set of all active Odoo SKUs. If the
-        SKU is still active in Odoo (meaning a NEW product was created with the
-        same SKU after the old one was archived), the Shopify product is left
-        alone. This prevents false-archiving when SKUs are recycled.
+    SKU HANDOVER:
+        A Shopify product is only ever archived here after we've independently
+        confirmed its specific mapped Odoo record is inactive (via active_odoo_ids
+        in full mode, or a direct active=False query in delta mode) — so a SKU
+        being reused by a NEW active Odoo product does not block the archive.
+        Instead, every ProductMap row tied to the stale Odoo id is deleted right
+        after archiving, releasing the SKU so the new product can sync in on the
+        next cycle. Without this release, the unique (shop_url, sku) constraint
+        on ProductMap would silently block the new product forever.
         If the active-SKU safety set cannot be built, the function aborts
         entirely — never archives without verified safety data.
     """
@@ -836,24 +843,23 @@ def _archive_odoo_products_in_shopify(shop_url, odoo, cutoff_str=None, full=Fals
             f"Archive check aborted — could not build active-SKU safety set: {e}", shop_url=shop_url)
         return 0  # Never archive without confirmed active-SKU data
 
-    def _sku_is_still_active(sp, label):
+    def _release_sku(stale_odoo_id, sku):
         """
-        Returns True (safe to archive) if the Shopify product's primary variant
-        SKU is NOT in the active Odoo SKU set.
-        Returns False (skip) if the SKU is still live in Odoo — this means a
-        new active product was created with the same SKU after the old one was
-        archived (SKU reuse). Archiving would silently remove a live product.
+        Deletes every ProductMap row tied to a confirmed-inactive Odoo record,
+        freeing its SKU(s) for a new Odoo product to claim on the next sync.
+        Pack products produce 2 rows (main + secondary unit) for one Odoo id —
+        filtering by odoo_product_id (not just `sku`) releases both at once.
         """
-        if not sp or not sp.variants:
-            return False
-        primary_sku = str(getattr(sp.variants[0], 'sku', '') or '').strip()
-        if primary_sku and primary_sku in active_sku_set:
+        try:
+            ProductMap.query.filter_by(
+                shop_url=shop_url, odoo_product_id=stale_odoo_id
+            ).delete(synchronize_session=False)
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
             log_event('Product Sync', 'Warning',
-                f"SKU reuse guard: '{primary_sku}' still active in Odoo — "
-                f"skipping archive for {label}",
+                f"Could not release ProductMap for archived Odoo id {stale_odoo_id} ({sku}): {e}",
                 shop_url=shop_url)
-            return False
-        return True
 
     if full:
         # ── 1. Find stale ProductMap entries ────────────────────────────────
@@ -881,26 +887,25 @@ def _archive_odoo_products_in_shopify(shop_url, odoo, cutoff_str=None, full=Fals
             try:
                 variant = shopify.Variant.find(int(pm.shopify_variant_id))
                 product_id = variant.product_id
-                if product_id in seen_shopify_ids:
-                    continue
+                if product_id not in seen_shopify_ids:
+                    seen_shopify_ids.add(product_id)
 
-                sp = shopify.Product.find(product_id)
-
-                # SKU reuse guard — do not archive if primary SKU is still live
-                if not _sku_is_still_active(sp, pm.sku):
-                    seen_shopify_ids.add(product_id)  # mark seen so we don't recheck
-                    continue
-
-                seen_shopify_ids.add(product_id)
-                if sp and sp.status != 'archived':
-                    sp.status = 'archived'
-                    sp.save()
-                    archived_count += 1
-                    log_event('Product Sync', 'Info',
-                        f"Archived Shopify product: {pm.sku} (inactive in Odoo)", shop_url=shop_url)
+                    sp = shopify.Product.find(product_id)
+                    if sp and sp.status != 'archived':
+                        sp.status = 'archived'
+                        sp.save()
+                        archived_count += 1
+                        handover = pm.sku in active_sku_set
+                        reason = "SKU reused by a new Odoo product" if handover else "inactive in Odoo"
+                        log_event('Product Sync', 'Info',
+                            f"Archived Shopify product: {pm.sku} ({reason})", shop_url=shop_url)
             except Exception as e:
                 log_event('Product Sync', 'Warning',
                     f"Could not archive Shopify product for SKU {pm.sku}: {e}", shop_url=shop_url)
+            finally:
+                # Release the stale mapping regardless of whether the Shopify
+                # side succeeded — a leftover row blocks the new product forever.
+                _release_sku(pm.odoo_product_id, pm.sku)
 
     else:
         # ── Delta: products archived in Odoo since cutoff_str ───────────────
@@ -949,27 +954,25 @@ def _archive_odoo_products_in_shopify(shop_url, odoo, cutoff_str=None, full=Fals
             except Exception:
                 pass
 
-            if not product_id or product_id in seen_shopify_ids:
-                continue
-
-            try:
-                sp = shopify.Product.find(product_id)
-
-                # SKU reuse guard
-                if not _sku_is_still_active(sp, sku or str(odoo_id)):
-                    seen_shopify_ids.add(product_id)
-                    continue
-
+            if product_id and product_id not in seen_shopify_ids:
                 seen_shopify_ids.add(product_id)
-                if sp and sp.status != 'archived':
-                    sp.status = 'archived'
-                    sp.save()
-                    archived_count += 1
-                    log_event('Product Sync', 'Info',
-                        f"Archived Shopify product: {sku or odoo_id} (archived in Odoo)", shop_url=shop_url)
-            except Exception as e:
-                log_event('Product Sync', 'Warning',
-                    f"Could not archive Shopify product {sku or odoo_id}: {e}", shop_url=shop_url)
+                try:
+                    sp = shopify.Product.find(product_id)
+                    if sp and sp.status != 'archived':
+                        sp.status = 'archived'
+                        sp.save()
+                        archived_count += 1
+                        handover = sku in active_sku_set
+                        reason = "SKU reused by a new Odoo product" if handover else "archived in Odoo"
+                        log_event('Product Sync', 'Info',
+                            f"Archived Shopify product: {sku or odoo_id} ({reason})", shop_url=shop_url)
+                except Exception as e:
+                    log_event('Product Sync', 'Warning',
+                        f"Could not archive Shopify product {sku or odoo_id}: {e}", shop_url=shop_url)
+
+            # Release the stale mapping whether or not a Shopify product was
+            # found — otherwise this row blocks a SKU-reusing product forever.
+            _release_sku(odoo_id, sku)
 
     return archived_count
 
