@@ -427,8 +427,43 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     # 1. CHECK DB MAP
     pm = db_map_dict.get(sku)
     if pm and pm.odoo_product_id != p['id']:
-        print(f"⚠️ BLOCKING: SKU {sku} already claimed by Odoo {pm.odoo_product_id}. Skipping.")
-        return "skipped"
+        # A ProductMap row claims this SKU for a different Odoo id. That claim is
+        # only real if that other Odoo record is still active AND still actually
+        # uses this SKU — otherwise it's stale and must not block the record that
+        # legitimately owns the SKU now. Stale happens two ways beyond archival:
+        # junk sentinel rows (odoo_product_id -1/0, shopify_variant_id '0', never
+        # a real Shopify product), and an Odoo record simply renaming its own SKU
+        # while staying active (archive propagation never sees these, since the
+        # claiming id never goes inactive).
+        claim_still_valid = False
+        if pm.odoo_product_id and pm.odoo_product_id > 0:
+            try:
+                claim = odoo.models.execute_kw(
+                    odoo.db, odoo.uid, odoo.password, 'product.product', 'read',
+                    [[pm.odoo_product_id]], {'fields': ['default_code', 'active'], 'context': {'active_test': False}}
+                )
+                if claim and claim[0].get('active') and str(claim[0].get('default_code') or '').strip() == sku:
+                    claim_still_valid = True
+            except Exception:
+                # Can't verify — err toward treating the claim as valid so we
+                # never risk creating a duplicate Shopify product on a fluke.
+                claim_still_valid = True
+
+        if claim_still_valid:
+            print(f"⚠️ BLOCKING: SKU {sku} already claimed by Odoo {pm.odoo_product_id}. Skipping.")
+            return "skipped"
+
+        print(f"♻️ RELEASING stale SKU claim: {sku} was mapped to Odoo {pm.odoo_product_id}, now belongs to {p['id']}.")
+        try:
+            ProductMap.query.filter_by(shop_url=shop_url, odoo_product_id=pm.odoo_product_id).delete(synchronize_session=False)
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            log_event('Product Sync', 'Warning',
+                f"Could not release stale ProductMap for SKU {sku} (Odoo {pm.odoo_product_id}): {e}", shop_url=shop_url)
+            return "skipped"
+        db_map_dict.pop(sku, None)
+        pm = None
 
     product_name = p.get('name', 'Unknown')
     vendor_name = product_name.split(' ')[0] if product_name else "Worthy"
