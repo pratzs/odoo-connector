@@ -455,7 +455,12 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
 
         print(f"♻️ RELEASING stale SKU claim: {sku} was mapped to Odoo {pm.odoo_product_id}, now belongs to {p['id']}.")
         try:
-            ProductMap.query.filter_by(shop_url=shop_url, odoo_product_id=pm.odoo_product_id).delete(synchronize_session=False)
+            # Scoped to this exact row (by primary key), not by odoo_product_id —
+            # junk sentinel rows (-1/0) are shared across many unrelated SKUs, so
+            # deleting by odoo_product_id here would wipe every other SKU's row
+            # sitting on the same sentinel, crashing them later in this same batch
+            # with ObjectDeletedError when their own turn comes up.
+            ProductMap.query.filter_by(id=pm.id).delete(synchronize_session=False)
             db.session.commit()
         except Exception as e:
             db.session.rollback()
