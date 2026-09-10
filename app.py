@@ -3586,6 +3586,34 @@ def api_run_deep_diagnose():
         return jsonify({"success": False, "report": f"CRITICAL SYSTEM ERROR: {str(e)}"})
 
 
+@app.route('/maintenance/stock_reconcile', methods=['GET'])
+@require_shopify_session
+def api_stock_reconcile():
+    """
+    READ-ONLY full-catalogue stock check. Compares every active Shopify variant
+    against the quantity the sync would push, and returns both numbers for each
+    SKU that disagrees. Writes nothing.
+
+    The inventory sync only logs what it changed, so a variant that has drifted
+    and is not currently being corrected appears in no log at all. This is the
+    only view that covers products which look fine.
+    """
+    shop_url = request.args.get('shop')
+    from services.self_heal import reconcile_stock
+    res = reconcile_stock(shop_url)
+    limit = int(request.args.get('limit') or 200)
+    return jsonify({
+        'checked': res['checked'],
+        'drifted_count': len(res['drifted']),
+        'unmapped_count': len(res['unmapped']),
+        'oversold_risk': len([d for d in res['drifted'] if d['diff'] > 0]),
+        'understated': len([d for d in res['drifted'] if d['diff'] < 0]),
+        'drifted': res['drifted'][:limit],
+        'unmapped': res['unmapped'][:50],
+        'error': res.get('error'),
+    })
+
+
 @app.route('/maintenance/test_alert_channel', methods=['GET', 'POST'])
 @require_shopify_session
 def api_test_alert_channel():

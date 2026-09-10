@@ -229,6 +229,106 @@ def _uncounted_stock_locations(odoo, shop_url, company_id):
     return rows, counted_ids
 
 
+def reconcile_stock(shop_url):
+    """Compare EVERY active Shopify variant's quantity against what the sync
+    would push, without writing anything.
+
+    The inventory sync only ever reports what it CHANGED, so a variant that has
+    silently drifted and is not currently being corrected never appears in any
+    log. Checking sold-out products alone cannot find a product listed at 5
+    when the warehouse holds 500, or at 500 when it holds none — the second
+    oversells. This walks the whole catalogue and returns both numbers for
+    every SKU that disagrees.
+
+    Mirrors perform_inventory_sync's arithmetic exactly (same locations, same
+    excludes, same pack division), so a disagreement here is real drift and not
+    a difference of method.
+    """
+    out = {'checked': 0, 'drifted': [], 'unmapped': [], 'error': None}
+    if not setup_shopify_session(shop_url):
+        out['error'] = 'no shopify session'
+        return out
+    odoo = get_odoo_connection(shop_url)
+    if not odoo:
+        out['error'] = 'no odoo connection'
+        return out
+
+    from models import ProductMap
+    import math
+
+    target_locs = _int_list(get_config('inventory_locations', [], shop_url=shop_url))
+    exclude_locs = _int_list(get_config('inventory_locations_exclude', [], shop_url=shop_url))
+    suffix = get_config('clearance_sku_suffix', '-CLR', shop_url=shop_url) or '-CLR'
+
+    # 1. Every active Shopify variant and the quantity it currently shows.
+    variants = {}
+    page = shopify.Product.find(limit=250, status='active')
+    while page:
+        for p in page:
+            for v in p.variants:
+                if v.sku and not v.sku.endswith(suffix):
+                    variants[v.sku] = int(v.inventory_quantity or 0)
+            p.__dict__.clear()
+        if page.has_next_page():
+            page = page.next_page()
+        else:
+            break
+    out['checked'] = len(variants)
+
+    # 2. Odoo ids for those SKUs.
+    skus = list(variants.keys())
+    sku_to_pid = {}
+    for i in range(0, len(skus), 500):
+        chunk = skus[i:i + 500]
+        for m in ProductMap.query.filter(ProductMap.shop_url == shop_url,
+                                         ProductMap.sku.in_(chunk)).all():
+            if m.odoo_product_id and m.odoo_product_id > 0:
+                sku_to_pid[m.sku] = m.odoo_product_id
+    out['unmapped'] = [s for s in skus if s not in sku_to_pid]
+
+    pids = list(set(sku_to_pid.values()))
+    if not pids or not target_locs:
+        return out
+
+    # 3. Stock the sync would count, same domain the sync uses.
+    pid_qty = {pid: 0.0 for pid in pids}
+    domain = [['product_id', 'in', pids], ['location_id', 'child_of', target_locs]]
+    if exclude_locs:
+        domain.append(['location_id', 'not in', exclude_locs])
+    for g in odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                                    'stock.quant', 'read_group',
+                                    [domain, ['product_id', 'quantity'], ['product_id']]):
+        if g.get('product_id'):
+            pid_qty[g['product_id'][0]] = float(g.get('quantity') or 0.0)
+
+    # 4. Pack division, same rule and same zero-guard as the sync.
+    packs = {}
+    with_stock = [pid for pid, q in pid_qty.items() if q > 0]
+    for i in range(0, len(with_stock), 500):
+        chunk = with_stock[i:i + 500]
+        for r in odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                                        'product.product', 'read', [chunk],
+                                        {'fields': ['sh_is_secondary_unit', 'qty_per_pack']}):
+            packs[r['id']] = r
+
+    for sku, pid in sku_to_pid.items():
+        raw = pid_qty.get(pid, 0.0)
+        info = packs.get(pid, {})
+        if info.get('sh_is_secondary_unit') and float(info.get('qty_per_pack') or 1.0) > 1.0 \
+                and not sku.endswith('-UNIT'):
+            per = float(info.get('qty_per_pack') or 1.0)
+            divided = math.floor(raw / per)
+            expected = int(raw) if (divided == 0 and raw > 0) else int(divided)
+        else:
+            expected = int(raw)
+        shown = variants.get(sku, 0)
+        if expected != shown:
+            out['drifted'].append({'sku': sku, 'expected': expected, 'on_site': shown,
+                                   'diff': shown - expected})
+    out['drifted'].sort(key=lambda r: -abs(r['diff']))
+    return out
+
+
 def perform_self_heal(shop_url, apply_changes=True):
     """Run every check. Returns a dict summary; safe to call from a job or a
     dashboard button. apply_changes=False makes it a pure report."""
