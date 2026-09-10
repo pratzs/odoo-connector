@@ -312,20 +312,51 @@ def _draft_base_product(shop_url, base_sku, row):
 
 def _reactivate_base_if_ours(shop_url, row):
     """Re-activate the normal product, but only if WE drafted it. Does not
-    commit; the caller does."""
+    commit; the caller does.
+
+    Two things this has to get right, both learned the hard way:
+
+    1. Setting a product to 'draft' in Shopify REMOVES its Online Store
+       publication, and setting status back to 'active' does NOT restore it.
+       Re-activating alone therefore left products reading ACTIVE in the admin
+       while being completely absent from the storefront. Re-publish
+       explicitly.
+    2. base_drafted must only be cleared once the product is confirmed active
+       AND published. Clearing it after a failed lookup made the connector
+       forget it had ever drafted the product, so nothing would ever restore
+       it and the product stayed hidden permanently.
+    """
     if not row.base_drafted:
         return
     # Resolve fresh by SKU (ignore any stale/wrong cached id).
     prod = _get_base_shopify_product(row.base_sku)
-    if prod is not None and getattr(prod, 'status', None) != 'active':
+    if prod is None:
+        # Do NOT clear base_drafted here — it is the only record that this
+        # product still needs restoring. Leave it set and retry next run.
+        log_event('Clearance', 'Warning',
+                  f"Could not resolve {row.base_sku} in Shopify to re-activate — "
+                  f"leaving it flagged for retry.", shop_url=shop_url)
+        return
+
+    changed = False
+    if getattr(prod, 'status', None) != 'active':
         prod.status = 'active'
+        changed = True
+    # Restore the Online Store publication that drafting removed.
+    if not getattr(prod, 'published_at', None):
+        prod.published_at = datetime.utcnow().isoformat()
+        prod.published_scope = 'web'
+        changed = True
+
+    if changed:
         try:
             prod.save()
             log_event('Clearance', 'Info',
-                      f"Re-activated normal product {row.base_sku} — stock available again",
-                      shop_url=shop_url)
+                      f"Re-activated and re-published normal product {row.base_sku} — "
+                      f"stock available again", shop_url=shop_url)
         except Exception as e:
-            log_event('Clearance', 'Warning', f"Could not re-activate {row.base_sku}: {e}", shop_url=shop_url)
+            log_event('Clearance', 'Warning',
+                      f"Could not re-activate {row.base_sku}: {e}", shop_url=shop_url)
             return
     row.base_drafted = False
 
@@ -617,10 +648,30 @@ def _upsert_mirror(shop_url, pid, base_sku, clr_sku, info,
 def _zero_out_stale(shop_url, active_base_skus, shopify_location_id):
     """Any previously-active mirror whose base SKU no longer has clearance
     stock is zeroed and drafted (kept, not deleted, so it can come back)."""
-    rows = ClearanceMirror.query.filter_by(shop_url=shop_url, is_active=True).all()
+    # is_active=True rows are the stale mirrors to retire. base_drafted rows
+    # that are already inactive still matter: if a previous run failed to
+    # restore the base product, nothing else ever looks at them again and the
+    # product stays hidden for good. Sweep both.
+    rows = ClearanceMirror.query.filter(
+        ClearanceMirror.shop_url == shop_url,
+        db.or_(ClearanceMirror.is_active == True,          # noqa: E712
+               ClearanceMirror.base_drafted == True),      # noqa: E712
+    ).all()
     drafted = 0
     for row in rows:
         if row.base_sku in active_base_skus:
+            continue
+        if not row.is_active:
+            # Already retired; it is only here because the base product still
+            # needs restoring from a previous failed attempt.
+            try:
+                _reactivate_base_if_ours(shop_url, row)
+                db.session.commit()
+            except Exception as e:
+                db.session.rollback()
+                log_event('Clearance', 'Warning',
+                          f"Base restore retry failed for {row.base_sku}: {e}",
+                          shop_url=shop_url)
             continue
         try:
             if row.inventory_item_id:

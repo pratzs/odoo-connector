@@ -3565,6 +3565,114 @@ def api_run_deep_diagnose():
         return jsonify({"success": False, "report": f"CRITICAL SYSTEM ERROR: {str(e)}"})
 
 
+@app.route('/maintenance/publication_audit', methods=['GET'])
+@require_shopify_session
+def api_publication_audit():
+    """
+    READ-ONLY. Lists products that are ACTIVE in the admin but are NOT
+    published to the Online Store sales channel, so they exist in Shopify yet
+    cannot appear on the storefront.
+
+    This is the state the clearance pass leaves behind: drafting a product
+    removes its Online Store publication, and setting status back to 'active'
+    does NOT restore it. The product then reads as healthy everywhere the
+    merchant looks while being invisible to customers.
+    """
+    shop_url = request.args.get('shop')
+    unpublished, cursor, pages = [], None, 0
+    try:
+        client = shopify.GraphQL()
+        while pages < 40:
+            pages += 1
+            after = f', after: "{cursor}"' if cursor else ''
+            q = """
+            { products(first: 250, query: "status:active"%s) {
+                pageInfo { hasNextPage endCursor }
+                edges { node {
+                  legacyResourceId title status onlineStoreUrl totalInventory
+                  variants(first: 1) { edges { node { sku } } }
+                } } } }
+            """ % after
+            data = json.loads(client.execute(q)).get('data', {}).get('products', {})
+            for e in data.get('edges', []):
+                n = e['node']
+                if n.get('onlineStoreUrl'):
+                    continue
+                vs = n.get('variants', {}).get('edges', [])
+                unpublished.append({
+                    'product_id': n['legacyResourceId'],
+                    'title': n['title'],
+                    'sku': (vs[0]['node'].get('sku') if vs else None),
+                    'inventory': n.get('totalInventory'),
+                })
+            info = data.get('pageInfo', {})
+            if not info.get('hasNextPage'):
+                break
+            cursor = info.get('endCursor')
+    except Exception as e:
+        return jsonify({'error': str(e), 'found_so_far': len(unpublished)}), 500
+
+    with_stock = [u for u in unpublished if (u['inventory'] or 0) > 0]
+    return jsonify({
+        'active_but_unpublished': len(unpublished),
+        'of_which_have_stock': len(with_stock),
+        'items': unpublished,
+    })
+
+
+@app.route('/maintenance/publication_repair', methods=['POST'])
+@require_shopify_session
+def api_publication_repair():
+    """
+    Re-publishes ACTIVE products that lost their Online Store publication.
+    Defaults to a DRY RUN. Only products with stock are touched unless
+    include_zero_stock is set, so a product that is deliberately hidden and
+    empty is never dragged back onto the storefront.
+
+    POST body: {"apply": true, "include_zero_stock": false, "limit": 500}
+    """
+    shop_url = request.args.get('shop')
+    body = request.get_json(silent=True) or {}
+    apply_changes = bool(body.get('apply'))
+    include_zero = bool(body.get('include_zero_stock'))
+    limit = int(body.get('limit') or 500)
+    only_skus = set(body.get('skus') or [])
+
+    audit = api_publication_audit()
+    payload = audit[0].get_json() if isinstance(audit, tuple) else audit.get_json()
+    if 'items' not in payload:
+        return jsonify({'error': 'audit failed', 'detail': payload}), 500
+
+    targets = [u for u in payload['items'] if include_zero or (u['inventory'] or 0) > 0]
+    if only_skus:
+        targets = [u for u in targets if u['sku'] in only_skus]
+    targets = targets[:limit]
+
+    if not apply_changes:
+        return jsonify({'dry_run': True, 'would_publish': len(targets), 'items': targets})
+
+    published, failed = [], []
+    for t in targets:
+        try:
+            prod = shopify.Product.find(int(t['product_id']))
+            prod.published_at = datetime.utcnow().isoformat()
+            prod.published_scope = 'web'
+            if prod.save():
+                published.append(t['sku'] or t['product_id'])
+            else:
+                failed.append({'sku': t['sku'], 'errors': str(prod.errors.full_messages())})
+        except Exception as e:
+            failed.append({'sku': t['sku'], 'error': str(e)})
+
+    log_event('Product Sync', 'Success',
+              f"Publication repair: re-published {len(published)} active product(s) "
+              f"that had lost their Online Store publication ({len(failed)} failed).",
+              shop_url=shop_url)
+    return jsonify({'dry_run': False, 'published': len(published),
+                    'failed': len(failed), 'failed_detail': failed[:20],
+                    'published_skus': published})
+
+
 @app.route('/api/diagnose/stock', methods=['POST'])
 @require_shopify_session
 def api_diagnose_stock():
