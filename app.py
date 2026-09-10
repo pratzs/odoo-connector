@@ -3586,6 +3586,67 @@ def api_run_deep_diagnose():
         return jsonify({"success": False, "report": f"CRITICAL SYSTEM ERROR: {str(e)}"})
 
 
+@app.route('/maintenance/test_alert_channel', methods=['GET', 'POST'])
+@require_shopify_session
+def api_test_alert_channel():
+    """
+    Prove the alert channel can actually deliver, without sending anything.
+
+    Connects to the shop's SMTP host and authenticates, then disconnects. An
+    alert path that has never been exercised is not protection — this shop ran
+    with no alert address at all and a never-tested sender, so every warning it
+    raised went nowhere. Pass ?send=1 to also deliver one real test message.
+    """
+    shop_url = request.args.get('shop')
+    from security_utils import decrypt_val
+    to = (get_config('alert_email', '', shop_url=shop_url) or '').strip()
+    host = get_config('smtp_host', '', shop_url=shop_url)
+    port = int(get_config('smtp_port', 587, shop_url=shop_url) or 587)
+    user = get_config('smtp_user', '', shop_url=shop_url)
+    raw = get_config('smtp_pass', '', shop_url=shop_url)
+
+    result = {'alert_email': to or None, 'smtp_host': host, 'smtp_port': port,
+              'smtp_user': user, 'has_password': bool(raw)}
+    if not to:
+        result['ok'] = False
+        result['reason'] = 'No alert_email configured — alerts would go nowhere.'
+        return jsonify(result), 200
+    if not (host and user and raw):
+        result['ok'] = False
+        result['reason'] = 'SMTP host/user/password incomplete.'
+        return jsonify(result), 200
+
+    import smtplib
+    from email.message import EmailMessage
+    try:
+        pw = decrypt_val(raw)
+        if port == 465:
+            smtp = smtplib.SMTP_SSL(host, port, timeout=30)
+        else:
+            smtp = smtplib.SMTP(host, port, timeout=30)
+            smtp.ehlo(); smtp.starttls()
+        smtp.login(user, pw)
+        result['auth'] = 'ok'
+        if request.args.get('send') in ('1', 'true', 'yes'):
+            msg = EmailMessage()
+            msg['Subject'] = f"[{shop_url}] Storefront monitor test"
+            msg['From'] = f"Worthy Storefront Monitor <{user}>"
+            msg['To'] = to
+            msg.set_content(
+                "This is a one-off test of the storefront monitor's alert channel.\n\n"
+                "Real alerts are only sent when stock is sitting in an Odoo location the "
+                "website does not count, which makes products read as in stock in Odoo and "
+                "sold out on the site. At most one email a day.\n")
+            smtp.send_message(msg)
+            result['sent_to'] = to
+        smtp.quit()
+        result['ok'] = True
+    except Exception as e:
+        result['ok'] = False
+        result['reason'] = str(e)
+    return jsonify(result)
+
+
 @app.route('/maintenance/reindex_products', methods=['POST'])
 @require_shopify_session
 def api_reindex_products():
