@@ -750,6 +750,20 @@ def perform_inventory_sync(shop_url):
 
 # How often each entity is expected to run (seconds).
 # Used by monitor to detect stale entities and re-trigger.
+def _entity_intervals(shop_url=None):
+    """ENTITY_INTERVALS with the inventory cadence resolved from config, so
+    staleness detection and the dashboard countdown follow the real schedule
+    rather than a hardcoded 30 minutes."""
+    out = dict(ENTITY_INTERVALS)
+    if shop_url:
+        try:
+            out['inventory'] = max(60, min(int(
+                get_config('inventory_interval_secs', 1800, shop_url=shop_url) or 1800), 86400))
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
 ENTITY_INTERVALS = {
     'inventory':    1800,   # 30 min
     'fulfillment':  3600,   # 1 hour
@@ -810,7 +824,32 @@ def _run_with_health(entity, shop_url, fn):
 
 # --- Per-entity wrapper jobs (called by scheduler / force_schedule) ---
 
-def run_inventory_sync(shop_url):
+def run_inventory_sync(shop_url, force_clearance=False):
+    """Inventory sync, plus the clearance mirror pass on its OWN cadence.
+
+    Measured on Worthy: inventory takes 34-60s, the clearance pass 3m11s. When
+    clearance ran after every inventory sync, dropping the inventory interval
+    to 5 minutes would have put the pair at ~80% duty cycle on a single
+    worker that also handles orders, fulfilments and cancellations — one slow
+    Odoo call and cycles overlap. Inventory is cheap enough to run often;
+    clearance is not, and clearance stock does not move minute to minute.
+    So clearance is gated on its own interval regardless of how often
+    inventory runs. The manual force endpoints pass force_clearance=True, so
+    "Force Inventory Sync" still runs both, as before.
+    """
+    # A second concurrent inventory sync writes the same inventory levels with
+    # staler numbers. Harmless at 30-minute spacing, a real race at 5.
+    with acquire_distributed_lock(f"inv_sync_{shop_url}", timeout=3600) as got:
+        if not got:
+            with app.app_context():
+                log_event('Inventory', 'Info',
+                          'Skipped — a previous inventory sync is still running.',
+                          shop_url=shop_url)
+            return
+        return _run_inventory_sync_locked(shop_url, force_clearance)
+
+
+def _run_inventory_sync_locked(shop_url, force_clearance=False):
     _run_with_health('inventory', shop_url, perform_inventory_sync)
     # Update dashboard timestamp on success (previously done by scheduled_inventory_sync)
     with app.app_context():
@@ -822,13 +861,20 @@ def run_inventory_sync(shop_url):
         except Exception:
             pass
 
-        # Clearance mirror pass — runs right after every inventory sync on the
-        # same cadence, but fault-isolated so it can never fail inventory health.
+        # Clearance mirror pass — own cadence (see run_inventory_sync), still
+        # fault-isolated so it can never fail inventory health.
         try:
-            from services.clearance import perform_clearance_sync
-            perform_clearance_sync(shop_url)
-        except Exception as e:
-            log_event('Clearance', 'Error', f"Clearance sync failed: {e}", shop_url=shop_url)
+            clr_secs = int(get_config('clearance_interval_secs', 1800, shop_url=shop_url) or 1800)
+        except (TypeError, ValueError):
+            clr_secs = 1800
+        due = force_clearance or not conn.get(f"last_clearance_{shop_url}")
+        if due:
+            try:
+                conn.setex(f"last_clearance_{shop_url}", clr_secs, "done")
+                from services.clearance import perform_clearance_sync
+                perform_clearance_sync(shop_url)
+            except Exception as e:
+                log_event('Clearance', 'Error', f"Clearance sync failed: {e}", shop_url=shop_url)
 
 
 def run_fulfillment_sync(shop_url):
@@ -912,7 +958,7 @@ def sync_health_monitor(shop_url):
     """
     with app.app_context():
         now = datetime.utcnow()
-        for entity, interval in ENTITY_INTERVALS.items():
+        for entity, interval in _entity_intervals(shop_url).items():
             stale_threshold = interval * ENTITY_STALE_MULTIPLIER
             try:
                 row = SyncHealth.query.filter_by(shop_url=shop_url, entity=entity).first()
@@ -1497,7 +1543,7 @@ def kill_inventory_sync():
 
     # Enqueue a fresh sync. Use run_inventory_sync (not perform_inventory_sync
     # directly) so the chained clearance pass + health tracking also run.
-    new_job = q_critical.enqueue(run_inventory_sync, shop_url, job_timeout=3600)
+    new_job = q_critical.enqueue(run_inventory_sync, shop_url, True, job_timeout=3600)
     log_event('System', 'Info',
         f"Re-queued inventory sync as job {new_job.get_id()} after killing {len(killed)} active job(s).",
         shop_url=shop_url)
@@ -1518,7 +1564,7 @@ def sync_inventory_endpoint():
     
     # Use run_inventory_sync (not perform_inventory_sync directly) so the
     # chained clearance pass + health tracking also run on a manual force.
-    job = q_critical.enqueue(run_inventory_sync, shop_url, job_timeout=3600)
+    job = q_critical.enqueue(run_inventory_sync, shop_url, True, job_timeout=3600)
 
     return jsonify({"message": f"Full Inventory Sync Queued (Job ID: {job.get_id()})"})
 
@@ -2496,7 +2542,7 @@ def api_dashboard_status():
         rows = SyncHealth.query.filter_by(shop_url=shop_url).all()
         row_map = {r.entity: r for r in rows}
 
-        for entity, interval in ENTITY_INTERVALS.items():
+        for entity, interval in _entity_intervals(shop_url).items():
             row = row_map.get(entity)
             ttl_val = conn.ttl(ENTITY_KEY_MAP[entity])
             # ttl_val: -2 = key gone (will run next cycle), -1 = no expiry (stuck), >=0 = seconds remaining
@@ -3113,11 +3159,18 @@ def _run_shop_schedule(shop_url):
     retry_fast = Retry(max=3, interval=[300, 900, 1800])   # 5m, 15m, 30m
     retry_slow = Retry(max=3, interval=[600, 1800, 3600])  # 10m, 30m, 1h
 
-    # 1. Inventory Sync (Every 30 mins)
+    # 1. Inventory Sync — interval configurable per shop (default 30 mins).
+    # Lowered for a campaign so the storefront trails Odoo by minutes, not half
+    # an hour; the clearance pass keeps its own slower cadence.
+    try:
+        inv_secs = int(get_config('inventory_interval_secs', 1800, shop_url=shop_url) or 1800)
+    except (TypeError, ValueError):
+        inv_secs = 1800
+    inv_secs = max(60, min(inv_secs, 86400))
     if not conn.get(f"last_inv_{shop_url}"):
         q_critical.enqueue(run_inventory_sync, shop_url, job_timeout=3600, retry=retry_fast)
-        conn.setex(f"last_inv_{shop_url}", 1800, "done")
-        print(f"⏰ Triggered Inventory Sync for {shop_url}")
+        conn.setex(f"last_inv_{shop_url}", inv_secs, "done")
+        print(f"⏰ Triggered Inventory Sync for {shop_url} (every {inv_secs}s)")
 
     # 1b. Storefront Self-Heal (Every hour)
     # Runs after inventory so it judges the storefront on fresh stock numbers.
