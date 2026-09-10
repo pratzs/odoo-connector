@@ -49,7 +49,9 @@ SETTLING
 """
 
 import json
+import smtplib
 from datetime import datetime
+from email.message import EmailMessage
 
 import shopify
 
@@ -58,6 +60,53 @@ from utils import (
     get_odoo_connection, log_event, setup_shopify_session,
     get_config, get_shop_company_id,
 )
+
+
+def _alert_email(shop_url, subject, body):
+    """Email an un-repairable finding to the shop's configured alert address.
+
+    Only the checks a human must decide on are ever emailed — anything the
+    pass repairs itself stays in the log. Sends at most once a day per
+    distinct finding, because an alert that repeats every hour trains people
+    to ignore it, which is how the original faults survived for months.
+
+    No-ops silently when no alert_email is configured. The connector had no
+    alert address set at all when these faults were found, so every warning it
+    had been raising went to a log nobody opened.
+    """
+    to = (get_config('alert_email', '', shop_url=shop_url) or '').strip()
+    if not to:
+        return False
+    try:
+        from security_utils import decrypt_val
+        host = get_config('smtp_host', '', shop_url=shop_url)
+        port = int(get_config('smtp_port', 587, shop_url=shop_url) or 587)
+        user = get_config('smtp_user', '', shop_url=shop_url)
+        raw_pass = get_config('smtp_pass', '', shop_url=shop_url)
+        pw = decrypt_val(raw_pass) if raw_pass else ''
+        if not (host and user and pw):
+            return False
+
+        msg = EmailMessage()
+        msg['Subject'] = subject
+        msg['From'] = f"Worthy Storefront Monitor <{user}>"
+        msg['To'] = to
+        msg.set_content(body)
+
+        if port == 465:
+            with smtplib.SMTP_SSL(host, port) as smtp:
+                smtp.login(user, pw)
+                smtp.send_message(msg)
+        else:
+            with smtplib.SMTP(host, port) as smtp:
+                smtp.ehlo()
+                smtp.starttls()
+                smtp.login(user, pw)
+                smtp.send_message(msg)
+        return True
+    except Exception as e:
+        log_event('Self-Heal', 'Warning', f"Alert email failed: {e}", shop_url=shop_url)
+        return False
 
 
 def _int_list(val):
@@ -258,8 +307,31 @@ def perform_self_heal(shop_url, apply_changes=True):
                           f"{total:.0f} unit(s) of stock sit in internal locations the website "
                           f"never counts, so those products read as in stock in Odoo and sold out "
                           f"on the site. {detail}. "
-                          f"Add a location under Settings > Inventory Locations if it should sell.",
+                          f"Add a location under Settings > Inventory Locations if it should sell, "
+                          f"or add it to the exclude list if it never should.",
                           shop_url=shop_url)
+                # This is the one fault class the pass cannot repair — whether a
+                # location should sell is a warehouse decision. It is also the
+                # class that silently costs sales, so it is the one that leaves
+                # the log and reaches a person.
+                from utils import set_config as _sc
+                fingerprint = "|".join(f"{r['location_id']}:{r['units']:.0f}" for r in rows)
+                today = datetime.utcnow().strftime('%Y-%m-%d')
+                seen = get_config('self_heal_loc_alert', '', shop_url=shop_url)
+                if str(seen) != f"{today}#{fingerprint}":
+                    body = (
+                        f"{total:.0f} units of stock are sitting in Odoo locations that "
+                        f"{shop_url} never counts, so these products show as IN STOCK in Odoo "
+                        f"and SOLD OUT on the website.\n\n"
+                        + "\n".join(f"  {r['units']:>10.0f} units   {r['location']}" for r in rows)
+                        + "\n\nIf a location should sell, add it in the connector under "
+                          "Settings > Inventory Locations.\nIf it never should (damaged goods, "
+                          "quarantine), add it to the exclude list and this alert stops.\n"
+                    )
+                    if _alert_email(shop_url,
+                                    f"[{shop_url}] {total:.0f} units invisible to customers",
+                                    body):
+                        _sc('self_heal_loc_alert', f"{today}#{fingerprint}", shop_url=shop_url)
         except Exception as e:
             log_event('Self-Heal', 'Warning', f"Location check failed: {e}", shop_url=shop_url)
 
