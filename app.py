@@ -3586,6 +3586,61 @@ def api_run_deep_diagnose():
         return jsonify({"success": False, "report": f"CRITICAL SYSTEM ERROR: {str(e)}"})
 
 
+@app.route('/maintenance/shopify_locations', methods=['GET'])
+@require_shopify_session
+def api_shopify_locations():
+    """
+    READ-ONLY. Lists the shop's Shopify locations and, for any SKUs passed as
+    ?skus=A,B,C, the inventory held at each one.
+
+    The sync writes to a SINGLE Shopify location, but a variant's
+    inventory_quantity is the TOTAL across every location. If the shop has more
+    than one location holding stock, the storefront shows a number the
+    connector never wrote and cannot correct, which reads as the site
+    overstating stock while the sync reports nothing to update.
+    """
+    shop_url = request.args.get('shop')
+    skus = [x for x in (request.args.get('skus') or '').split(',') if x.strip()]
+    out = {'locations': [], 'configured_target': get_config('shopify_target_location_id', None, shop_url=shop_url)}
+    try:
+        for l in shopify.Location.find():
+            out['locations'].append({'id': l.id, 'name': l.name, 'active': l.active})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+    if skus:
+        client = shopify.GraphQL()
+        details = []
+        for sku in skus[:25]:
+            q = """
+            { productVariants(first: 3, query: "sku:'%s'") { edges { node {
+                sku inventoryQuantity
+                inventoryItem { id inventoryLevels(first: 10) { edges { node {
+                    location { id name }
+                    quantities(names: ["available","on_hand","committed"]) { name quantity }
+                } } } } } } } }
+            """ % sku.replace("'", "\\'")
+            try:
+                data = json.loads(client.execute(q))
+                for e in data.get('data', {}).get('productVariants', {}).get('edges', []):
+                    n = e['node']
+                    if (n.get('sku') or '').strip() != sku:
+                        continue
+                    levels = []
+                    for le in (n.get('inventoryItem') or {}).get('inventoryLevels', {}).get('edges', []):
+                        ln = le['node']
+                        levels.append({
+                            'location': ln['location']['name'],
+                            'quantities': {x['name']: x['quantity'] for x in (ln.get('quantities') or [])},
+                        })
+                    details.append({'sku': sku, 'total_inventory_quantity': n.get('inventoryQuantity'),
+                                    'per_location': levels})
+            except Exception as ex:
+                details.append({'sku': sku, 'error': str(ex)})
+        out['skus'] = details
+    return jsonify(out)
+
+
 @app.route('/maintenance/stock_reconcile', methods=['GET'])
 @require_shopify_session
 def api_stock_reconcile():
