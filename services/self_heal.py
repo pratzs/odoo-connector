@@ -340,6 +340,7 @@ def perform_self_heal(shop_url, apply_changes=True):
         'bases_restored': [],
         'uncounted_locations': [],
         'undated_clearance': {},
+        'stock_drift': {},
         'repairs_made': 0,
     }
 
@@ -482,6 +483,49 @@ def perform_self_heal(shop_url, apply_changes=True):
                         _set_config('self_heal_undated_clearance', now_val, shop_url=shop_url)
         except Exception as e:
             log_event('Self-Heal', 'Warning', f"Clearance check failed: {e}", shop_url=shop_url)
+
+    # --- 5. Stock drift that does NOT self-correct ---------------------
+    # The site legitimately trails Odoo by up to one sync cycle: Odoo stock
+    # drops the moment a delivery is validated, and Shopify only learns on the
+    # next inventory run, so a snapshot always shows some products reading
+    # high. That is lag, not a fault, and it clears itself — a one-off
+    # measurement of it is worthless and alarming.
+    # What matters is drift that survives repeated syncs. Count consecutive
+    # runs per SKU and only surface the ones that never converge.
+    try:
+        from utils import set_config as _sc
+        rec = reconcile_stock(shop_url)
+        if rec.get('error'):
+            raise RuntimeError(rec['error'])
+        now_drift = {d['sku']: d for d in rec['drifted']}
+        prev_raw = get_config('self_heal_drift_streak', '{}', shop_url=shop_url)
+        try:
+            prev = json.loads(prev_raw) if isinstance(prev_raw, str) else (prev_raw or {})
+        except Exception:
+            prev = {}
+        streaks = {sku: int(prev.get(sku, 0)) + 1 for sku in now_drift}
+        stuck = [now_drift[s] for s, n in streaks.items() if n >= 3]
+        report['stock_drift'] = {'drifted_now': len(now_drift), 'stuck': len(stuck)}
+        _sc('self_heal_drift_streak', json.dumps(streaks), shop_url=shop_url)
+        if stuck:
+            worst = sorted(stuck, key=lambda d: -abs(d['diff']))[:10]
+            detail = "; ".join(f"{d['sku']} site={d['on_site']} odoo={d['expected']}" for d in worst)
+            log_event('Self-Heal', 'Error',
+                      f"{len(stuck)} SKU(s) have disagreed with Odoo across 3+ consecutive runs, "
+                      f"so this is not sync lag — the sync is failing to correct them. {detail}",
+                      shop_url=shop_url)
+            _alert_email(shop_url,
+                         f"[{shop_url}] {len(stuck)} products stuck at the wrong stock level",
+                         f"These SKUs have disagreed with Odoo across 3+ consecutive inventory "
+                         f"syncs, so it is not the normal one-cycle lag:\n\n"
+                         + "\n".join(f"  {d['sku']}: site {d['on_site']}, Odoo {d['expected']}"
+                                      for d in worst) + "\n")
+        elif now_drift:
+            log_event('Self-Heal', 'Info',
+                      f"{len(now_drift)} SKU(s) currently trail Odoo by one sync cycle "
+                      f"(normal lag — flagged only if it survives 3 runs).", shop_url=shop_url)
+    except Exception as e:
+        log_event('Self-Heal', 'Warning', f"Stock drift check failed: {e}", shop_url=shop_url)
 
     report['repairs_made'] = len(report['republished']) + len(report['bases_restored'])
 
