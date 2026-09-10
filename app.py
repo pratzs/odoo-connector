@@ -3586,6 +3586,63 @@ def api_run_deep_diagnose():
         return jsonify({"success": False, "report": f"CRITICAL SYSTEM ERROR: {str(e)}"})
 
 
+@app.route('/maintenance/reindex_products', methods=['POST'])
+@require_shopify_session
+def api_reindex_products():
+    """
+    Nudge Shopify to re-index products that are published and reachable by URL
+    but missing from storefront search.
+
+    Shopify rebuilds its search index when a product is updated, and that index
+    lags publication unevenly — after one repair run 18 of 20 republished
+    products were searchable within the hour and 3 were not, with identical
+    title, type, tags, vendor and stock. Re-saving with a fresh published_at is
+    a real attribute change, so it registers as an update and re-queues the
+    product for indexing. The product stays published throughout; only the
+    publish timestamp moves.
+
+    POST body: {"skus": ["R0042", "T0018"]}
+    """
+    shop_url = request.args.get('shop')
+    body = request.get_json(silent=True) or {}
+    skus = [s for s in (body.get('skus') or []) if s]
+    if not skus:
+        return jsonify({'error': 'Provide {"skus": [...]}'}), 400
+
+    touched, missing, failed = [], [], []
+    for sku in skus:
+        try:
+            pid = None
+            client = shopify.GraphQL()
+            res = json.loads(client.execute(
+                '{ productVariants(first: 5, query: "sku:\'%s\'") '
+                '{ edges { node { sku product { legacyResourceId } } } } }'
+                % sku.replace("'", "\\'")))
+            for edge in res.get('data', {}).get('productVariants', {}).get('edges', []):
+                node = edge.get('node', {})
+                if (node.get('sku') or '').strip() == sku:
+                    pid = int(node['product']['legacyResourceId'])
+                    break
+            if not pid:
+                missing.append(sku)
+                continue
+            prod = shopify.Product.find(pid)
+            prod.published_at = datetime.utcnow().isoformat()
+            prod.published_scope = 'web'
+            if prod.save():
+                touched.append(sku)
+            else:
+                failed.append({'sku': sku, 'errors': str(prod.errors.full_messages())})
+        except Exception as e:
+            failed.append({'sku': sku, 'error': str(e)})
+
+    log_event('Product Sync', 'Info',
+              f"Re-index touch: re-saved {len(touched)} published product(s) missing from "
+              f"storefront search ({len(missing)} not found, {len(failed)} failed).",
+              shop_url=shop_url)
+    return jsonify({'touched': touched, 'not_found': missing, 'failed': failed})
+
+
 @app.route('/sync/self_heal', methods=['GET', 'POST'])
 @require_shopify_session
 def trigger_self_heal():

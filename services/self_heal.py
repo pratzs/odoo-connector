@@ -33,11 +33,14 @@ ALERTS (reported, never auto-applied)
      a warehouse decision (a receiving bay usually yes, a damaged-goods bin
      never), so this is surfaced with real numbers rather than auto-enabled.
 
-  4. Clearance stock that no listing can sell.
-     A lot with no best-before date is refused by the clearance pass, and the
-     clearance location is excluded from the main sync, so undated clearance
-     stock is counted by nobody. Selling it automatically would put undated
-     food on the site, so this is surfaced for Worthy to date or write off.
+  4. Clearance stock with no best-before date (INFORMATIONAL ONLY).
+     Confirmed as the intended rule: clearance only ever lists stock that
+     carries a best-before date in Odoo, so a lot with no BBD is refused by the
+     clearance pass, and the clearance location is excluded from the main sync.
+     Undated clearance stock is therefore MEANT to be absent from the site.
+     This is never repaired and never warned about; the figure is recorded and
+     mentioned only when it changes, so adding a BBD in Odoo remains the one
+     way to list any of it.
 
 SETTLING
      Each run records how many repairs it made. Consecutive runs must reach
@@ -187,7 +190,7 @@ def perform_self_heal(shop_url, apply_changes=True):
         'republish_failed': [],
         'bases_restored': [],
         'uncounted_locations': [],
-        'unsellable_clearance': [],
+        'undated_clearance': {},
         'repairs_made': 0,
     }
 
@@ -287,14 +290,24 @@ def perform_self_heal(shop_url, apply_changes=True):
                         if q.get('product_id'):
                             undated_pids.add(q['product_id'][0])
                 if undated_pids:
-                    report['unsellable_clearance'] = {
+                    report['undated_clearance'] = {
                         'products': len(undated_pids), 'units': undated_units}
-                    log_event('Self-Heal', 'Warning',
-                              f"{undated_units:.0f} unit(s) across {len(undated_pids)} product(s) sit "
-                              f"in Clearance with no best-before date. The clearance listing refuses "
-                              f"undated stock and the normal listing excludes the clearance location, "
-                              f"so nothing can sell them. Add a best-before date in Odoo or write "
-                              f"the stock off.", shop_url=shop_url)
+                    # This is the CONFIGURED RULE, not a fault: clearance stock
+                    # is only ever listed when Odoo carries a best-before date,
+                    # so undated stock is meant to stay off the site. Logging it
+                    # as a Warning every hour would fire for ever with nothing to
+                    # act on. Record the figure, and only say so when it moves.
+                    from utils import set_config as _set_config
+                    prev = get_config('self_heal_undated_clearance', None, shop_url=shop_url)
+                    now_val = f"{len(undated_pids)}:{undated_units:.0f}"
+                    if str(prev) != now_val:
+                        log_event('Self-Heal', 'Info',
+                                  f"Clearance holding {undated_units:.0f} unit(s) across "
+                                  f"{len(undated_pids)} product(s) with no best-before date in Odoo. "
+                                  f"Correctly not listed — clearance only shows stock that carries a "
+                                  f"BBD. Figure shown because it changed; add a BBD in Odoo to list "
+                                  f"any of it.", shop_url=shop_url)
+                        _set_config('self_heal_undated_clearance', now_val, shop_url=shop_url)
         except Exception as e:
             log_event('Self-Heal', 'Warning', f"Clearance check failed: {e}", shop_url=shop_url)
 
