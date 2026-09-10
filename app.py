@@ -763,6 +763,16 @@ ENTITY_INTERVALS = {
 ENTITY_STALE_MULTIPLIER = 2
 
 
+def run_self_heal(shop_url):
+    """Storefront self-heal pass. Repairs products that read as correct in
+    Odoo, in the Shopify admin and in every sync log, yet are unbuyable on the
+    site, and raises the ones only a human can decide. See
+    services/self_heal.py."""
+    from services.self_heal import perform_self_heal
+    with app.app_context():
+        perform_self_heal(shop_url, apply_changes=True)
+
+
 def _update_sync_health(shop_url, entity, success, error=None):
     """Update the SyncHealth row for this shop+entity. Safe to call from any worker."""
     try:
@@ -2062,6 +2072,10 @@ def force_schedule():
         q_default.enqueue(sync_health_monitor, shop_url, job_timeout=120)
         queued.append("✅ Health Monitor")
 
+        conn.delete(f"last_self_heal_{shop_url}")
+        q_default.enqueue(run_self_heal, shop_url, job_timeout=1800, retry=retry_slow)
+        queued.append("✅ Storefront Self-Heal")
+
     except Exception as e:
         errors.append(f"Error: {str(e)}")
 
@@ -3105,6 +3119,13 @@ def _run_shop_schedule(shop_url):
         conn.setex(f"last_inv_{shop_url}", 1800, "done")
         print(f"⏰ Triggered Inventory Sync for {shop_url}")
 
+    # 1b. Storefront Self-Heal (Every hour)
+    # Runs after inventory so it judges the storefront on fresh stock numbers.
+    if not conn.get(f"last_self_heal_{shop_url}"):
+        q_default.enqueue(run_self_heal, shop_url, job_timeout=1800, retry=retry_slow)
+        conn.setex(f"last_self_heal_{shop_url}", 3600, "done")
+        print(f"⏰ Triggered Self-Heal for {shop_url}")
+
     # 2. Fulfillment Sync (Every hour)
     if not conn.get(f"last_ful_{shop_url}"):
         q_critical.enqueue(run_fulfillment_sync, shop_url, job_timeout=600, retry=retry_fast)
@@ -3563,6 +3584,18 @@ def api_run_deep_diagnose():
         return jsonify({"success": True, "report": f.getvalue()})
     except Exception as e:
         return jsonify({"success": False, "report": f"CRITICAL SYSTEM ERROR: {str(e)}"})
+
+
+@app.route('/sync/self_heal', methods=['GET', 'POST'])
+@require_shopify_session
+def trigger_self_heal():
+    """Run the storefront self-heal now. Add ?dry=1 to report without repairing."""
+    shop_url = request.args.get('shop')
+    if request.args.get('dry') in ('1', 'true', 'yes'):
+        from services.self_heal import perform_self_heal
+        return jsonify(perform_self_heal(shop_url, apply_changes=False))
+    job = q_default.enqueue(run_self_heal, shop_url, job_timeout=1800)
+    return jsonify({"message": f"Self-Heal Queued (Job ID: {job.id})"})
 
 
 @app.route('/maintenance/publication_audit', methods=['GET'])
