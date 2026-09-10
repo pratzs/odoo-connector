@@ -4,7 +4,8 @@ import hashlib
 import json
 import shopify
 # NOTE: We do NOT import app at the top to avoid circular import crashes.
-from utils import get_odoo_connection, setup_shopify_session
+from utils import (get_odoo_connection, setup_shopify_session,
+                   get_config, get_shop_company_id)
 from models import ProductMap, CustomerMap, SyncLog
 
 # ==========================================
@@ -57,8 +58,21 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
             # 2. CHECK ODOO DATA (Active Only)
             print(f"\n   👉 ODOO DATA (Active Only):")
             
-            # --- STRICTLY ACTIVE PRODUCTS ONLY ---
+            # --- STRICTLY ACTIVE PRODUCTS, THIS SHOP'S COMPANY ONLY ---
+            # Without the company filter the duplicate check below counts
+            # same-SKU products belonging to OTHER Odoo companies and raises a
+            # false "CRITICAL WARNING: 2 ACTIVE PRODUCTS" on catalogues that
+            # are in fact clean. The sync itself is company-filtered, so the
+            # diagnosis must be too or it reports a problem that isn't there.
+            company_id = get_shop_company_id(shop_url)
+            try:
+                company_id = int(company_id) if company_id else None
+            except (TypeError, ValueError):
+                company_id = None
+
             domain = [['default_code', '=', target_sku], ['active', '=', True]]
+            if company_id:
+                domain += ['|', ['company_id', '=', company_id], ['company_id', '=', False]]
             
             # Fields for Pack Logic, Validation, and Stock
             fields = ['name', 'active', 'sale_ok', 'barcode', 'list_price', 
@@ -73,6 +87,7 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
             
             odoo_prod = None
             odoo_stock = 0
+            sellable_stock = None
 
             if not odoo_results:
                 print("      ❌ NOT FOUND IN ODOO (No Active Product with this Internal Reference).")
@@ -97,9 +112,48 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
                 print(f"      - Price: {odoo_prod['list_price']}")
                 print(f"      - Barcode: {odoo_prod['barcode'] or 'None'}")
                 
-                # --- STOCK FETCH (Simple 'qty_available') ---
+                # --- STOCK FETCH ---
+                # qty_available covers EVERY internal location. The storefront
+                # only ever shows `inventory_locations` (child_of) minus
+                # `inventory_locations_exclude`, so comparing qty_available to
+                # the Shopify quantity below produces a "mismatch" that is
+                # really stock parked somewhere the website never sells from.
+                # Print both, plus the per-location split, so the two numbers
+                # can be told apart.
                 odoo_stock = odoo_prod.get('qty_available', 0)
-                print(f"      - Stock (On Hand): {odoo_stock}")
+                print(f"      - Stock (On Hand, ALL internal locations): {odoo_stock}")
+
+                try:
+                    target_locs = [int(x) for x in (get_config('inventory_locations', [], shop_url=shop_url) or [])]
+                    exclude_locs = [int(x) for x in (get_config('inventory_locations_exclude', [], shop_url=shop_url) or [])]
+                    quants = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                        'stock.quant', 'search_read',
+                        [[['product_id', '=', odoo_prod['id']]]],
+                        {'fields': ['location_id', 'quantity', 'reserved_quantity']})
+                    if target_locs:
+                        cdomain = [['product_id', '=', odoo_prod['id']],
+                                   ['location_id', 'child_of', target_locs]]
+                        if exclude_locs:
+                            cdomain.append(['location_id', 'not in', exclude_locs])
+                        cg = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                            'stock.quant', 'read_group',
+                            [cdomain, ['product_id', 'quantity'], ['product_id']])
+                        sellable_stock = sum(float(g.get('quantity') or 0.0) for g in (cg or []))
+                        print(f"      - Stock COUNTED FOR THE WEBSITE (locations {target_locs} "
+                              f"minus {exclude_locs or 'none'}): {sellable_stock}")
+                        gap = float(odoo_stock or 0) - sellable_stock
+                        if gap > 0:
+                            print(f"      ⚠️  {gap:.0f} unit(s) are on hand but in a location the "
+                                  f"website never sells from:")
+                    by_loc = {}
+                    for q in quants:
+                        loc = q.get('location_id') or [None, '?']
+                        by_loc[loc[1]] = by_loc.get(loc[1], 0.0) + float(q.get('quantity') or 0.0)
+                    for name, qty in sorted(by_loc.items(), key=lambda kv: -kv[1]):
+                        if qty:
+                            print(f"           {qty:>10.0f}  {name}")
+                except Exception as e:
+                    print(f"      ⚠️ Location breakdown failed: {e}")
 
                 # --- PACK VS UNIT CHECK ---
                 is_pack = odoo_prod.get('sh_is_secondary_unit')
@@ -142,6 +196,9 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
                         barcode
                         product {
                           title
+                          status
+                          publishedAt
+                          onlineStoreUrl
                         }
                       }
                     }
@@ -170,9 +227,24 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
                         is_mapped = (v_id_numeric == mapped_shopify_id_numeric)
                         marker = "👈 (CORRECT / MAPPED)" if is_mapped else "❌ (DUPLICATE / WRONG)"
                         
-                        print(f"      🔹 Product: {node['product']['title']}")
+                        prod_node = node.get('product') or {}
+                        status = prod_node.get('status')
+                        published = prod_node.get('publishedAt')
+                        online_url = prod_node.get('onlineStoreUrl')
+                        print(f"      🔹 Product: {prod_node.get('title')}")
                         print(f"         Variant ID: {v_id_numeric} {marker}")
                         print(f"         Price: {node['price']} | Stock: {node['inventoryQuantity']}")
+                        # Why a product can sit in the admin yet be absent from
+                        # the storefront: it is DRAFT, or it is ACTIVE but not
+                        # published to the Online Store channel. These look
+                        # identical to a merchant, so name which one it is.
+                        print(f"         Status: {status} | Published: {published or 'NOT PUBLISHED'}")
+                        if status != 'ACTIVE':
+                            print(f"         ⚠️ VISIBLE IN ADMIN ONLY — status is {status}, "
+                                  f"so the storefront cannot show it.")
+                        elif not online_url:
+                            print(f"         ⚠️ VISIBLE IN ADMIN ONLY — active but not published "
+                                  f"to the Online Store sales channel.")
                         
                         if is_mapped:
                             target_shopify_variant = node
@@ -198,13 +270,20 @@ def run_diagnosis(shop_url, target_sku=None, target_email=None):
                 else:
                     print(f"      - Price: ❌ MISMATCH (Odoo: {odoo_price} vs Shopify: {shopify_price})")
                 
-                # Stock Check
+                # Stock Check — compare against the quantity the sync actually
+                # pushes (target locations minus excludes), NOT qty_available.
+                # Comparing qty_available reported a MISMATCH on every product
+                # holding stock in a non-selling location (Inwards, Damaged,
+                # Clearance), which is expected behaviour, not a fault.
                 shopify_stock = int(v['inventoryQuantity'])
-                # Using simple 'qty_available' fetched earlier
-                if int(odoo_stock) == shopify_stock:
-                    print(f"      - Stock: ✅ Match ({shopify_stock})")
+                compare_stock = sellable_stock if sellable_stock is not None else odoo_stock
+                if int(compare_stock) == shopify_stock:
+                    print(f"      - Stock: ✅ Match ({shopify_stock} sellable)")
+                    if sellable_stock is not None and float(odoo_stock or 0) > sellable_stock:
+                        print(f"        (note: {float(odoo_stock) - sellable_stock:.0f} more unit(s) on hand "
+                              f"in locations the website does not sell from — see the breakdown above)")
                 else:
-                    print(f"      - Stock: ❌ MISMATCH (Odoo: {odoo_stock} vs Shopify: {shopify_stock})")
+                    print(f"      - Stock: ❌ MISMATCH (Odoo sellable: {compare_stock} vs Shopify: {shopify_stock})")
                 
                 # Barcode Check
                 sp_barcode = v.get('barcode') or ''

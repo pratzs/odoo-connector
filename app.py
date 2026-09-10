@@ -20,6 +20,7 @@ from urllib.parse import urlparse, parse_qs
 from flask import Flask, request, jsonify, render_template, session, url_for, render_template_string, redirect
 from contextlib import redirect_stdout
 import io
+import threading
 from diagnose import run_diagnosis
 from datetime import datetime, timedelta
 from functools import wraps
@@ -1824,9 +1825,9 @@ def maintenance_stock_check():
                 if all_ids:
                     tmpl_quants = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                         'stock.quant', 'read_group',
-                        [[['product_id', 'in', all_ids]]],
-                        ['product_id', 'quantity', 'reserved_quantity'],
-                        ['product_id'])
+                        [[['product_id', 'in', all_ids]],
+                         ['product_id', 'quantity', 'reserved_quantity'],
+                         ['product_id']])
                     if not tmpl_quants:
                         lines.append("  (no quant rows for any variant under this template)")
                     for tq in tmpl_quants:
@@ -3536,6 +3537,9 @@ def api_get_unmapped_products():
         return jsonify({'error': str(e)}), 500
         
 
+_DIAGNOSE_STDOUT_LOCK = threading.Lock()
+
+
 @app.route('/api/diagnose/run', methods=['POST'])
 @require_shopify_session
 def api_run_deep_diagnose():
@@ -3547,11 +3551,15 @@ def api_run_deep_diagnose():
     if not sku and not email:
         return jsonify({"success": False, "report": "Please provide a SKU or Email."})
 
+    # redirect_stdout swaps a PROCESS-global, so two concurrent callers used to
+    # capture each other's output and return interleaved, wrong-SKU reports.
+    # Serialise the capture — the scan is short and this endpoint is manual.
     f = io.StringIO()
     try:
-        with redirect_stdout(f):
-            print(f"🚀 Launching Deep Scan for {shop_url}...\n")
-            run_diagnosis(shop_url, target_sku=sku, target_email=email)
+        with _DIAGNOSE_STDOUT_LOCK:
+            with redirect_stdout(f):
+                print(f"🚀 Launching Deep Scan for {shop_url}...\n")
+                run_diagnosis(shop_url, target_sku=sku, target_email=email)
         return jsonify({"success": True, "report": f.getvalue()})
     except Exception as e:
         return jsonify({"success": False, "report": f"CRITICAL SYSTEM ERROR: {str(e)}"})
@@ -3632,10 +3640,45 @@ def api_diagnose_stock():
             if all_variant_ids:
                 tmpl_quants = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
                     'stock.quant', 'read_group',
-                    [[['product_id', 'in', all_variant_ids]]],
-                    ['product_id', 'quantity', 'reserved_quantity'],
-                    ['product_id'])
+                    [[['product_id', 'in', all_variant_ids]],
+                     ['product_id', 'quantity', 'reserved_quantity'],
+                     ['product_id']])
                 result['template_quants_by_variant'] = tmpl_quants
+
+        # 5. Verdict: split this product's on-hand stock into what the
+        #    connector actually counts for the storefront vs what it drops.
+        #    qty_available in Odoo covers EVERY internal location; the sync
+        #    counts only `inventory_locations` (child_of) minus
+        #    `inventory_locations_exclude`. Anything else is stock the shop
+        #    holds but the website can never sell, which is the single most
+        #    common cause of "in stock in Odoo, sold out on the site".
+        try:
+            target_locs = [int(x) for x in (get_config('inventory_locations', [], shop_url=shop_url) or [])]
+            exclude_locs = [int(x) for x in (get_config('inventory_locations_exclude', [], shop_url=shop_url) or [])]
+            counted = 0.0
+            if target_locs:
+                cdomain = [['product_id', '=', pid], ['location_id', 'child_of', target_locs]]
+                if exclude_locs:
+                    cdomain.append(['location_id', 'not in', exclude_locs])
+                cgroups = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password,
+                    'stock.quant', 'read_group',
+                    [cdomain, ['product_id', 'quantity'], ['product_id']])
+                counted = sum(float(g.get('quantity') or 0.0) for g in (cgroups or []))
+            on_hand = sum(float(q.get('quantity') or 0.0) for q in quants)
+            by_location = {}
+            for q in quants:
+                loc = q.get('location_id') or [None, '?']
+                by_location[loc[1]] = by_location.get(loc[1], 0.0) + float(q.get('quantity') or 0.0)
+            result['storefront_stock'] = {
+                'counted_by_sync': counted,
+                'total_on_hand': on_hand,
+                'uncounted': on_hand - counted,
+                'target_locations': target_locs,
+                'excluded_locations': exclude_locs,
+                'by_location': by_location,
+            }
+        except Exception as e:
+            result['storefront_stock'] = {'error': str(e)}
 
         return jsonify(result)
 
