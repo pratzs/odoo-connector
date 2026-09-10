@@ -138,7 +138,22 @@ def _uncounted_stock_locations(odoo, shop_url, company_id):
         [counted_domain])
     counted_ids = set(counted) - set(exclude_locs)
 
-    uncounted_ids = [i for i in names if i not in counted_ids]
+    # Locations the operator has DELIBERATELY carved out are not faults:
+    # inventory_locations_exclude is an explicit "do not sell from here", and
+    # clearance_locations are handled by the clearance pass instead. Alerting
+    # on those would fire every hour for ever, and an alert that never settles
+    # is an alert nobody reads. Only locations nobody has ruled on are faults.
+    clearance_locs = _int_list(get_config('clearance_locations', [], shop_url=shop_url))
+    deliberate = set(exclude_locs) | set(clearance_locs)
+    if deliberate:
+        try:
+            deliberate |= set(odoo.models.execute_kw(
+                odoo.db, odoo.uid, odoo.password, 'stock.location', 'search',
+                [[['id', 'child_of', list(deliberate)]]]))
+        except Exception:
+            pass
+
+    uncounted_ids = [i for i in names if i not in counted_ids and i not in deliberate]
     if not uncounted_ids:
         return [], counted_ids
 
