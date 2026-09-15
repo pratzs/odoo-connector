@@ -1,4 +1,9 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+#
+# SOURCE OF TRUTH. This app runs on MANAGED INSTALL (use_legacy_install_flow = false),
+# which means Shopify grants exactly the scopes declared HERE and ignores the `scope=`
+# parameter the app builds in its own OAuth URL (app.py, SCOPES constant). If a scope is
+# missing from this file the call fails at runtime with no install-time warning.
 
 client_id = "014f33e964598705ca20a71531a032a4"
 name = "Live Connector for Odoo"
@@ -9,16 +14,41 @@ embedded = true
 api_version = "2025-10"
 
   [[webhooks.subscriptions]]
-  topics = [
-  "orders/create",
-  "orders/cancelled",
-  "inventory_levels/update"
-]
   uri = "/webhooks/shopify"
+  topics = [
+  "orders/cancelled",
+  "inventory_levels/update",
+  "orders/create"
+]
+
+  # Mandatory compliance webhooks. The handlers exist in app.py
+  # (/gdpr/customers/data_request, /gdpr/customers/redact, /gdpr/shop/redact) but were
+  # not declared here, so Shopify was never told where to send them.
+  [[webhooks.subscriptions]]
+  uri = "/gdpr/customers/data_request"
+  compliance_topics = [ "customers/data_request" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/gdpr/customers/redact"
+  compliance_topics = [ "customers/redact" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/gdpr/shop/redact"
+  compliance_topics = [ "shop/redact" ]
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_customers,read_fulfillments,read_inventory,read_locations,read_merchant_managed_fulfillment_orders,read_orders,read_products,read_third_party_fulfillment_orders,write_customers,write_fulfillments,write_inventory,write_merchant_managed_fulfillment_orders,write_orders,write_products,write_third_party_fulfillment_orders"
+#
+# Derived from what the code actually calls, not from the app's SCOPES constant (which
+# asks for 38 and is dead under managed install). read_companies/write_companies are the
+# only additions to the previously declared set: services/customers.py calls companyCreate,
+# companyLocationCreate, companyContactCreate and companyContactRoleAssign, none of which
+# were granted. Deliberately NOT declared, because nothing in the codebase calls them:
+# product_listings, files, reports, shipping, price_rules, discounts, draft_orders,
+# assigned_fulfillment_orders, write_locations, write_payments, returns. read_all_orders is
+# not needed either: the order poll looks back 48 hours (app.py), well inside the 60-day
+# window that scope exists to widen.
+scopes = "read_companies,read_customers,read_fulfillments,read_inventory,read_locations,read_merchant_managed_fulfillment_orders,read_orders,read_products,read_third_party_fulfillment_orders,write_companies,write_customers,write_fulfillments,write_inventory,write_merchant_managed_fulfillment_orders,write_orders,write_products,write_third_party_fulfillment_orders"
 optional_scopes = [ ]
 use_legacy_install_flow = false
 

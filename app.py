@@ -108,6 +108,12 @@ SHOPIFY_API_SECRET = os.getenv('SHOPIFY_API_SECRET')
 APP_URL = os.getenv('HOST')
 SHOPIFY_API_VERSION = os.getenv('SHOPIFY_API_VERSION', '2025-10')
 
+# NOTE: this constant is DEAD under managed install. shopify.app.toml sets
+# use_legacy_install_flow = false, so Shopify grants exactly the scopes declared in that
+# file and ignores the `scope=` parameter built from this list at /auth (below).
+# It asks for 38; only 17 are declared and granted. Do not "fix" a permissions error by
+# editing this list, it will change nothing. Edit access_scopes in shopify.app.toml,
+# then redeploy the app config, which requires every merchant to re-approve.
 SCOPES = (
     "read_products,write_products,"
     "read_product_listings,write_product_listings,"
