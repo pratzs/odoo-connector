@@ -41,6 +41,13 @@ webhooks declared**. Their handlers have existed in `app.py` all along
 (`/gdpr/customers/data_request`, `/gdpr/customers/redact`, `/gdpr/shop/redact`) but were never
 declared, so Shopify was never told where to send them.
 
+An `app/uninstalled` subscription (`/webhooks/app_uninstalled`) is also declared (2026-09-25).
+Before that, only the per-shop REST registration in `utils.automate_webhook_registration`
+subscribed it, and the handler itself failed on every call (it set the NOT NULL
+`shop.access_token` to None), so uninstalled shops were never deactivated. Adding a webhook does
+not need merchant re-approval, but it ships in the same `shopify app deploy` as the scope change
+above, so the same window applies.
+
 ## Deploying this is NOT routine
 
 `shopify app deploy` here changes `access_scopes` on a **live client system** (Worthy, Shopify
