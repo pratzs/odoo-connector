@@ -21,6 +21,14 @@ api_version = "2025-10"
   "orders/create"
 ]
 
+  # Uninstall. The per-shop REST registration in utils.automate_webhook_registration also
+  # subscribes this, but only for shops that completed the OAuth callback on this code; the
+  # app-level subscription covers every install. The handler is idempotent, so a duplicate
+  # delivery is harmless.
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app_uninstalled"
+  topics = [ "app/uninstalled" ]
+
   # Mandatory compliance webhooks. The handlers exist in app.py
   # (/gdpr/customers/data_request, /gdpr/customers/redact, /gdpr/shop/redact) but were
   # not declared here, so Shopify was never told where to send them.

@@ -48,7 +48,10 @@ from utils import (
     setup_shopify_session,
     automate_webhook_registration,
     send_inventory_alert,
-    search_odoo_products
+    search_odoo_products,
+    SMTP_SERVER,
+    SMTP_PORT,
+    SMTP_FROM,
 )
 # --- SERVICES ---
 from services.orders import process_order_data
@@ -62,6 +65,7 @@ from services.products import (
 from services.customers import sync_customers_master
 from services.refunds import process_refund_data
 from services.returns import sync_odoo_returns
+from services import gdpr as gdpr_service
 
 try:
     from services.cancellations import process_cancellation, sync_odoo_cancellations
@@ -1209,23 +1213,20 @@ def app_uninstalled():
     if not verify_shopify(raw_body, hmac_header):
         return "Unauthorized", 401
         
-    data = request.get_json()
     shop_url = request.headers.get('X-Shopify-Shop-Domain')
+    if not shop_url:
+        return "OK", 200
 
     try:
-        shop = Shop.query.filter_by(shop_url=shop_url).first()
-        if shop:
-            shop.is_active = False
-            shop.access_token = None  # Remove token for security
-            db.session.commit()
-            print(f"👋 Shop Uninstalled: {shop_url}. Marked as inactive.")
-            
-            # Optional: Log a system-wide event
-            log_event('System', 'Notice', f"App uninstalled by {shop_url}", shop_url=shop_url)
-            
+        # Shop.access_token is NOT NULL (models.py): the old code set it to None,
+        # the commit raised, and the shop was never deactivated. mark_uninstalled
+        # blanks it instead; see services/gdpr.py.
+        if gdpr_service.mark_uninstalled(shop_url):
+            print(f"Shop uninstalled: {shop_url}. Marked inactive, token cleared.")
         return "OK", 200
     except Exception as e:
-        print(f"Error handling uninstall for {shop_url}: {e}")
+        db.session.rollback()
+        print(f"Error handling uninstall for {shop_url}: {type(e).__name__}")
         return "Error", 500
 
 @app.route('/', methods=['GET'])
@@ -2007,7 +2008,8 @@ def register_webhooks_manual():
         return jsonify({"error": "HOST env var missing"}), 500
 
     target_address = f"{app_host}/webhooks/shopify"
-    
+    uninstall_address = f"{app_host}/webhooks/app_uninstalled"
+
     required_topics = [
         'orders/create',
         'orders/updated',
@@ -2015,8 +2017,11 @@ def register_webhooks_manual():
         'orders/cancelled',
         'products/create',
         'refunds/create',
-        'inventory_levels/update'
+        'inventory_levels/update',
+        'app/uninstalled',
     ]
+    # app/uninstalled has its own receiver; everything else goes to the general one.
+    topic_address = {'app/uninstalled': uninstall_address}
 
     results = []
     try:
@@ -2034,13 +2039,14 @@ def register_webhooks_manual():
             except Exception as e:
                 results.append(f"⚠️ Could not delete {topic}: {str(e)}")
 
+        address = topic_address.get(topic, target_address)
         new_hook = shopify.Webhook()
         new_hook.topic = topic
-        new_hook.address = target_address
+        new_hook.address = address
         new_hook.format = 'json'
         try:
             if new_hook.save():
-                results.append(f"✅ Created {topic} → {target_address}")
+                results.append(f"✅ Created {topic} → {address}")
             else:
                 results.append(f"❌ Failed {topic}: {new_hook.errors.full_messages()}")
         except Exception as e:
@@ -3525,48 +3531,82 @@ def check_for_corrupted_categories(shop_url):
 
 
 # --- GDPR WEBHOOKS ---
+# Shopify mandatory compliance webhooks. Each handler verifies the HMAC, hands
+# the work to the RQ default queue (thread fallback if Redis is unreachable)
+# and returns 200 at once. The work itself lives in services/gdpr.py and only
+# touches this app's own database, never the merchant's Odoo.
+# Logging rule: shop domain, topic, numeric ids and counts only. No emails,
+# names or payloads.
+GDPR_JOB_FAILURE_TTL = 7 * 24 * 3600   # failed jobs keep the payload in Redis; cap it
+
+
+def gdpr_job(kind, shop_url, payload):
+    """RQ entry point (defined in app.py so the worker always resolves it)."""
+    with app.app_context():
+        try:
+            if kind == 'data_request':
+                smtp = {'server': SMTP_SERVER, 'port': SMTP_PORT,
+                        'sender': SMTP_FROM, 'password': os.getenv('SMTP_PASSWORD')}
+                recipient = (get_config('alert_email', '', shop_url=shop_url) or '').strip()
+                result = gdpr_service.handle_data_request(shop_url, payload,
+                                                          recipient=recipient or None, smtp=smtp)
+            elif kind == 'customer_redact':
+                result = gdpr_service.redact_customer(shop_url, payload)
+            elif kind == 'shop_redact':
+                result = gdpr_service.redact_shop(shop_url)
+            else:
+                return
+            print(f"GDPR {kind} done for {shop_url}: {result}")
+        except Exception as e:
+            db.session.rollback()
+            print(f"GDPR {kind} failed for {shop_url}: {type(e).__name__}")
+            raise
+
+
+def _dispatch_gdpr(kind, shop_url, payload):
+    try:
+        q_default.enqueue(gdpr_job, kind, shop_url, payload,
+                          retry=Retry(max=3, interval=[60, 300, 900]),
+                          result_ttl=0, failure_ttl=GDPR_JOB_FAILURE_TTL)
+    except Exception as e:
+        print(f"GDPR {kind} enqueue failed for {shop_url} ({type(e).__name__}); running in a thread")
+        def _run():
+            try:
+                gdpr_job(kind, shop_url, payload)
+            except Exception:
+                pass
+        threading.Thread(target=_run, daemon=True).start()
+
+
+def _gdpr_webhook(kind):
+    raw_body = request.get_data()
+    if not verify_shopify(raw_body, request.headers.get('X-Shopify-Hmac-Sha256')):
+        return "Unauthorized", 401
+    shop_url = request.headers.get('X-Shopify-Shop-Domain')
+    try:
+        payload = json.loads(raw_body or b'{}')
+    except Exception:
+        payload = {}
+    shop_url = shop_url or payload.get('shop_domain')
+    if not shop_url:
+        return "Acknowledged", 200
+    _dispatch_gdpr(kind, shop_url, payload)
+    return "Acknowledged", 200
+
+
 @app.route('/gdpr/customers/data_request', methods=['POST'])
 def gdpr_customer_data_request():
-    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')):
-        return "Unauthorized", 401
-    # You are supposed to email the merchant data here. 
-    # For now, acknowledge receipt.
-    return "Acknowledged", 200
+    return _gdpr_webhook('data_request')
+
 
 @app.route('/gdpr/customers/redact', methods=['POST'])
 def gdpr_customer_redact():
-    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')):
-        return "Unauthorized", 401
-    
-    # Logic: Remove customer mapping from your DB if it exists
-    try:
-        data = request.json
-        shop_url = request.headers.get('X-Shopify-Shop-Domain')
-        shopify_customer_id = str(data.get('customer', {}).get('id'))
-        
-        with app.app_context():
-            CustomerMap.query.filter_by(shop_url=shop_url, shopify_customer_id=shopify_customer_id).delete()
-            db.session.commit()
-    except: pass
-    
-    return "Acknowledged", 200
+    return _gdpr_webhook('customer_redact')
+
 
 @app.route('/gdpr/shop/redact', methods=['POST'])
 def gdpr_shop_redact():
-    if not verify_shopify(request.get_data(), request.headers.get('X-Shopify-Hmac-Sha256')):
-        return "Unauthorized", 401
-    
-    # Logic: Mark shop as inactive or delete config
-    try:
-        shop_url = request.headers.get('X-Shopify-Shop-Domain')
-        with app.app_context():
-            shop = Shop.query.filter_by(shop_url=shop_url).first()
-            if shop:
-                shop.is_active = False # Soft delete
-                db.session.commit()
-    except: pass
-
-    return "Acknowledged", 200
+    return _gdpr_webhook('shop_redact')
 
 @app.route('/api/diagnostics/unmapped_products', methods=['GET'])
 def api_get_unmapped_products():
