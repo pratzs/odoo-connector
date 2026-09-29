@@ -2,6 +2,9 @@ Flask==3.0.0
 requests==2.31.0
 psycopg2-binary==2.9.9
 Flask-SQLAlchemy==3.1.1
+# 2.1 made psycopg (v3) the default postgresql driver; only psycopg2 is
+# installed, so an unpinned build crashed on boot (failed deploy f724787).
+SQLAlchemy>=2.0,<2.1
 gunicorn==21.2.0
 python-dotenv==1.0.0
 ShopifyAPI>=12.7.0
