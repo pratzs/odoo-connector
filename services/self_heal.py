@@ -329,6 +329,30 @@ def reconcile_stock(shop_url):
     return out
 
 
+def _update_drift_streaks(prev, now_drift):
+    """Advance the per-SKU "disagrees with Odoo" streaks by one run.
+
+    A streak only grows while the SKU shows the SAME site and Odoo figures as
+    the run before. A busy SKU is a few units off at every hourly snapshot
+    (Odoo drops when a delivery is validated, Shopify learns on the next sync),
+    but the figures keep moving because the sync keeps correcting it — that is
+    lag, not a fault. A genuinely stuck SKU sits at one frozen pair of numbers.
+    A changed pair restarts the streak at 1.
+
+    prev may be the legacy {sku: int} shape; those entries carry no figures to
+    compare, so they restart at 1 rather than guess.
+    """
+    out = {}
+    for sku, d in now_drift.items():
+        old = prev.get(sku)
+        same = (isinstance(old, dict)
+                and old.get('site') == d['on_site']
+                and old.get('odoo') == d['expected'])
+        out[sku] = {'n': int(old['n']) + 1 if same else 1,
+                    'site': d['on_site'], 'odoo': d['expected']}
+    return out
+
+
 def perform_self_heal(shop_url, apply_changes=True):
     """Run every check. Returns a dict summary; safe to call from a job or a
     dashboard button. apply_changes=False makes it a pure report."""
@@ -491,7 +515,9 @@ def perform_self_heal(shop_url, apply_changes=True):
     # high. That is lag, not a fault, and it clears itself — a one-off
     # measurement of it is worthless and alarming.
     # What matters is drift that survives repeated syncs. Count consecutive
-    # runs per SKU and only surface the ones that never converge.
+    # runs per SKU at the SAME site/Odoo figures and only surface the ones
+    # that never converge (a fast-moving SKU whose numbers keep changing is
+    # being corrected every run, so it is not stuck).
     try:
         from utils import set_config as _sc
         rec = reconcile_stock(shop_url)
@@ -503,15 +529,15 @@ def perform_self_heal(shop_url, apply_changes=True):
             prev = json.loads(prev_raw) if isinstance(prev_raw, str) else (prev_raw or {})
         except Exception:
             prev = {}
-        streaks = {sku: int(prev.get(sku, 0)) + 1 for sku in now_drift}
-        stuck = [now_drift[s] for s, n in streaks.items() if n >= 3]
+        streaks = _update_drift_streaks(prev, now_drift)
+        stuck = [now_drift[s] for s, st in streaks.items() if st['n'] >= 3]
         report['stock_drift'] = {'drifted_now': len(now_drift), 'stuck': len(stuck)}
         _sc('self_heal_drift_streak', json.dumps(streaks), shop_url=shop_url)
         if stuck:
             worst = sorted(stuck, key=lambda d: -abs(d['diff']))[:10]
             detail = "; ".join(f"{d['sku']} site={d['on_site']} odoo={d['expected']}" for d in worst)
             log_event('Self-Heal', 'Error',
-                      f"{len(stuck)} SKU(s) have disagreed with Odoo across 3+ consecutive runs, "
+                      f"{len(stuck)} SKU(s) have shown the same disagreement with Odoo across 3+ consecutive runs, "
                       f"so this is not sync lag — the sync is failing to correct them. {detail}",
                       shop_url=shop_url)
             _alert_email(shop_url,
