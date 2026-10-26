@@ -5,6 +5,41 @@ from datetime import datetime, timedelta
 from email.message import EmailMessage
 
 
+AI_MODEL = 'claude-haiku-5-5'
+# USD per million tokens (Claude Haiku 5.5, prompts <= 100K tokens). Cache writes 1.25x, reads 0.1x input.
+_PRICE = {'input': 0.10, 'output': 0.50, 'cache_write': 0.125, 'cache_read': 0.01}
+
+
+def _log_ai_usage(outcome, started, response=None, error=None):
+    """One structured [ai-usage] line per Claude call, success or failure. Never logs the key."""
+    import time
+    latency_ms = int((time.monotonic() - started) * 1000)
+    fields = {
+        'app': 'odoo-connector', 'feature': 'daily-ai-report', 'provider': 'claude',
+        'model': AI_MODEL, 'outcome': outcome, 'latency_ms': latency_ms,
+    }
+    if response is not None:
+        u = response.usage
+        inp = u.input_tokens or 0
+        out = u.output_tokens or 0
+        cr = getattr(u, 'cache_read_input_tokens', 0) or 0
+        cw = getattr(u, 'cache_creation_input_tokens', 0) or 0
+        cost = (inp * _PRICE['input'] + out * _PRICE['output'] + cr * _PRICE['cache_read'] + cw * _PRICE['cache_write']) / 1e6
+        fields.update({
+            'stop_reason': response.stop_reason, 'request_id': getattr(response, '_request_id', None),
+            'input_tokens': inp, 'output_tokens': out, 'cache_read': cr, 'cache_write': cw,
+            'est_cost_usd': f'{cost:.6f}',
+        })
+    if error is not None:
+        fields.update({
+            'error_class': type(error).__name__,
+            'http_status': getattr(error, 'status_code', None),
+            'request_id': getattr(error, 'request_id', None),
+            'est_cost_usd': '0',
+        })
+    print('[ai-usage] ' + ' '.join(f'{k}={v}' for k, v in fields.items()), flush=True)
+
+
 def generate_daily_ai_report():
     """
     Global daily job (not per-shop).
@@ -125,14 +160,31 @@ ACTION NEEDED: what the team should do today. If nothing, say "No action require
 
 Be direct, specific, and keep the total under 200 words."""
 
+    # Claude Haiku 5.5 (was Haiku 4.5): $0.10/$0.50 per MTok vs $1/$5.
+    # Haiku 5.5 thinks by default; this is a short summary that ran thinking-off on 4.5, so keep
+    # thinking off (sent via extra_body so any anthropic>=0.40 SDK accepts it).
+    # No prompt caching: this runs once a day (a 5-minute cache entry would never be read) and
+    # the fixed instructions are far below the 512-token cacheable minimum.
+    import time
+    started = time.monotonic()
     try:
         response = client.messages.create(
-            model='claude-haiku-4-5-20251001',
+            model=AI_MODEL,
             max_tokens=512,
-            messages=[{'role': 'user', 'content': prompt}]
+            messages=[{'role': 'user', 'content': prompt}],
+            extra_body={'thinking': {'type': 'disabled'}},
         )
-        report_text = response.content[0].text
+        _log_ai_usage(outcome='ok', started=started, response=response)
+        if response.stop_reason == 'refusal':
+            log_event('AI Report', 'Error', 'Claude declined to write the report (stop_reason=refusal)')
+            return
+        # Read by block type, not position: a response can start with a non-text block.
+        report_text = ''.join(b.text for b in response.content if getattr(b, 'type', None) == 'text').strip()
+        if not report_text:
+            log_event('AI Report', 'Error', f'Claude returned no report text (stop_reason={response.stop_reason})')
+            return
     except Exception as e:
+        _log_ai_usage(outcome='error', started=started, error=e)
         log_event('AI Report', 'Error', f'Claude API call failed: {e}')
         return
 
