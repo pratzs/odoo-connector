@@ -125,13 +125,30 @@ ACTION NEEDED: what the team should do today. If nothing, say "No action require
 
 Be direct, specific, and keep the total under 200 words."""
 
+    # Claude Haiku 5.5 (was Haiku 4.5): $0.10/$0.50 per MTok vs $1/$5.
+    # Haiku 5.5 thinks by default; this is a short summary that ran thinking-off on 4.5, so keep
+    # thinking off (sent via extra_body so any anthropic>=0.40 SDK accepts it).
+    # No prompt caching: this runs once a day (a 5-minute cache entry would never be read) and
+    # the fixed instructions are far below the 512-token cacheable minimum.
     try:
         response = client.messages.create(
-            model='claude-haiku-4-5-20251001',
+            model='claude-haiku-5-5',
             max_tokens=512,
-            messages=[{'role': 'user', 'content': prompt}]
+            messages=[{'role': 'user', 'content': prompt}],
+            extra_body={'thinking': {'type': 'disabled'}},
         )
-        report_text = response.content[0].text
+        usage = response.usage
+        print(f"[AI Report] model=claude-haiku-5-5 stop={response.stop_reason} in={usage.input_tokens} "
+              f"cache_write={getattr(usage, 'cache_creation_input_tokens', 0) or 0} "
+              f"cache_read={getattr(usage, 'cache_read_input_tokens', 0) or 0} out={usage.output_tokens}")
+        if response.stop_reason == 'refusal':
+            log_event('AI Report', 'Error', 'Claude declined to write the report (stop_reason=refusal)')
+            return
+        # Read by block type, not position: a response can start with a non-text block.
+        report_text = ''.join(b.text for b in response.content if getattr(b, 'type', None) == 'text').strip()
+        if not report_text:
+            log_event('AI Report', 'Error', f'Claude returned no report text (stop_reason={response.stop_reason})')
+            return
     except Exception as e:
         log_event('AI Report', 'Error', f'Claude API call failed: {e}')
         return
