@@ -14,6 +14,73 @@ from utils import get_odoo_connection, log_event, setup_shopify_session, get_con
 # =====================================================
 # 0. HELPER FUNCTIONS
 # =====================================================
+# --- Product exclusion rules (Settings > Product Settings) ---
+# A rule is {'field': 'category'|'tag'|'price', 'op': ..., 'value': ...}. A product matching ANY
+# rule is not synced to Shopify. Rules are evaluated live, so a product starts syncing as soon as it
+# stops matching (e.g. price 0 -> 5). The same rules exist in two forms that must stay in step:
+# build_exclusion_domain() narrows Odoo searches up front (so excluded products never fill the
+# fast-lane "newest N" cap), get_exclusion_match() is the per-product guard in the batch worker.
+_PRICE_OPS = {'eq': '=', 'lt': '<', 'lte': '<=', 'gt': '>', 'gte': '>='}
+
+def _clean_exclusion_rules(rules):
+    clean = []
+    for r in rules if isinstance(rules, list) else []:
+        if not isinstance(r, dict): continue
+        field, op, val = r.get('field'), r.get('op'), str(r.get('value', '')).strip()
+        if not val: continue
+        if field == 'price':
+            try: float(val)
+            except ValueError: continue
+            if op not in _PRICE_OPS: continue
+        elif field == 'category':
+            if op not in ('contains', 'eq'): continue
+        elif field == 'tag':
+            if op not in ('contains', 'eq'): continue
+        else:
+            continue
+        clean.append({'field': field, 'op': op, 'value': val})
+    return clean
+
+def get_exclusion_rules(shop_url):
+    return _clean_exclusion_rules(get_config('prod_exclusion_rules', [], shop_url=shop_url))
+
+def _like_escape(val):
+    return val.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+
+def build_exclusion_domain(rules):
+    """Odoo domain terms that keep out every product matching any rule (AND of negated rules)."""
+    terms = []
+    for r in _clean_exclusion_rules(rules):
+        field, op, val = r['field'], r['op'], r['value']
+        if field == 'price':
+            leaf = ('list_price', _PRICE_OPS[op], float(val))
+        elif field == 'category':
+            leaf = ('categ_id.complete_name', 'ilike', val) if op == 'contains' else ('categ_id.complete_name', '=ilike', _like_escape(val))
+        else:
+            leaf = ('product_tag_ids.name', 'ilike', val) if op == 'contains' else ('product_tag_ids.name', '=ilike', _like_escape(val))
+        terms += ['!', list(leaf)]
+    return terms
+
+def get_exclusion_match(p, rules, tag_names):
+    """Returns a short description of the first rule an Odoo product matches, else None.
+    p is a product.product read (needs list_price, categ_id); tag_names is that product's tag names."""
+    for r in rules:
+        field, op, val = r['field'], r['op'], r['value'].lower()
+        if field == 'price':
+            price, target = float(p.get('list_price') or 0.0), float(val)
+            hit = {'eq': price == target, 'lt': price < target, 'lte': price <= target,
+                   'gt': price > target, 'gte': price >= target}[op]
+        elif field == 'category':
+            name = (p['categ_id'][1] if p.get('categ_id') else '').lower()
+            hit = (name == val) if op == 'eq' else (val in name)
+        else:
+            names = [t.lower() for t in tag_names]
+            hit = (val in names) if op == 'eq' else any(val in n for n in names)
+        if hit:
+            return f"{field} {op} {r['value']}"
+    return None
+
+
 def find_variant_in_cache(sku, shopify_product_cache):
     clean_sku = str(sku).strip()
     return shopify_product_cache.get(clean_sku)
@@ -120,8 +187,8 @@ def sync_products_master(shop_url):
             '|',
             ['company_id', '=', int(company_id)],
             ['company_id', '=', False]
-        ]
-        
+        ] + build_exclusion_domain(get_exclusion_rules(shop_url))
+
         try:
             product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search', [domain])
         except Exception as e:
@@ -171,11 +238,11 @@ def sync_all_products_absolute_master(shop_url):
             ['sale_ok', '=', True], 
             ['type', 'in', ['product', 'consu']], 
             ['active', '=', True], 
-            '|', 
+            '|',
             ['company_id', '=', int(company_id)],
             ['company_id', '=', False]
-        ]
-        
+        ] + build_exclusion_domain(get_exclusion_rules(shop_url))
+
         try:
             product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search', [domain])
         except Exception as e:
@@ -231,7 +298,8 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
                      'prod_sync_tags', 'prod_sync_images', 'prod_sync_vendor', 'prod_sync_barcode',
                      'prod_auto_create', 'prod_auto_publish',
                      'prod_sync_meta_original_price', 'prod_sync_meta_vendor_code',
-                     'prod_sync_meta_qty_per_pack', 'prod_sync_meta_pack_size'}
+                     'prod_sync_meta_qty_per_pack', 'prod_sync_meta_pack_size',
+                     'prod_exclusion_rules'}
         _rows = AppSetting.query.filter(
             AppSetting.shop_url == shop_url,
             AppSetting.key.in_(_cfg_keys)
@@ -258,6 +326,7 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
             'meta_vendor_code':    _raw.get('prod_sync_meta_vendor_code', False),
             'meta_qty_per_pack':   _raw.get('prod_sync_meta_qty_per_pack', False),
             'meta_pack_size':      _raw.get('prod_sync_meta_pack_size', False),
+            'exclusion_rules':     _clean_exclusion_rules(_raw.get('prod_exclusion_rules', [])),
             'currency': currency
         }
 
@@ -266,6 +335,8 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
                   'uom_id', 'sh_is_secondary_unit', 'sh_secondary_uom',
                   'public_categ_ids', 'product_tag_ids', 'description_sale',
                   'image_1920', 'barcode', 'qty_per_pack', 'product_tmpl_id']
+        if cfg['exclusion_rules']:
+            fields.append('categ_id')
         if cfg['meta_pack_size']:
             fields.append('uom_po_id')
 
@@ -343,7 +414,19 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
             db_map_dict = {m.sku: m for m in maps}
             
         # --- C. PROCESS LOOP ---
-        stats = {'created': 0, 'updated': 0, 'archived': 0, 'skipped': 0}
+        stats = {'created': 0, 'updated': 0, 'archived': 0, 'skipped': 0, 'excluded': 0}
+
+        # Drop products matching an exclusion rule before any Shopify lookups are spent on them.
+        # The searches already filter these out; this guards other enqueuers and rule changes
+        # made while a batch was queued.
+        if cfg['exclusion_rules']:
+            kept = []
+            for p in products:
+                if p.get('active') and get_exclusion_match(p, cfg['exclusion_rules'], [tag_map.get(t, '') for t in p.get('product_tag_ids', [])]):
+                    stats['excluded'] += 1
+                else:
+                    kept.append(p)
+            products = kept
 
         # --- BULK SKU LOOKUP (1 GraphQL call for entire batch instead of 1 per product) ---
         bulk_shopify_cache = {}
@@ -412,7 +495,8 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
                 print(f"Error syncing {p.get('default_code')}: {e}")
 
         gc.collect()
-        log_event('Product Sync', 'Info', f"✅ {batch_name}: New: {stats['created']}, Updated: {stats['updated']}", shop_url=shop_url)
+        log_event('Product Sync', 'Info', f"✅ {batch_name}: New: {stats['created']}, Updated: {stats['updated']}"
+                  + (f", Excluded by rules: {stats['excluded']}" if stats['excluded'] else ""), shop_url=shop_url)
 
 # =====================================================
 # 3. SINGLE PRODUCT LOGIC
@@ -1421,11 +1505,11 @@ def sync_missing_new_products(shop_url):
             ['sale_ok', '=', True], 
             ['type', 'in', ['product', 'consu']], 
             ['active', '=', True], 
-            '|', 
+            '|',
             ['company_id', '=', int(company_id)],
             ['company_id', '=', False]
-        ]
-        
+        ] + build_exclusion_domain(get_exclusion_rules(shop_url))
+
         try:
             odoo_products = odoo.models.execute_kw(
                 odoo.db, odoo.uid, odoo.password, 
@@ -1493,7 +1577,7 @@ def queue_new_products_fast(shop_url, limit=100):
         ['active', '=', True],
         ['default_code', '!=', False],
         '|', ['company_id', '=', int(company_id)], ['company_id', '=', False],
-    ]
+    ] + build_exclusion_domain(get_exclusion_rules(shop_url))
     try:
         odoo_ids = odoo.models.execute_kw(
             odoo.db, odoo.uid, odoo.password, 'product.product', 'search',

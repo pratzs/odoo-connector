@@ -376,6 +376,13 @@
                     </div>
                 </div>
 
+                <div class="mb-3" id="exclusionRulesBox">
+                    <label class="form-label-sm mb-1">Exclude products from Shopify sync</label>
+                    <div class="text-muted mb-2" style="font-size: 12px;">A product matching <strong>any</strong> rule is not synced to Shopify. Rules are re-checked on every sync, so a product syncs as soon as it stops matching (e.g. its price goes above 0). Products already in Shopify are left as they are.</div>
+                    <div id="exclusionRules"></div>
+                    <button type="button" class="btn btn-sm btn-outline-secondary mt-1" id="btnAddExclusionRule" onclick="addExclusionRule()">+ Add rule</button>
+                </div>
+
                 <hr>
                 <label class="form-label-sm mb-2">Field Mapping</label>
                 <div class="d-flex flex-wrap gap-3">
@@ -1277,6 +1284,7 @@ document.addEventListener("DOMContentLoaded", function() {
     setCheck('fieldDesc', SAVED_SETTINGS.prod_sync_desc);
     setCheck('fieldProductType', SAVED_SETTINGS.prod_sync_type);
     setCheck('fieldVendor', SAVED_SETTINGS.prod_sync_vendor);
+    (Array.isArray(SAVED_SETTINGS.prod_exclusion_rules) ? SAVED_SETTINGS.prod_exclusion_rules : []).forEach(r => addExclusionRule(r));
     setCheck('fieldBarcode', SAVED_SETTINGS.prod_sync_barcode);
 
     // Orders
@@ -1433,6 +1441,47 @@ function fetchLocations(companyId) {
 
 // --- SAVE SETTINGS ---
 // --- SAVE SETTINGS (Debug Version) ---
+const EXCLUSION_OPS = {
+    category: [['contains', 'contains'], ['eq', 'is exactly']],
+    tag: [['eq', 'is'], ['contains', 'contains']],
+    price: [['lte', '<='], ['eq', '='], ['lt', '<'], ['gt', '>'], ['gte', '>=']]
+};
+
+function addExclusionRule(rule) {
+    rule = rule || {field: 'category', op: 'contains', value: ''};
+    if (!EXCLUSION_OPS[rule.field]) rule.field = 'category';
+    const row = document.createElement('div');
+    row.className = 'd-flex gap-2 mb-1 exclusion-rule';
+    row.innerHTML = `
+        <select class="form-select form-select-sm rule-field" style="max-width:130px">
+            <option value="category">Category</option>
+            <option value="tag">Tag</option>
+            <option value="price">Price</option>
+        </select>
+        <select class="form-select form-select-sm rule-op" style="max-width:130px"></select>
+        <input type="text" class="form-control form-control-sm rule-value" placeholder="value">
+        <button type="button" class="btn btn-sm btn-outline-danger rule-remove" title="Remove rule">&times;</button>`;
+    const fieldSel = row.querySelector('.rule-field'), opSel = row.querySelector('.rule-op');
+    const fillOps = (selected) => {
+        opSel.innerHTML = EXCLUSION_OPS[fieldSel.value].map(o => `<option value="${o[0]}">${o[1]}</option>`).join('');
+        if (selected) opSel.value = selected;
+    };
+    fieldSel.value = rule.field;
+    fillOps(rule.op);
+    fieldSel.addEventListener('change', () => fillOps());
+    row.querySelector('.rule-value').value = rule.value || '';
+    row.querySelector('.rule-remove').addEventListener('click', () => row.remove());
+    document.getElementById('exclusionRules').appendChild(row);
+}
+
+function collectExclusionRules() {
+    return Array.from(document.querySelectorAll('.exclusion-rule')).map(r => ({
+        field: r.querySelector('.rule-field').value,
+        op: r.querySelector('.rule-op').value,
+        value: r.querySelector('.rule-value').value.trim()
+    })).filter(r => r.value !== '');
+}
+
 function saveSettings() {
     const companyId = document.getElementById('companySelect').value;
     if (!companyId) { showToast("Please select a Company first."); return; }
@@ -1476,7 +1525,8 @@ function saveSettings() {
         prod_sync_desc: document.getElementById('fieldDesc').checked,
         prod_sync_type: document.getElementById('fieldProductType').checked,
         prod_sync_vendor: document.getElementById('fieldVendor').checked,
-        
+        prod_exclusion_rules: collectExclusionRules(),
+
         // Orders & Customers
         order_sync_tax: document.getElementById('orderSyncTax').checked,
         cust_direction: document.getElementById('custSyncDirection').value,
