@@ -2277,6 +2277,18 @@ def trigger_force_catchup():
     return jsonify({"message": f"Map Repair queued — scanning all products for missing IDs (Job: {job.get_id()})"})
 
 
+@app.route('/sync/products/new', methods=['POST'])
+@require_shopify_session
+def trigger_new_products():
+    """Fast scan for Odoo products missing from Shopify, uploaded on the fast lane."""
+    shop_url = request.args.get('shop')
+    if not shop_url:
+        return jsonify({"error": "Missing shop parameter"}), 400
+    from services.products import queue_new_products_fast
+    result = queue_new_products_fast(shop_url)
+    return jsonify(result), (200 if result.get('ok') else 502)
+
+
 # --- 3. UPDATED ROUTE: Master Sync ---
 @app.route('/sync/products/master', methods=['POST'])
 @require_shopify_session

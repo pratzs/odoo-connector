@@ -1466,6 +1466,71 @@ def sync_missing_new_products(shop_url):
         log_event('Missing Sync', 'Success', f"Force Queued {len(missing_product_ids)} unmapped Odoo products to fetch Shopify IDs and repair database.", shop_url=shop_url)
 
 
+def queue_new_products_fast(shop_url, limit=100):
+    """
+    Quick "Add new products" scan for when a rep is waiting on a product.
+
+    Unlike sync_products_master it reads ids only (no images, no write_date
+    window, no archive pass), compares them to ProductMap, and queues just the
+    unmapped ones — newest first, capped at `limit` — in small batches on the
+    fast lane so they are picked up ahead of the slow product queue.
+    Runs inside a request, so returns a summary dict for the UI instead of logging only.
+    """
+    from utils import q_critical
+
+    shop = Shop.query.filter_by(shop_url=shop_url).first()
+    company_id = shop.odoo_company_id if shop else None
+    if not company_id:
+        return {'ok': False, 'message': "No Odoo company configured for this shop."}
+
+    odoo = get_odoo_connection(shop_url)
+    if not odoo:
+        return {'ok': False, 'message': "Could not reach Odoo."}
+
+    domain = [
+        ['sale_ok', '=', True],
+        ['type', 'in', ['product', 'consu']],
+        ['active', '=', True],
+        ['default_code', '!=', False],
+        '|', ['company_id', '=', int(company_id)], ['company_id', '=', False],
+    ]
+    try:
+        odoo_ids = odoo.models.execute_kw(
+            odoo.db, odoo.uid, odoo.password, 'product.product', 'search',
+            [domain], {'order': 'id desc'})
+    except Exception as e:
+        log_event('New Products', 'Error', f"Search Failed: {e}", shop_url=shop_url)
+        return {'ok': False, 'message': f"Odoo search failed: {e}"}
+
+    mapped = {
+        pm.odoo_product_id for pm in ProductMap.query.filter_by(shop_url=shop_url).all()
+        if pm.shopify_variant_id and pm.shopify_variant_id.strip() not in ('0', '')
+    }
+    missing = [i for i in odoo_ids if i not in mapped]
+    if not missing:
+        return {'ok': True, 'found': 0, 'queued': 0,
+                'message': "No new products — every active Odoo product is already in Shopify."}
+
+    to_queue = missing[:limit]
+    BATCH_SIZE = 10
+    chunks = [to_queue[i:i + BATCH_SIZE] for i in range(0, len(to_queue), BATCH_SIZE)]
+    for index, batch_ids in enumerate(chunks):
+        q_critical.enqueue(sync_product_batch_task, shop_url, batch_ids,
+                           f"New Products {index+1}/{len(chunks)}", job_timeout=600)
+
+    log_event('New Products', 'Success',
+              f"Queued {len(to_queue)} new Odoo product(s) of {len(missing)} unmapped.", shop_url=shop_url)
+
+    message = f"Found {len(missing)} new product(s) — uploading {len(to_queue)} now."
+    if len(missing) > len(to_queue):
+        message += f" {len(missing) - len(to_queue)} older ones left; use Force Map Repair for those."
+    if not get_config('prod_auto_create', False, shop_url=shop_url):
+        message += " ⚠️ Auto-Create is OFF in settings, so nothing will be created until it is turned on."
+    elif not get_config('prod_auto_publish', False, shop_url=shop_url):
+        message += " They will land as drafts (Auto-Publish is OFF)."
+    return {'ok': True, 'found': len(missing), 'queued': len(to_queue), 'message': message}
+
+
 def refresh_metafields_for_shop(shop_url):
     """
     Force re-writes the metafields (original_retail_price + vendor_product_code + qty_per_pack)
