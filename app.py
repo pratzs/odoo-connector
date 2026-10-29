@@ -3470,6 +3470,10 @@ def emergency_purge_junk_products(shop_url):
 
         log_event('Cleanup', 'Info', f"Found {len(valid_skus)} valid SKUs. Scanning Active Shopify Products...", shop_url=shop_url)
 
+        # Event-only products (POS festival stock) never exist in Odoo on purpose: keep them.
+        from services.orders import get_order_exclusions
+        _, event_suffixes = get_order_exclusions(shop_url)
+
         # 4. Scan & Archive (soft-delete — reversible from Shopify Admin)
         # We only look at ACTIVE products. Already-archived products are ignored.
         page = shopify.Product.find(limit=250, status='active')
@@ -3481,7 +3485,7 @@ def emergency_purge_junk_products(shop_url):
                 # Check ALL variants — a product is valid if ANY variant's SKU is in valid_skus
                 # This protects pack products where variants[0] might use a suffixed SKU
                 product_skus = [str(v.sku).strip() for v in sp.variants if v.sku]
-                is_valid = any(s in valid_skus for s in product_skus)
+                is_valid = any(s in valid_skus or s.endswith(tuple(event_suffixes)) for s in product_skus)
 
                 if not product_skus or not is_valid:
                     try:

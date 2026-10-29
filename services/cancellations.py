@@ -1,6 +1,7 @@
 import shopify
 from datetime import datetime, timedelta
 from utils import get_odoo_connection, log_event, setup_shopify_session, get_config
+from services.orders import excluded_order_reason
 
 # --- 1. Odoo -> Shopify (Sync Job) ---
 def sync_odoo_cancellations(shop_url):
@@ -75,6 +76,9 @@ def process_cancellation(data, shop_url):
     from app import app
     
     with app.app_context():
+        if excluded_order_reason(data, shop_url):
+            return  # excluded customer: the order never existed in Odoo
+
         shopify_name = data.get('name')
         # We assume the Odoo 'client_order_ref' is 'ONLINE_#1001'
         client_ref = f"ONLINE_{shopify_name}"

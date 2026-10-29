@@ -1,5 +1,6 @@
 import shopify
 from utils import get_odoo_connection, log_event, setup_shopify_session
+from services.orders import excluded_order_reason
 
 def process_refund_data(data, shop_url):
     """
@@ -16,13 +17,18 @@ def process_refund_data(data, shop_url):
         # ── 1. Get the Shopify Order Name ──────────────────────────────
         order_id = data.get('order_id')
         shopify_order_name = ""
+        skip_reason = None
 
         try:
             if setup_shopify_session(shop_url):
                 sp_order = shopify.Order.find(order_id)
                 shopify_order_name = sp_order.name
+                skip_reason = excluded_order_reason(sp_order.to_dict(), shop_url)
         except Exception as e:
             log_event('Refund', 'Warning', f"Could not fetch Shopify order {order_id}: {e}", shop_url=shop_url)
+
+        if skip_reason:
+            return True, f"Skipped: {skip_reason}"
 
         if not shopify_order_name:
             return False, f"Could not determine Order Name for Refund {data.get('id')}"

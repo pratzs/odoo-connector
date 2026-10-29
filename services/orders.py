@@ -3,7 +3,30 @@ from datetime import datetime
 from models import db, ProcessedOrder, Shop, CustomerMap
 from utils import get_config, get_shop_company_id, set_config, log_event, acquire_distributed_lock
 
-def process_order_data(data, odoo_client, shop_url): 
+# Event customers and SKU suffixes that must never reach Odoo (POS-only festival stock, e.g. the
+# Gluten Free festival: customer expo@glutenfree.com, products suffixed '-GF26OCT'). The defaults
+# cover the current festival; override per shop with AppSetting keys `order_exclude_emails` and
+# `order_exclude_sku_suffixes` (JSON lists). Remove the defaults once the event is over.
+_DEFAULT_EXCLUDED_EMAILS = ['expo@glutenfree.com']
+_DEFAULT_EXCLUDED_SKU_SUFFIXES = ['-GF26OCT']
+
+def get_order_exclusions(shop_url):
+    """Returns (set of lowercase customer emails, list of SKU suffixes) that are kept out of Odoo."""
+    emails = get_config('order_exclude_emails', _DEFAULT_EXCLUDED_EMAILS, shop_url=shop_url)
+    suffixes = get_config('order_exclude_sku_suffixes', _DEFAULT_EXCLUDED_SKU_SUFFIXES, shop_url=shop_url)
+    emails = emails if isinstance(emails, list) else _DEFAULT_EXCLUDED_EMAILS
+    suffixes = suffixes if isinstance(suffixes, list) else _DEFAULT_EXCLUDED_SKU_SUFFIXES
+    return ({str(e).strip().lower() for e in emails if e},
+            [str(s).strip() for s in suffixes if s and str(s).strip()])
+
+def excluded_order_reason(data, shop_url):
+    """Why this Shopify order (webhook payload / order dict) must not sync to Odoo, else None."""
+    emails, _ = get_order_exclusions(shop_url)
+    candidates = [data.get('email'), data.get('contact_email'), (data.get('customer') or {}).get('email')]
+    hit = next((e for e in candidates if e and str(e).strip().lower() in emails), None)
+    return f"customer {hit} is excluded from Odoo sync" if hit else None
+
+def process_order_data(data, odoo_client, shop_url):
     """
     Syncs order with Distributed Redis Locking, Smart UOM Switching, and Date Filtering.
     """
@@ -36,6 +59,11 @@ def process_order_data(data, odoo_client, shop_url):
                     return True, f"Skipped: Order date ({order_date_iso}) is older than start date ({start_date_str})"
         except Exception as e:
             print(f"Date Check Warning for {shopify_name}: {e}")
+
+        # --- GUARD 0b: EXCLUDED CUSTOMER (never locked, never touches Odoo) ---
+        excluded = excluded_order_reason(data, shop_url)
+        if excluded:
+            return True, f"Skipped: {excluded}"
 
        # --- GUARD 1: SQL DATABASE CHECK ---
         try:
@@ -190,9 +218,12 @@ def process_order_data(data, odoo_client, shop_url):
             # Odoo product. The discounted Shopify line price is preserved via
             # manual_price=True, so Odoo keeps the clearance price.
             clearance_suffix = get_config('clearance_sku_suffix', '-CLR', shop_url=shop_url) or '-CLR'
+            _, excluded_suffixes = get_order_exclusions(shop_url)
             for item in data.get('line_items', []):
                 raw_sku = item.get('sku')
                 if not raw_sku: continue
+                # Event-only SKUs don't exist in Odoo and must not be auto-created there.
+                if any(raw_sku.endswith(s) for s in excluded_suffixes): continue
 
                 sku = raw_sku
                 is_unit_variant = False
