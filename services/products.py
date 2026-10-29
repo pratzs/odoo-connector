@@ -47,19 +47,25 @@ def get_exclusion_rules(shop_url):
 def _like_escape(val):
     return val.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
 
+def _exclusion_leaf(r):
+    field, op, val = r['field'], r['op'], r['value']
+    if field == 'price':
+        return ['list_price', _PRICE_OPS[op], float(val)]
+    if field == 'category':
+        return ['categ_id.complete_name', 'ilike', val] if op == 'contains' else ['categ_id.complete_name', '=ilike', _like_escape(val)]
+    return ['product_tag_ids.name', 'ilike', val] if op == 'contains' else ['product_tag_ids.name', '=ilike', _like_escape(val)]
+
 def build_exclusion_domain(rules):
     """Odoo domain terms that keep out every product matching any rule (AND of negated rules)."""
     terms = []
     for r in _clean_exclusion_rules(rules):
-        field, op, val = r['field'], r['op'], r['value']
-        if field == 'price':
-            leaf = ('list_price', _PRICE_OPS[op], float(val))
-        elif field == 'category':
-            leaf = ('categ_id.complete_name', 'ilike', val) if op == 'contains' else ('categ_id.complete_name', '=ilike', _like_escape(val))
-        else:
-            leaf = ('product_tag_ids.name', 'ilike', val) if op == 'contains' else ('product_tag_ids.name', '=ilike', _like_escape(val))
-        terms += ['!', list(leaf)]
+        terms += ['!', _exclusion_leaf(r)]
     return terms
+
+def build_exclusion_match_domain(rules):
+    """Odoo domain terms matching every product that ANY rule excludes (OR of the rules). [] if no rules."""
+    leaves = [_exclusion_leaf(r) for r in _clean_exclusion_rules(rules)]
+    return ['|'] * (len(leaves) - 1) + leaves
 
 def get_exclusion_match(p, rules, tag_names):
     """Returns a short description of the first rule an Odoo product matches, else None.
@@ -207,6 +213,15 @@ def sync_products_master(shop_url):
         except Exception as e:
             log_event('Product Sync', 'Warning', f"Archive propagation error: {e}", shop_url=shop_url)
 
+        # Take products that an exclusion rule matches off the storefront too (see Product Settings).
+        try:
+            excluded_archived = _archive_excluded_products_in_shopify(shop_url, odoo, get_exclusion_rules(shop_url))
+            if excluded_archived:
+                log_event('Product Sync', 'Info',
+                    f"Archived {excluded_archived} Shopify product(s) that match an exclusion rule.", shop_url=shop_url)
+        except Exception as e:
+            log_event('Product Sync', 'Warning', f"Exclusion archive error: {e}", shop_url=shop_url)
+
         BATCH_SIZE = 50
         chunks = [product_ids[i:i + BATCH_SIZE] for i in range(0, len(product_ids), BATCH_SIZE)]
 
@@ -260,6 +275,14 @@ def sync_all_products_absolute_master(shop_url):
                     f"FULL RESYNC: Archived {archived} Shopify product(s) — no longer active in Odoo.", shop_url=shop_url)
         except Exception as e:
             log_event('Product Sync', 'Warning', f"Full archive propagation error: {e}", shop_url=shop_url)
+
+        try:
+            excluded_archived = _archive_excluded_products_in_shopify(shop_url, odoo, get_exclusion_rules(shop_url))
+            if excluded_archived:
+                log_event('Product Sync', 'Info',
+                    f"Archived {excluded_archived} Shopify product(s) that match an exclusion rule.", shop_url=shop_url)
+        except Exception as e:
+            log_event('Product Sync', 'Warning', f"Exclusion archive error: {e}", shop_url=shop_url)
 
         BATCH_SIZE = 50
         chunks = [product_ids[i:i + BATCH_SIZE] for i in range(0, len(product_ids), BATCH_SIZE)]
@@ -1108,6 +1131,68 @@ def _archive_odoo_products_in_shopify(shop_url, odoo, cutoff_str=None, full=Fals
             _release_sku(odoo_id, sku)
 
     return archived_count
+
+
+# Refuse to archive more than this many products in one pass: a mistyped rule (e.g. Price <= 100)
+# must not be able to take the catalogue off the storefront.
+EXCLUSION_ARCHIVE_MAX = 100
+
+def _archive_excluded_products_in_shopify(shop_url, odoo, rules):
+    """
+    Archives products already in Shopify that an exclusion rule now matches, so the rules also take
+    them off the storefront (not just stop new syncs). Archive is reversible, and ProductMap rows are
+    kept: once a product stops matching, the normal sync reactivates it (process_product_data turns
+    an archived product back to active). Turned off with the prod_exclusion_archive setting.
+    """
+    rules = _clean_exclusion_rules(rules)
+    if not rules or not get_config('prod_exclusion_archive', True, shop_url=shop_url):
+        return 0
+    if not setup_shopify_session(shop_url):
+        return 0
+
+    maps = ProductMap.query.filter(
+        ProductMap.shop_url == shop_url,
+        ProductMap.odoo_product_id > 0,
+        ProductMap.shopify_variant_id != None,
+        ProductMap.shopify_variant_id.notin_(['0', ''])
+    ).all()
+    variant_by_odoo = {}
+    for m in maps:
+        variant_by_odoo.setdefault(m.odoo_product_id, m.shopify_variant_id)
+    if not variant_by_odoo:
+        return 0
+
+    try:
+        matched = odoo.models.execute_kw(
+            odoo.db, odoo.uid, odoo.password, 'product.product', 'search_read',
+            [[['id', 'in', list(variant_by_odoo)]] + build_exclusion_match_domain(rules)],
+            {'fields': ['id', 'default_code']})
+    except Exception as e:
+        log_event('Product Sync', 'Warning', f"Exclusion archive check failed: {e}", shop_url=shop_url)
+        return 0
+
+    if len(matched) > EXCLUSION_ARCHIVE_MAX:
+        log_event('Product Sync', 'Warning',
+            f"Exclusion rules match {len(matched)} products already in Shopify — more than the safety limit of "
+            f"{EXCLUSION_ARCHIVE_MAX}, so none were archived. Check the rules.", shop_url=shop_url)
+        return 0
+
+    archived, seen = 0, set()
+    for row in matched:
+        sku = str(row.get('default_code') or row['id']).strip()
+        try:
+            product_id = shopify.Variant.find(int(variant_by_odoo[row['id']])).product_id
+            if product_id in seen: continue
+            seen.add(product_id)
+            sp = shopify.Product.find(product_id)
+            if sp and sp.status != 'archived':
+                sp.status = 'archived'
+                sp.save()
+                archived += 1
+                log_event('Product Sync', 'Info', f"Archived Shopify product {sku}: matches an exclusion rule.", shop_url=shop_url)
+        except Exception as e:
+            log_event('Product Sync', 'Warning', f"Could not archive excluded product {sku}: {e}", shop_url=shop_url)
+    return archived
 
 
 # =====================================================
