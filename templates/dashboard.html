@@ -381,6 +381,10 @@
                     <div class="text-muted mb-2" style="font-size: 12px;">A product matching <strong>any</strong> rule is not synced to Shopify. Rules are re-checked on every sync, so a product syncs as soon as it stops matching (e.g. its price goes above 0). Products already in Shopify are left as they are.</div>
                     <div id="exclusionRules"></div>
                     <button type="button" class="btn btn-sm btn-outline-secondary mt-1" id="btnAddExclusionRule" onclick="addExclusionRule()">+ Add rule</button>
+                    <div class="form-check mt-2">
+                        <input class="form-check-input" type="checkbox" id="exclusionArchive" checked>
+                        <label class="form-check-label" for="exclusionArchive" style="font-size: 13px;">Also archive matching products that are already in Shopify (taken off the storefront; they come back automatically once they stop matching). Refuses to archive more than 100 in one run.</label>
+                    </div>
                 </div>
 
                 <hr>
@@ -1284,6 +1288,7 @@ document.addEventListener("DOMContentLoaded", function() {
     setCheck('fieldDesc', SAVED_SETTINGS.prod_sync_desc);
     setCheck('fieldProductType', SAVED_SETTINGS.prod_sync_type);
     setCheck('fieldVendor', SAVED_SETTINGS.prod_sync_vendor);
+    setCheck('exclusionArchive', SAVED_SETTINGS.prod_exclusion_archive === undefined ? true : SAVED_SETTINGS.prod_exclusion_archive);
     (Array.isArray(SAVED_SETTINGS.prod_exclusion_rules) ? SAVED_SETTINGS.prod_exclusion_rules : []).forEach(r => addExclusionRule(r));
     setCheck('fieldBarcode', SAVED_SETTINGS.prod_sync_barcode);
 
@@ -1526,6 +1531,7 @@ function saveSettings() {
         prod_sync_type: document.getElementById('fieldProductType').checked,
         prod_sync_vendor: document.getElementById('fieldVendor').checked,
         prod_exclusion_rules: collectExclusionRules(),
+        prod_exclusion_archive: document.getElementById('exclusionArchive').checked,
 
         // Orders & Customers
         order_sync_tax: document.getElementById('orderSyncTax').checked,

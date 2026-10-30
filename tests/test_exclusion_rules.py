@@ -1,7 +1,7 @@
 import pytest
 
 from services.products import (
-    _clean_exclusion_rules, build_exclusion_domain, get_exclusion_match,
+    _clean_exclusion_rules, build_exclusion_domain, build_exclusion_match_domain, get_exclusion_match,
 )
 
 RULES = [
@@ -115,3 +115,114 @@ def test_domain_and_guard_agree(rules, price, categ, tags):
     guard_excludes = get_exclusion_match(product, _clean_exclusion_rules(rules), tag_names) is not None
     domain_keeps = _eval_domain(build_exclusion_domain(rules), product, tag_names)
     assert guard_excludes == (not domain_keeps)
+
+
+# --- archiving products that are already in Shopify ---
+from types import SimpleNamespace
+
+import services.products as sp_mod
+from models import ProductMap
+
+
+def test_match_domain_is_an_or_of_the_rules():
+    assert build_exclusion_match_domain([]) == []
+    one = build_exclusion_match_domain([RULES[1]])
+    assert one == [['list_price', '<=', 0.0]]
+    three = build_exclusion_match_domain(RULES)
+    assert three[:2] == ['|', '|'] and len(three) == 5
+
+
+class FakeShopify:
+    """Stands in for the shopify module: variant id -> product id, products keep a status."""
+    def __init__(self, statuses):
+        self.statuses = statuses  # product_id -> status
+        self.saved = []
+        outer = self
+
+        class Variant:
+            @staticmethod
+            def find(vid):
+                return SimpleNamespace(product_id=int(vid) + 1000)
+
+        class Product:
+            @staticmethod
+            def find(pid):
+                obj = SimpleNamespace(id=pid, status=outer.statuses[pid])
+                obj.save = lambda: (outer.statuses.__setitem__(pid, obj.status), outer.saved.append(pid))
+                return obj
+
+        self.Variant, self.Product = Variant, Product
+
+
+class FakeOdoo:
+    db, uid, password = 'db', 1, 'pw'
+
+    def __init__(self, matching_ids):
+        self.matching_ids = matching_ids
+        self.last_domain = None
+        outer = self
+
+        class Models:
+            @staticmethod
+            def execute_kw(db, uid, pw, model, method, args, kw=None):
+                outer.last_domain = args[0]
+                allowed = args[0][0][2]
+                return [{'id': i, 'default_code': f'SKU{i}'} for i in outer.matching_ids if i in allowed]
+
+        self.models = Models()
+
+
+@pytest.fixture
+def archive_env(app_ctx, monkeypatch):
+    from models import db
+    logs = []
+    monkeypatch.setattr(sp_mod, 'log_event', lambda *a, **k: logs.append(a))
+    monkeypatch.setattr(sp_mod, 'setup_shopify_session', lambda shop: True)
+    cfg = {'prod_exclusion_archive': True}
+    monkeypatch.setattr(sp_mod, 'get_config', lambda key, default=None, shop_url=None: cfg.get(key, default))
+    for odoo_id in (1, 2, 3):
+        db.session.add(ProductMap(shop_url='s.myshopify.com', odoo_product_id=odoo_id, sku=f'SKU{odoo_id}',
+                                  shopify_variant_id=str(odoo_id)))
+    db.session.commit()
+    return SimpleNamespace(logs=logs, cfg=cfg, monkeypatch=monkeypatch)
+
+
+def run_archive(env, statuses, matching):
+    fake = FakeShopify(statuses)
+    env.monkeypatch.setattr(sp_mod, 'shopify', fake)
+    odoo = FakeOdoo(matching)
+    n = sp_mod._archive_excluded_products_in_shopify('s.myshopify.com', odoo, RULES)
+    return n, fake, odoo
+
+
+def test_matching_products_in_shopify_get_archived(archive_env):
+    n, fake, odoo = run_archive(archive_env, {1001: 'active', 1002: 'active', 1003: 'active'}, matching=[1, 3])
+    assert n == 2
+    assert fake.statuses == {1001: 'archived', 1002: 'active', 1003: 'archived'}
+    # search is limited to products already mapped to Shopify
+    assert sorted(odoo.last_domain[0][2]) == [1, 2, 3]
+
+
+def test_already_archived_products_are_left_alone(archive_env):
+    n, fake, _ = run_archive(archive_env, {1001: 'archived', 1002: 'active', 1003: 'active'}, matching=[1])
+    assert n == 0 and fake.saved == []
+
+
+def test_switch_off_archives_nothing(archive_env):
+    archive_env.cfg['prod_exclusion_archive'] = False
+    n, fake, _ = run_archive(archive_env, {1001: 'active', 1002: 'active', 1003: 'active'}, matching=[1, 2, 3])
+    assert n == 0 and fake.saved == []
+
+
+def test_no_rules_archives_nothing(archive_env):
+    fake = FakeShopify({1001: 'active'})
+    archive_env.monkeypatch.setattr(sp_mod, 'shopify', fake)
+    assert sp_mod._archive_excluded_products_in_shopify('s.myshopify.com', FakeOdoo([1]), []) == 0
+    assert fake.saved == []
+
+
+def test_safety_cap_refuses_a_runaway_rule(archive_env):
+    archive_env.monkeypatch.setattr(sp_mod, 'EXCLUSION_ARCHIVE_MAX', 1)
+    n, fake, _ = run_archive(archive_env, {1001: 'active', 1002: 'active', 1003: 'active'}, matching=[1, 2])
+    assert n == 0 and fake.saved == []
+    assert any('safety limit' in str(l) for l in archive_env.logs)
