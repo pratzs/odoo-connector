@@ -343,9 +343,9 @@ def _reactivate_base_if_ours(shop_url, row):
         prod.status = 'active'
         changed = True
     # Restore the Online Store publication that drafting removed.
-    if not getattr(prod, 'published_at', None):
+    if not getattr(prod, 'published_at', None) or getattr(prod, 'published_scope', None) != 'global':
         prod.published_at = datetime.utcnow().isoformat()
-        prod.published_scope = 'web'
+        prod.published_scope = 'global'
         changed = True
 
     if changed:
@@ -546,6 +546,7 @@ def _upsert_mirror(shop_url, pid, base_sku, clr_sku, info,
         # --- Create a fresh mirror, copying the base product's look ---
         base = _get_base_shopify_product(base_sku)
         sp = shopify.Product()
+        sp.published_scope = 'global'  # Online Store + Point of Sale
         sp.title = f"{(info.get('name') or base_sku)} (Clearance)"
         sp.status = 'active'
         sp.tags = 'Clearance'

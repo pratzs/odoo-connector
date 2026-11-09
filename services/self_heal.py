@@ -159,8 +159,30 @@ def _republish(product_id):
     if not prod:
         return False
     prod.published_at = datetime.utcnow().isoformat()
-    prod.published_scope = 'web'
+    prod.published_scope = 'global'
     return bool(prod.save())
+
+
+def _active_not_on_pos():
+    """ACTIVE products published to the Online Store only (published_scope
+    'web'), i.e. missing from the Point of Sale channel. Uses the REST
+    published_scope field because publication queries need a scope the app
+    does not hold. Returns [{id, title, sku}]."""
+    out, since_id = [], 0
+    for _ in range(200):
+        batch = shopify.Product.find(
+            limit=250, since_id=since_id, status='active',
+            published_scope='web', fields='id,title,variants,published_scope')
+        if not batch:
+            break
+        for p in batch:
+            v = (p.variants or [None])[0]
+            out.append({'id': p.id, 'title': p.title,
+                        'sku': getattr(v, 'sku', None) if v else None})
+        since_id = batch[-1].id
+        if len(batch) < 250:
+            break
+    return out
 
 
 def _uncounted_stock_locations(odoo, shop_url, company_id):
@@ -396,6 +418,30 @@ def perform_self_heal(shop_url, apply_changes=True):
                       shop_url=shop_url)
     except Exception as e:
         log_event('Self-Heal', 'Warning', f"Publication check failed: {e}", shop_url=shop_url)
+
+    # --- 1b. Active but missing from Point of Sale -----------------------
+    try:
+        no_pos = _active_not_on_pos()
+        fixed, bad = [], []
+        for t in no_pos:
+            if not apply_changes:
+                fixed.append(t['sku'] or t['id'])
+                continue
+            try:
+                prod = shopify.Product.find(int(t['id']))
+                prod.published_scope = 'global'
+                (fixed if prod.save() else bad).append(t['sku'] or t['id'])
+            except Exception as e:
+                bad.append(f"{t['sku']}: {e}")
+        report['pos_published'] = fixed
+        report['pos_publish_failed'] = bad
+        if no_pos:
+            log_event('Self-Heal', 'Warning',
+                      f"{len(no_pos)} ACTIVE product(s) were not on the Point of Sale channel. "
+                      f"{'Published' if apply_changes else 'Would publish'} {len(fixed)}, "
+                      f"{len(bad)} failed.", shop_url=shop_url)
+    except Exception as e:
+        log_event('Self-Heal', 'Warning', f"POS publication check failed: {e}", shop_url=shop_url)
 
     # --- 2. Bases still flagged drafted-by-us ---------------------------
     try:

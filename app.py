@@ -3883,7 +3883,7 @@ def api_reindex_products():
                 continue
             prod = shopify.Product.find(pid)
             prod.published_at = datetime.utcnow().isoformat()
-            prod.published_scope = 'web'
+            prod.published_scope = 'global'
             if prod.save():
                 touched.append(sku)
             else:
@@ -4001,7 +4001,7 @@ def api_publication_repair():
         try:
             prod = shopify.Product.find(int(t['product_id']))
             prod.published_at = datetime.utcnow().isoformat()
-            prod.published_scope = 'web'
+            prod.published_scope = 'global'
             if prod.save():
                 published.append(t['sku'] or t['product_id'])
             else:

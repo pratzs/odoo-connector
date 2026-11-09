@@ -744,6 +744,12 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     elif hasattr(sp, 'options') and sp.options and sp.options[0].name != 'Title':
         sp.options = [{'name': 'Title', 'values': ['Default Title']}]
 
+    # Sales channels: an ACTIVE product must be on Online Store AND Point of
+    # Sale. 'web' is Online Store only; 'global' is both. A draft is left
+    # alone so it is never published by accident.
+    if sp.status == 'active' and getattr(sp, 'published_scope', None) != 'global':
+        sp.published_scope = 'global'
+
     # 1. Save the core Shopify Product first
     try: 
         sp.save()
