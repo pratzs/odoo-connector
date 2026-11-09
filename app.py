@@ -797,6 +797,21 @@ def run_self_heal(shop_url):
         perform_self_heal(shop_url, apply_changes=True)
 
 
+def run_exclusion_archive(shop_url):
+    """Archive Shopify products matching the exclusion rules right now, so a
+    new rule takes effect on save instead of at the next product sync."""
+    from services.products import _archive_excluded_products_in_shopify, get_exclusion_rules
+    with app.app_context():
+        odoo = get_odoo_connection(shop_url)
+        if not odoo:
+            return
+        n = _archive_excluded_products_in_shopify(shop_url, odoo, get_exclusion_rules(shop_url))
+        if n:
+            log_event('Product Sync', 'Info',
+                      f"Archived {n} Shopify product(s) matching the exclusion rules (on settings save).",
+                      shop_url=shop_url)
+
+
 def _update_sync_health(shop_url, entity, success, error=None):
     """Update the SyncHealth row for this shop+entity. Safe to call from any worker."""
     try:
@@ -2846,6 +2861,13 @@ def save_settings():
         
         automate_webhook_registration(shop_url)
         log_event('Settings', 'Success', 'Configuration saved successfully', shop_url=shop_url)
+
+        # New/changed exclusion rules take effect immediately, not at the next sync.
+        if 'prod_exclusion_rules' in data:
+            try:
+                q_default.enqueue(run_exclusion_archive, shop_url, job_timeout=900)
+            except Exception as e:
+                log_event('Settings', 'Warning', f'Could not queue exclusion archive: {e}', shop_url=shop_url)
         
         # --- FIXED RESPONSE LOGIC ---
         # 1. If the REQUEST was JSON (Dashboard), return JSON

@@ -15,7 +15,7 @@ from utils import get_odoo_connection, log_event, setup_shopify_session, get_con
 # 0. HELPER FUNCTIONS
 # =====================================================
 # --- Product exclusion rules (Settings > Product Settings) ---
-# A rule is {'field': 'category'|'tag'|'price', 'op': ..., 'value': ...}. A product matching ANY
+# A rule is {'field': 'category'|'tag'|'price'|'sku'|'name', 'op': ..., 'value': ...}. A product matching ANY
 # rule is not synced to Shopify. Rules are evaluated live, so a product starts syncing as soon as it
 # stops matching (e.g. price 0 -> 5). The same rules exist in two forms that must stay in step:
 # build_exclusion_domain() narrows Odoo searches up front (so excluded products never fill the
@@ -36,6 +36,8 @@ def _clean_exclusion_rules(rules):
             if op not in ('contains', 'eq'): continue
         elif field == 'tag':
             if op not in ('contains', 'eq'): continue
+        elif field in ('sku', 'name'):
+            if op not in ('contains', 'eq'): continue
         else:
             continue
         clean.append({'field': field, 'op': op, 'value': val})
@@ -53,6 +55,9 @@ def _exclusion_leaf(r):
         return ['list_price', _PRICE_OPS[op], float(val)]
     if field == 'category':
         return ['categ_id.complete_name', 'ilike', val] if op == 'contains' else ['categ_id.complete_name', '=ilike', _like_escape(val)]
+    if field in ('sku', 'name'):
+        odoo_f = 'default_code' if field == 'sku' else 'name'
+        return [odoo_f, 'ilike', val] if op == 'contains' else [odoo_f, '=ilike', _like_escape(val)]
     return ['product_tag_ids.name', 'ilike', val] if op == 'contains' else ['product_tag_ids.name', '=ilike', _like_escape(val)]
 
 def build_exclusion_domain(rules):
@@ -79,6 +84,9 @@ def get_exclusion_match(p, rules, tag_names):
         elif field == 'category':
             name = (p['categ_id'][1] if p.get('categ_id') else '').lower()
             hit = (name == val) if op == 'eq' else (val in name)
+        elif field in ('sku', 'name'):
+            text = str(p.get('default_code' if field == 'sku' else 'name') or '').strip().lower()
+            hit = (text == val) if op == 'eq' else (val in text)
         else:
             names = [t.lower() for t in tag_names]
             hit = (val in names) if op == 'eq' else any(val in n for n in names)

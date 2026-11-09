@@ -1449,6 +1449,8 @@ function fetchLocations(companyId) {
 const EXCLUSION_OPS = {
     category: [['contains', 'contains'], ['eq', 'is exactly']],
     tag: [['eq', 'is'], ['contains', 'contains']],
+    sku: [['eq', 'is exactly'], ['contains', 'contains']],
+    name: [['contains', 'contains'], ['eq', 'is exactly']],
     price: [['lte', '<='], ['eq', '='], ['lt', '<'], ['gt', '>'], ['gte', '>=']]
 };
 
@@ -1461,6 +1463,8 @@ function addExclusionRule(rule) {
         <select class="form-select form-select-sm rule-field" style="max-width:130px">
             <option value="category">Category</option>
             <option value="tag">Tag</option>
+            <option value="sku">SKU (Internal Reference)</option>
+            <option value="name">Product name</option>
             <option value="price">Price</option>
         </select>
         <select class="form-select form-select-sm rule-op" style="max-width:130px"></select>
