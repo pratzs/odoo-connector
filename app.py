@@ -799,17 +799,27 @@ def run_self_heal(shop_url):
 
 def run_exclusion_archive(shop_url):
     """Archive Shopify products matching the exclusion rules right now, so a
-    new rule takes effect on save instead of at the next product sync."""
-    from services.products import _archive_excluded_products_in_shopify, get_exclusion_rules
+    new rule takes effect on save instead of at the next product sync.
+    Logs every outcome: this job runs on the shared worker, so a silent exit
+    is indistinguishable from it never having run."""
+    from services.products import (_archive_excluded_products_in_shopify,
+                                   get_exclusion_rules)
     with app.app_context():
-        odoo = get_odoo_connection(shop_url)
-        if not odoo:
-            return
-        n = _archive_excluded_products_in_shopify(shop_url, odoo, get_exclusion_rules(shop_url))
-        if n:
+        try:
+            rules = get_exclusion_rules(shop_url)
             log_event('Product Sync', 'Info',
-                      f"Archived {n} Shopify product(s) matching the exclusion rules (on settings save).",
+                      f"Exclusion archive started ({len(rules)} rule(s)).", shop_url=shop_url)
+            odoo = get_odoo_connection(shop_url)
+            if not odoo:
+                log_event('Product Sync', 'Warning',
+                          'Exclusion archive: could not connect to Odoo.', shop_url=shop_url)
+                return
+            n = _archive_excluded_products_in_shopify(shop_url, odoo, rules)
+            log_event('Product Sync', 'Info',
+                      f"Exclusion archive finished: archived {n} Shopify product(s).",
                       shop_url=shop_url)
+        except Exception as e:
+            log_event('Product Sync', 'Error', f"Exclusion archive failed: {e}", shop_url=shop_url)
 
 
 def _update_sync_health(shop_url, entity, success, error=None):
