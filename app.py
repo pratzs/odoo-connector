@@ -183,6 +183,7 @@ if _sentry_dsn:
 
 MAX_FAILED_ORDER_ATTEMPTS = 50  # Cap for FailedSyncOrder retry loop
 WEBHOOK_RATE_LIMIT = 100        # Max webhook calls per minute per shop
+HANDLED_WEBHOOK_TOPICS = {'orders/create', 'orders/updated', 'orders/paid', 'orders/cancelled', 'refunds/create'}
 
 # --- CONFIGURATION ---
 @app.after_request
@@ -1176,17 +1177,20 @@ def shopify_webhook():
     if not shop_url or not data:
         return "Missing data", 400
 
-    # Rate limit: max WEBHOOK_RATE_LIMIT webhooks per shop per minute
+    # Topics we do not process (inventory_levels/update bursts, products/*)
+    # are answered 200 straight away. They used to count toward the rate limit
+    # below, so an inventory burst got 429s (Shopify Dev Dashboard "Webhook
+    # failures") and could crowd real order webhooks out of the same minute.
+    if topic not in HANDLED_WEBHOOK_TOPICS:
+        return "Topic ignored", 200
+
+    # Rate limit: max WEBHOOK_RATE_LIMIT handled webhooks per shop per minute
     rate_key = f"wh_rate_{shop_url}"
     wh_count = conn.incr(rate_key)
     if wh_count == 1:
         conn.expire(rate_key, 60)
     if wh_count > WEBHOOK_RATE_LIMIT:
         return "Rate limited", 429
-
-    # SAFETY CHECK: Explicitly block product updates to prevent loops
-    if topic == 'products/update':
-        return "Ignored (Odoo is Master)", 200
 
     # 1. Handle Orders (Create, Pay, Update) -> CRITICAL QUEUE
     if topic in ['orders/create', 'orders/updated', 'orders/paid']:
