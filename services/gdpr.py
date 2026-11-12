@@ -386,6 +386,9 @@ def mark_uninstalled(shop_url):
         return False
     shop.is_active = False
     shop.access_token = ""
+    shop.access_token_expires_at = None
+    shop.refresh_token_enc = None
+    shop.refresh_token_expires_at = None
     AppSetting.query.filter_by(
         shop_url=shop_url, key="storefront_access_token"
     ).delete(synchronize_session=False)

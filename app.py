@@ -33,6 +33,7 @@ from rq.worker import BaseWorker
 # --- CUSTOM MODULES ---
 from models import db, ProductMap, SyncLog, AppSetting, CustomerMap, ProcessedOrder, Shop, FailedSyncOrder, SyncHealth
 from odoo_client import OdooClient
+import shopify_tokens
 # from security_utils import require_shopify_session 
 # --- UTILS (Merged & Clean) ---
 from utils import (
@@ -245,6 +246,11 @@ with app.app_context():
         "ALTER TABLE clearance_mirror ADD COLUMN IF NOT EXISTS base_shopify_product_id VARCHAR(50)",
         "ALTER TABLE clearance_mirror ADD COLUMN IF NOT EXISTS base_drafted BOOLEAN DEFAULT FALSE",
         "ALTER TABLE clearance_mirror ADD COLUMN IF NOT EXISTS manual_price NUMERIC(10, 2)",
+        # Expiring offline tokens (shopify_tokens.py). Nullable, no default:
+        # a metadata-only change on Postgres, and NULL = legacy token.
+        "ALTER TABLE shop ADD COLUMN IF NOT EXISTS access_token_expires_at TIMESTAMP",
+        "ALTER TABLE shop ADD COLUMN IF NOT EXISTS refresh_token_enc VARCHAR(500)",
+        "ALTER TABLE shop ADD COLUMN IF NOT EXISTS refresh_token_expires_at TIMESTAMP",
     ]
     for _stmt in _column_migrations:
         try:
@@ -1076,22 +1082,30 @@ def auth_callback():
     except Exception as e:
         return f"Validation Error: {e}", 400
 
-   # 3. Exchange Code for Token
+    # 3. Exchange Code for Token. Requests an EXPIRING offline token
+    # (expiring=1) plus refresh token; see shopify_tokens.py. Set
+    # SHOPIFY_EXPIRING_OFFLINE_TOKENS=0 to fall back to a non-expiring token.
+    if not shop_url or not shopify_tokens.is_valid_shop_domain(shop_url):
+        return "Auth Failed: invalid shop domain.", 400
+    code = params.get('code')
+    if not code:
+        return "Auth Failed: missing code.", 400
     try:
-        session = shopify.Session(shop_url, SHOPIFY_API_VERSION)
-        access_token = session.request_token(params) 
+        token_payload = shopify_tokens.exchange_code_for_token(shop_url, code)
+        if not token_payload.get('access_token'):
+            raise shopify_tokens.TokenError("no access_token in response")
     except Exception as e:
         return f"Token Exchange Failed: {e}", 400
 
     # 4. Save to Database
     existing_shop = Shop.query.filter_by(shop_url=shop_url).first()
     if not existing_shop:
-        new_shop = Shop(shop_url=shop_url, access_token=access_token)
-        db.session.add(new_shop)
+        existing_shop = Shop(shop_url=shop_url)
+        db.session.add(existing_shop)
     else:
-        existing_shop.access_token = access_token
         existing_shop.is_active = True
-    
+    shopify_tokens.store_oauth_token(existing_shop, token_payload)
+
     db.session.commit()
 
     # 5. AUTO-CONFIG: Register Webhooks immediately
@@ -3324,6 +3338,16 @@ def run_schedule():
                     cleanup_old_logs()
                     conn.setex("last_log_cleanup", 86400, "done")
 
+                # 2b. Global — keep expiring-token refresh tokens alive for
+                # stores with no Shopify traffic (once per day). No-op for
+                # legacy shops.
+                if not conn.get("last_token_keepalive"):
+                    conn.setex("last_token_keepalive", 86400, "done")
+                    try:
+                        print(f"Token keep-alive: {shopify_tokens.refresh_aging_tokens()}")
+                    except Exception as e:
+                        print(f"Token keep-alive error: {type(e).__name__}")
+
                 # 3. Global — clean RQ failed registries every 30 min
                 if not conn.get("last_failed_job_cleanup"):
                     q_default.enqueue(clean_failed_jobs, job_timeout=60)
@@ -4597,6 +4621,30 @@ def admin_remap_customer():
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# ADMIN: migrate legacy non-expiring Shopify tokens to expiring ones
+# POST /admin/migrate-expiring-tokens
+# Header: X-Admin-Key: <FLASK_SECRET_KEY>
+# Body: { "shop_url": "x.myshopify.com" }  (omit for every active legacy shop)
+# Does nothing unless SHOPIFY_MIGRATE_LEGACY_TOKENS=1. Never returns tokens.
+# ---------------------------------------------------------------------------
+@app.route('/admin/migrate-expiring-tokens', methods=['POST'])
+def admin_migrate_expiring_tokens():
+    key = request.headers.get('X-Admin-Key', '')
+    expected = os.getenv('FLASK_SECRET_KEY') or ''
+    if not key or not expected or not hmac.compare_digest(key, expected):
+        return jsonify({'error': 'Unauthorized'}), 401
+    if not shopify_tokens.legacy_migration_enabled():
+        return jsonify({'error': 'SHOPIFY_MIGRATE_LEGACY_TOKENS is off'}), 409
+    data = request.get_json(silent=True) or {}
+    shop_url = (data.get('shop_url') or '').strip()
+    if shop_url:
+        results = [shopify_tokens.migrate_legacy_token(shop_url)]
+    else:
+        results = shopify_tokens.migrate_all_legacy_tokens()
+    return jsonify({'results': results})
 
 
 def _start_scheduler_thread():

@@ -96,14 +96,16 @@ def _get_storefront_token(shop_url: str) -> str | None:
     if cached:
         return cached
 
+    from shopify_tokens import get_valid_access_token
     shop = Shop.query.filter_by(shop_url=shop_url).first()
     if not shop or not shop.access_token:
         return None
 
     try:
+        admin_token = get_valid_access_token(shop)
         resp = requests.post(
             f"https://{shop_url}/admin/api/2024-01/storefront_access_tokens.json",
-            headers={"X-Shopify-Access-Token": shop.access_token, "Content-Type": "application/json"},
+            headers={"X-Shopify-Access-Token": admin_token, "Content-Type": "application/json"},
             json={"storefront_access_token": {"title": "Connector Multipass Auth"}},
             timeout=10,
         )

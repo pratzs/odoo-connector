@@ -9,6 +9,11 @@ class Shop(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     shop_url = db.Column(db.String(255), unique=True, nullable=False)
     access_token = db.Column(db.String(255), nullable=False)
+    # Expiring offline tokens (shopify_tokens.py). All NULL for a legacy shop
+    # holding a non-expiring token, which keeps working exactly as before.
+    access_token_expires_at = db.Column(db.DateTime, nullable=True)
+    refresh_token_enc = db.Column(db.String(500), nullable=True)  # Fernet, like odoo_password_enc
+    refresh_token_expires_at = db.Column(db.DateTime, nullable=True)
     odoo_url = db.Column(db.String(255))
     odoo_db = db.Column(db.String(255))
     odoo_username = db.Column(db.String(255))
@@ -33,6 +38,14 @@ class Shop(db.Model):
     @odoo_password.setter
     def odoo_password(self, value):
         self.odoo_password_enc = encrypt_val(value)
+
+    @property
+    def refresh_token(self):
+        return decrypt_val(self.refresh_token_enc)
+
+    @refresh_token.setter
+    def refresh_token(self, value):
+        self.refresh_token_enc = encrypt_val(value)
 
     odoo_company_id = db.Column(db.Integer, default=1)
     is_active = db.Column(db.Boolean, default=True)

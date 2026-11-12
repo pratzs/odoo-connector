@@ -10,6 +10,7 @@ from rq import Queue
 from models import db, AppSetting, SyncLog, Shop
 from odoo_client import OdooClient
 from contextlib import contextmanager
+import shopify_tokens
 
 # SMTP config — single definition used across the app
 SMTP_SERVER    = "premium74.web-hosting.com"
@@ -26,6 +27,9 @@ conn = redis.from_url(
     retry_on_error=[redis.exceptions.ConnectionError, redis.exceptions.TimeoutError],
     socket_keepalive=True,
 )
+
+# Per-request token freshness for the ShopifyAPI library (no-op for legacy shops).
+shopify_tokens.install_session_hooks()
 
 # q_default = Slow Lane (Products, Images, heavy stuff) -> Timeout: 2 Hours
 q_default = Queue('default', connection=conn, default_timeout=7200)
@@ -159,6 +163,7 @@ def setup_shopify_session(shop_url=None):
     try:
         # 1. Clear any old session from library memory
         shopify.ShopifyResource.clear_session()
+        shopify_tokens.clear_active_session()
 
         shop = Shop.query.filter_by(shop_url=shop_url).first()
         if not shop or not shop.access_token: 
@@ -168,9 +173,16 @@ def setup_shopify_session(shop_url=None):
         # 2. Use the version from app.py or fallback to stable
         # Note: Ensure SHOPIFY_API_VERSION is imported or defined
         api_version = os.getenv('SHOPIFY_API_VERSION', '2025-10')
-        
-        session = shopify.Session(shop.shop_url, api_version, shop.access_token)
+
+        # Legacy (non-expiring) shops get shop.access_token unchanged; expiring
+        # shops get a refreshed token when it is within 5 minutes of expiry.
+        token = shopify_tokens.get_valid_access_token(shop)
+        session = shopify.Session(shop.shop_url, api_version, token)
         shopify.ShopifyResource.activate_session(session)
+        # Lets the request hooks refresh mid-job (long syncs outlive a 1h token).
+        shopify_tokens.track_active_session(
+            shop.shop_url,
+            shop.access_token_expires_at if shopify_tokens.is_expiring(shop) else None)
         
         # 3. Optional: Quick smoke test to verify token
         # shopify.Shop.current() 
