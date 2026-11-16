@@ -96,28 +96,34 @@ def fetch_unpaid_shopify_orders():
         cursor = info.get('endCursor')
 
 
-def odoo_order_is_paid(sale_order, invoices):
+def odoo_order_is_paid(sale_order, invoices, lines):
     """
     Decide whether an Odoo sale order counts as paid.
 
-    sale_order: dict with 'state' and 'invoice_status'.
+    sale_order: dict with 'state' and 'delivery_status'.
     invoices:   list of account.move dicts (move_type, state, payment_state,
                 amount_total) linked to the order.
+    lines:      sale.order.line dicts (qty_to_invoice, display_type).
 
     Returns (is_paid: bool, reason: str, odoo_net_paid: float).
 
     Paid means ALL of:
       * the sale order is confirmed (state sale/done), not cancelled;
-      * nothing is left to invoice (invoice_status == 'invoiced'), so a
-        part-delivered order with an invoice for the first half is NOT paid;
+      * no delivery is still open, so a backorder still to ship (and be
+        invoiced) keeps the order unpaid;
+      * no line has anything left to invoice. The order-level invoice_status
+        is NOT used: on Worthy the orders are locked (state 'done') and Odoo
+        then reports invoice_status 'no' even when every line is invoiced;
       * it has at least one posted customer invoice;
       * every posted customer invoice that has not been reversed by a credit
         note is paid or in payment.
     """
     if sale_order.get('state') not in ('sale', 'done'):
         return False, f"sale order state is {sale_order.get('state')}", 0.0
-    if sale_order.get('invoice_status') != 'invoiced':
-        return False, f"invoice status is {sale_order.get('invoice_status')}", 0.0
+    if sale_order.get('delivery_status') in ('pending', 'partial', 'started'):
+        return False, f"delivery is {sale_order.get('delivery_status')}", 0.0
+    if any(float(l.get('qty_to_invoice') or 0) > 0 for l in lines if not l.get('display_type')):
+        return False, "lines still to invoice", 0.0
 
     posted = [m for m in invoices if m.get('state') == 'posted']
     out_invoices = [m for m in posted if m.get('move_type') == 'out_invoice'
@@ -177,8 +183,8 @@ def sync_odoo_payments(shop_url, apply_changes=True, limit=None):
             domain.append(['company_id', '=', int(company_id)])
         sos = odoo.models.execute_kw(
             odoo.db, odoo.uid, odoo.password, 'sale.order', 'search_read', [domain],
-            {'fields': ['name', 'client_order_ref', 'state', 'invoice_status',
-                        'invoice_ids', 'amount_total']})
+            {'fields': ['name', 'client_order_ref', 'state', 'delivery_status',
+                        'invoice_ids', 'order_line', 'amount_total']})
         so_by_ref = {}
         for so in sos:
             # If a ref somehow exists twice, prefer the confirmed one.
@@ -195,6 +201,14 @@ def sync_odoo_payments(shop_url, apply_changes=True, limit=None):
             for m in chunk:
                 moves[m['id']] = m
 
+        line_ids = sorted({lid for so in so_by_ref.values() for lid in so.get('order_line') or []})
+        so_lines = {}
+        for i in range(0, len(line_ids), 1000):
+            for l in odoo.models.execute_kw(
+                    odoo.db, odoo.uid, odoo.password, 'sale.order.line', 'read', [line_ids[i:i + 1000]],
+                    {'fields': ['qty_to_invoice', 'display_type']}):
+                so_lines[l['id']] = l
+
         for order in unpaid:
             name = order['name']
             so = so_by_ref.get(f"ONLINE_{name}")
@@ -203,7 +217,8 @@ def sync_odoo_payments(shop_url, apply_changes=True, limit=None):
                 continue
 
             invoices = [moves[i] for i in so.get('invoice_ids') or [] if i in moves]
-            is_paid, reason, odoo_paid = odoo_order_is_paid(so, invoices)
+            lines = [so_lines[i] for i in so.get('order_line') or [] if i in so_lines]
+            is_paid, reason, odoo_paid = odoo_order_is_paid(so, invoices, lines)
             if not is_paid:
                 summary['not_paid_in_odoo'] += 1
                 key = reason.split(' (')[0]
