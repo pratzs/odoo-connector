@@ -67,6 +67,7 @@ from services.customers import sync_customers_master
 from services.refunds import process_refund_data
 from services.returns import sync_odoo_returns
 from services import gdpr as gdpr_service
+from services.payments import sync_odoo_payments, scheduled_payment_sync
 
 try:
     from services.cancellations import process_cancellation, sync_odoo_cancellations
@@ -785,6 +786,7 @@ ENTITY_INTERVALS = {
     'inventory':    1800,   # 30 min
     'fulfillment':  3600,   # 1 hour
     'cancellation':  300,   # 5 min
+    'payment':       600,   # 10 min (no-op unless payment_sync_enabled)
     'return':       3600,   # 1 hour
     'customer':    43200,   # 12 hours
     'product':     86400,   # 24 hours
@@ -931,6 +933,10 @@ def run_return_sync(shop_url):
     _run_with_health('return', shop_url, sync_odoo_returns)
 
 
+def run_payment_sync(shop_url):
+    _run_with_health('payment', shop_url, scheduled_payment_sync)
+
+
 def run_customer_sync(shop_url):
     _run_with_health('customer', shop_url, sync_customers_master)
 
@@ -1043,6 +1049,7 @@ def _enqueue_entity(entity, shop_url):
         'inventory':    (q_critical, run_inventory_sync,    600,  retry_fast),
         'fulfillment':  (q_critical, run_fulfillment_sync,  600,  retry_fast),
         'cancellation': (q_critical, run_cancellation_sync, 600,  retry_fast),
+        'payment':      (q_critical, run_payment_sync,      600,  retry_fast),
         'return':       (q_critical, run_return_sync,       600,  retry_fast),
         'customer':     (q_default,  run_customer_sync,     3600, retry_slow),
         'product':      (q_default,  run_product_sync,      3600, retry_slow),
@@ -2228,6 +2235,7 @@ def health_check():
             'inventory':    ttl(f"last_inv_{shop_url}"),
             'fulfillment':  ttl(f"last_ful_{shop_url}"),
             'cancellation': ttl(f"last_cancel_{shop_url}"),
+            'payments':     ttl(f"last_pay_sync_{shop_url}"),
             'returns':      ttl(f"last_ret_sync_{shop_url}"),
             'customers':    ttl(f"last_cust_sync_{shop_url}"),
             'products':     ttl(f"last_prod_sync_{shop_url}"),
@@ -2270,6 +2278,20 @@ def trigger_fulfillment_sync():
     # FAST LANE (Fulfillments are critical/fast)
     q_critical.enqueue(sync_odoo_fulfillments, shop_url, job_timeout=600)
     return jsonify({"message": "Started checking for shipments (Queued)."})
+
+@app.route('/sync/payments', methods=['GET'])
+@require_shopify_session
+def trigger_payment_sync():
+    """Manual payment sync. ?dry_run=1 reads both sides and logs what it
+    would mark paid, without writing to Shopify."""
+    shop_url = request.args.get('shop')
+    if not shop_url: return jsonify({"error": "Missing shop parameter"}), 400
+    dry_run = request.args.get('dry_run') in ('1', 'true', 'yes')
+    log_event('Payment Sync', 'Info',
+              f"Manual payment sync triggered{' (dry run)' if dry_run else ''}.",
+              shop_url=shop_url)
+    q_critical.enqueue(sync_odoo_payments, shop_url, not dry_run, job_timeout=600)
+    return jsonify({"message": "Started checking Odoo for paid orders (Queued)."})
 
 @app.route('/sync/cancellations', methods=['GET'])
 @require_shopify_session
@@ -2599,6 +2621,7 @@ def api_dashboard_status():
         'inventory':    f"last_inv_{shop_url}",
         'fulfillment':  f"last_ful_{shop_url}",
         'cancellation': f"last_cancel_{shop_url}",
+        'payment':      f"last_pay_sync_{shop_url}",
         'return':       f"last_ret_sync_{shop_url}",
         'customer':     f"last_cust_sync_{shop_url}",
         'product':      f"last_prod_sync_{shop_url}",
@@ -3262,6 +3285,13 @@ def _run_shop_schedule(shop_url):
     if not conn.get(f"last_cancel_{shop_url}"):
         q_critical.enqueue(run_cancellation_sync, shop_url, job_timeout=600, retry=retry_fast)
         conn.setex(f"last_cancel_{shop_url}", 300, "done")
+
+    # 3b. Payment Sync (Every 10 mins) - marks Shopify orders paid once Odoo
+    # has them fully invoiced and paid. Does nothing unless the shop has
+    # payment_sync_enabled set. See services/payments.py.
+    if not conn.get(f"last_pay_sync_{shop_url}"):
+        q_critical.enqueue(run_payment_sync, shop_url, job_timeout=600, retry=retry_fast)
+        conn.setex(f"last_pay_sync_{shop_url}", 600, "done")
 
     # 4. Return Sync (Every hour)
     if not conn.get(f"last_ret_sync_{shop_url}"):
