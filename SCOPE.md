@@ -42,6 +42,7 @@ The app runs on Render (Flask + RQ workers), uses Supabase (PostgreSQL) for stat
 | Order sync: Shopify → Odoo, webhook + 30 min poll fallback | Done |
 | Fulfillment sync: Odoo → Shopify, every 60 min | Done |
 | Cancellation sync: Odoo → Shopify, every 5 min | Done |
+| Payment sync: Odoo → Shopify, every 10 min. Marks a Shopify order paid (`orderMarkAsPaid`) once its Odoo sale order has no open delivery, nothing left to invoice, and every posted customer invoice is Paid or In Payment. Read-only on Odoo. Per-shop switch `payment_sync_enabled` (on for Worthy Products since 17 Nov 2026). Judged on order lines, not the order's `invoice_status`, because locked (`done`) orders report `no` even when fully invoiced. Only sees the last 60 days of Shopify orders (no `read_all_orders`). See `services/payments.py` | Done |
 | Return/refund sync: Shopify → Odoo, webhook + scheduled | Done |
 | Customer sync: Odoo → Shopify, every 12 hours | Done |
 | Product sync: Shopify ↔ Odoo, webhook + 24 hour scheduled | Done |
