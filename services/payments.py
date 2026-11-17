@@ -26,6 +26,9 @@ Limits:
     alone: those are captured, not marked as paid.
 """
 import json
+import re
+from datetime import datetime
+
 import shopify
 
 from utils import (get_odoo_connection, get_shop_company_id, log_event,
@@ -102,6 +105,72 @@ def fetch_unpaid_shopify_orders(extra_query=None):
         if not info.get('hasNextPage'):
             return orders
         cursor = info.get('endCursor')
+
+
+def shopify_name_from_ref(ref):
+    """Shopify order name ('#2968') from an Odoo client_order_ref, or None.
+
+    Odoo holds Shopify orders under three shapes of reference:
+      'ONLINE_#5572'        - created by this connector (from 20 Jan 2026)
+      '#2968'               - keyed in by hand, Apr 2025 to Jan 2026
+      'ONLINE_#5771 Emma'   - either of the above with a note typed after it
+    Only the first word counts, and it must be '#' followed by digits.
+    """
+    first = (ref or '').strip().split(' ')[0] if ref else ''
+    if first.startswith('ONLINE_'):
+        first = first[len('ONLINE_'):]
+    return first if re.fullmatch(r'#\d+', first) else None
+
+
+def _dates_close(so_date, shopify_created, days=30):
+    try:
+        a = datetime.strptime(str(so_date)[:10], '%Y-%m-%d')
+        b = datetime.strptime(str(shopify_created)[:10], '%Y-%m-%d')
+        return abs((a - b).days) <= days
+    except (TypeError, ValueError):
+        return False
+
+
+def match_odoo_sale_orders(odoo, company_id, shopify_orders):
+    """Map Shopify order name -> Odoo sale.order for the given orders.
+
+    Exact 'ONLINE_#n' / '#n' references first, then the same with a note
+    typed after them. A reference without the ONLINE_ prefix is only trusted
+    when the Odoo order is dated within 30 days of the Shopify order, because
+    '#2968' could in theory be some other customer's PO number.
+    """
+    fields = ['name', 'client_order_ref', 'state', 'delivery_status', 'invoice_ids',
+              'order_line', 'amount_total', 'date_order']
+    base = [['company_id', '=', int(company_id)]] if company_id else []
+    created = {o['name']: o.get('createdAt') for o in shopify_orders}
+    names = list(created)
+    found = []
+    for i in range(0, len(names), 500):
+        chunk = names[i:i + 500]
+        refs = [f"ONLINE_{n}" for n in chunk] + chunk
+        found += odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'search_read',
+                                        [base + [['client_order_ref', 'in', refs]]], {'fields': fields})
+    seen = {shopify_name_from_ref(so['client_order_ref']) for so in found}
+    missing = [n for n in names if n not in seen]
+    for i in range(0, len(missing), 100):
+        chunk = missing[i:i + 100]
+        pats = [p for n in chunk for p in (f"ONLINE_{n} %", f"{n} %")]
+        dom = ['|'] * (len(pats) - 1) + [['client_order_ref', '=like', p] for p in pats]
+        found += odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'search_read',
+                                        [base + dom], {'fields': fields})
+
+    out = {}
+    for so in found:
+        name = shopify_name_from_ref(so.get('client_order_ref'))
+        if name not in created:
+            continue
+        if not (so.get('client_order_ref') or '').startswith('ONLINE_') and                 not _dates_close(so.get('date_order'), created[name]):
+            continue
+        prev = out.get(name)
+        # If a ref exists twice, prefer the confirmed one.
+        if not prev or prev.get('state') not in ('sale', 'done'):
+            out[name] = so
+    return out
 
 
 def odoo_order_is_paid(sale_order, invoices, lines):
@@ -184,24 +253,10 @@ def sync_odoo_payments(shop_url, apply_changes=True, limit=None,
         if not unpaid:
             return summary
 
-        # Odoo sale orders for these Shopify orders, one query.
         company_id = get_shop_company_id(shop_url)
-        refs = [f"ONLINE_{o['name']}" for o in unpaid]
-        domain = [['client_order_ref', 'in', refs]]
-        if company_id:
-            domain.append(['company_id', '=', int(company_id)])
-        sos = odoo.models.execute_kw(
-            odoo.db, odoo.uid, odoo.password, 'sale.order', 'search_read', [domain],
-            {'fields': ['name', 'client_order_ref', 'state', 'delivery_status',
-                        'invoice_ids', 'order_line', 'amount_total']})
-        so_by_ref = {}
-        for so in sos:
-            # If a ref somehow exists twice, prefer the confirmed one.
-            prev = so_by_ref.get(so['client_order_ref'])
-            if not prev or (prev.get('state') not in ('sale', 'done')):
-                so_by_ref[so['client_order_ref']] = so
+        so_by_name = match_odoo_sale_orders(odoo, company_id, unpaid)
 
-        move_ids = sorted({mid for so in so_by_ref.values() for mid in so.get('invoice_ids') or []})
+        move_ids = sorted({mid for so in so_by_name.values() for mid in so.get('invoice_ids') or []})
         moves = {}
         for i in range(0, len(move_ids), 500):
             chunk = odoo.models.execute_kw(
@@ -210,7 +265,7 @@ def sync_odoo_payments(shop_url, apply_changes=True, limit=None,
             for m in chunk:
                 moves[m['id']] = m
 
-        line_ids = sorted({lid for so in so_by_ref.values() for lid in so.get('order_line') or []})
+        line_ids = sorted({lid for so in so_by_name.values() for lid in so.get('order_line') or []})
         so_lines = {}
         for i in range(0, len(line_ids), 1000):
             for l in odoo.models.execute_kw(
@@ -220,7 +275,7 @@ def sync_odoo_payments(shop_url, apply_changes=True, limit=None,
 
         for order in unpaid:
             name = order['name']
-            so = so_by_ref.get(f"ONLINE_{name}")
+            so = so_by_name.get(name)
             if not so:
                 summary['not_in_odoo'] += 1
                 continue

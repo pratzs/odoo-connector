@@ -1,5 +1,5 @@
 """The paid/not-paid rule for marking Shopify orders paid from Odoo."""
-from services.payments import odoo_order_is_paid
+from services.payments import odoo_order_is_paid, shopify_name_from_ref, _dates_close
 
 SO = {'state': 'done', 'delivery_status': 'full'}
 DONE = [{'qty_to_invoice': 0.0, 'display_type': False}]
@@ -62,3 +62,17 @@ def test_reversed_invoice_ignored_when_reissued_and_paid():
 def test_credit_note_reduces_paid_total():
     ok, _, total = odoo_order_is_paid(SO, [inv(amt=100), inv(kind='out_refund', amt=15)], DONE)
     assert ok and total == 85.0
+
+
+def test_shopify_name_from_ref_shapes():
+    assert shopify_name_from_ref('ONLINE_#5572') == '#5572'
+    assert shopify_name_from_ref('#2968') == '#2968'
+    assert shopify_name_from_ref('ONLINE_#5771 Emma') == '#5771'
+    assert shopify_name_from_ref('Missy Email 29th May') is None
+    assert shopify_name_from_ref('PO 2968') is None
+    assert shopify_name_from_ref(False) is None
+
+
+def test_dates_close():
+    assert _dates_close('2025-12-07 10:00:00', '2025-12-07T01:00:00Z')
+    assert not _dates_close('2024-01-01 00:00:00', '2025-12-07T01:00:00Z')
