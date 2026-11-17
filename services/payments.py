@@ -68,6 +68,11 @@ mutation MarkPaid($input: OrderMarkAsPaidInput!) {
 # excluded (see module docstring).
 MARKABLE_STATUSES = {'PENDING', 'PARTIALLY_PAID'}
 
+# Odoo became Worthy's ledger in April 2025 (first ONLINE_ order 29 Apr 2025).
+# Orders from this date are matched against Odoo; orders before it were paid
+# in the previous accounting system (mark_historic_orders_paid).
+ODOO_ERA_START = '2025-04-01'
+
 
 def _gql(query, variables):
     raw = shopify.GraphQL().execute(query, variables)
@@ -151,7 +156,8 @@ def odoo_order_is_paid(sale_order, invoices, lines):
     return True, "fully invoiced and paid", round(invoiced - refunded, 2)
 
 
-def sync_odoo_payments(shop_url, apply_changes=True, limit=None):
+def sync_odoo_payments(shop_url, apply_changes=True, limit=None,
+                       extra_query=f"created_at:>={ODOO_ERA_START}"):
     """
     Mark Shopify orders as paid once Odoo has them fully invoiced and paid.
 
@@ -171,7 +177,7 @@ def sync_odoo_payments(shop_url, apply_changes=True, limit=None):
                    'amount_mismatch': 0, 'errors': 0, 'paid_orders': [],
                    'not_paid_reasons': {}}
 
-        unpaid = fetch_unpaid_shopify_orders()
+        unpaid = fetch_unpaid_shopify_orders(extra_query)
         if limit:
             unpaid = unpaid[:int(limit)]
         summary['unpaid_in_shopify'] = len(unpaid)

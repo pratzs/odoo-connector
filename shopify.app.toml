@@ -53,10 +53,12 @@ api_version = "2025-10"
 # companyLocationCreate, companyContactCreate and companyContactRoleAssign, none of which
 # were granted. Deliberately NOT declared, because nothing in the codebase calls them:
 # product_listings, files, reports, shipping, price_rules, discounts, draft_orders,
-# assigned_fulfillment_orders, write_locations, write_payments, returns. read_all_orders is
-# not needed either: the order poll looks back 48 hours (app.py), well inside the 60-day
-# window that scope exists to widen.
-scopes = "read_companies,read_customers,read_fulfillments,read_inventory,read_locations,read_merchant_managed_fulfillment_orders,read_orders,read_products,read_third_party_fulfillment_orders,write_companies,write_customers,write_fulfillments,write_inventory,write_merchant_managed_fulfillment_orders,write_orders,write_products,write_third_party_fulfillment_orders"
+# assigned_fulfillment_orders, write_locations, write_payments, returns.
+# read_all_orders: approved by Shopify and released 18 Nov 2026 (version 13) so the payment
+# sync can mark orders older than 60 days paid (services/payments.py). NOTE: version 13 was
+# deployed from the LIVE config plus this one scope; the companies scopes and extra webhooks
+# below are still NOT live.
+scopes = "read_all_orders,read_companies,read_customers,read_fulfillments,read_inventory,read_locations,read_merchant_managed_fulfillment_orders,read_orders,read_products,read_third_party_fulfillment_orders,write_companies,write_customers,write_fulfillments,write_inventory,write_merchant_managed_fulfillment_orders,write_orders,write_products,write_third_party_fulfillment_orders"
 optional_scopes = [ ]
 use_legacy_install_flow = false
 
