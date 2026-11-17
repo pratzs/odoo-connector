@@ -1183,6 +1183,25 @@ def confirm_billing():
 # -----------------------------------------------------------------
 # In app.py
 
+def _order_webhook_is_noop(data, shop_url):
+    """True when process_order_data would skip this order at its first
+    guards: already in ProcessedOrder, or created before sync_start_date.
+    Any doubt (missing fields, DB error) returns False so the order is
+    processed as before."""
+    try:
+        order_id = str(data.get('id') or '')
+        if order_id and db.session.get(ProcessedOrder, (order_id, shop_url)):
+            return True
+        created = (data.get('created_at') or '')[:10]
+        shop = Shop.query.filter_by(shop_url=shop_url).first()
+        start = getattr(shop, 'sync_start_date', None) if shop else None
+        if created and start and created < str(start)[:10]:
+            return True
+    except Exception:
+        db.session.rollback()
+    return False
+
+
 @app.route('/webhooks/shopify', methods=['POST'])
 def shopify_webhook():
     # ✅ SECURITY: Verify this actually came from Shopify
@@ -1204,6 +1223,14 @@ def shopify_webhook():
     # failures") and could crowd real order webhooks out of the same minute.
     if topic not in HANDLED_WEBHOOK_TOPICS:
         return "Topic ignored", 200
+
+    # orders/updated and orders/paid for an order the worker would skip anyway
+    # (already synced to Odoo, or older than the shop's sync start date) are
+    # answered here. Marking orders paid in bulk (services/payments.py) fires
+    # two of these per order; enqueueing them held up real new orders behind
+    # thousands of no-op jobs and tripped the rate limit below.
+    if topic in ('orders/updated', 'orders/paid') and _order_webhook_is_noop(data, shop_url):
+        return "Already synced", 200
 
     # Rate limit: max WEBHOOK_RATE_LIMIT handled webhooks per shop per minute
     rate_key = f"wh_rate_{shop_url}"
