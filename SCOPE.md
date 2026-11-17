@@ -43,6 +43,7 @@ The app runs on Render (Flask + RQ workers), uses Supabase (PostgreSQL) for stat
 | Fulfillment sync: Odoo → Shopify, every 60 min | Done |
 | Cancellation sync: Odoo → Shopify, every 5 min | Done |
 | Payment sync: Odoo → Shopify, every 10 min. Marks a Shopify order paid (`orderMarkAsPaid`) once its Odoo sale order has no open delivery, nothing left to invoice, and every posted customer invoice is Paid or In Payment. Read-only on Odoo. Per-shop switch `payment_sync_enabled` (on for Worthy Products since 17 Nov 2026). Judged on order lines, not the order's `invoice_status`, because locked (`done`) orders report `no` even when fully invoiced. Only sees the last 60 days of Shopify orders (no `read_all_orders`). See `services/payments.py` | Done |
+| Historic paid backfill (`mark_historic_orders_paid`): marks every still-pending order created before a date as paid (business decision 18 Nov 2026: all orders since the 2022 launch were paid, pre-Apr 2025 in the old accounting system), except orders Odoo still has an open invoice for. Needs `read_all_orders`, which for this Partner-org app (Tripster Developers) needs Shopify approval first; a deploy with it was rejected 18 Nov 2026 ("scopes: read_all_orders"). After approval: add it to `shopify.app.toml`, deploy, store re-approves, then run with a dry run first | Waiting on Shopify approval |
 | Return/refund sync: Shopify → Odoo, webhook + scheduled | Done |
 | Customer sync: Odoo → Shopify, every 12 hours | Done |
 | Product sync: Shopify ↔ Odoo, webhook + 24 hour scheduled | Done |

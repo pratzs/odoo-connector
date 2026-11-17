@@ -77,9 +77,12 @@ def _gql(query, variables):
     return data.get('data') or {}
 
 
-def fetch_unpaid_shopify_orders():
-    """All open Shopify orders still awaiting payment, newest first."""
+def fetch_unpaid_shopify_orders(extra_query=None):
+    """All open Shopify orders still awaiting payment, newest first.
+    extra_query narrows it, e.g. "created_at:<2026-09-19"."""
     q = "(financial_status:pending OR financial_status:partially_paid) AND -status:cancelled"
+    if extra_query:
+        q += f" AND {extra_query}"
     orders, cursor = [], None
     while True:
         data = _gql(UNPAID_ORDERS_QUERY, {'cursor': cursor, 'q': q})
@@ -277,3 +280,80 @@ def scheduled_payment_sync(shop_url):
         if str(enabled).lower() not in ('true', '1', 'yes'):
             return None
     return sync_odoo_payments(shop_url, apply_changes=True)
+
+
+def mark_historic_orders_paid(shop_url, created_before, apply_changes=False):
+    """
+    One-off backfill for orders older than the live sync looks at.
+
+    Business decision (Pratham, 18 Nov 2026): every Worthy Products order
+    from the store's launch (2022) up to `created_before` has been paid -
+    before April 2025 in the previous accounting system, after that in Odoo.
+    So these orders are marked paid without needing a paid Odoo invoice.
+
+    One exception, from the data rather than the decision: if Odoo still has
+    an open (not paid / partly paid) customer invoice for the order, it is
+    owed money, so it is skipped and listed, and the live sync marks it paid
+    when Odoo does.
+
+    Needs read_all_orders alongside write_orders: without it Shopify only
+    returns the last 60 days and this finds nothing older. Returns a summary.
+    """
+    from app import app
+
+    with app.app_context():
+        odoo = get_odoo_connection(shop_url)
+        if not odoo or not setup_shopify_session(shop_url):
+            raise RuntimeError("Connection failed: could not reach Odoo or Shopify")
+
+        mode = 'APPLY' if apply_changes else 'DRY RUN'
+        orders = fetch_unpaid_shopify_orders(f"created_at:<{created_before}")
+        summary = {'mode': mode, 'created_before': created_before, 'unpaid_found': len(orders),
+                   'oldest': orders[-1]['createdAt'] if orders else None,
+                   'marked_paid': 0, 'would_mark_paid': 0, 'skipped_open_in_odoo': [],
+                   'errors': [], 'by_year': {}}
+        if not orders:
+            return summary
+
+        company_id = get_shop_company_id(shop_url)
+        domain = [['move_type', '=', 'out_invoice'], ['state', '=', 'posted'],
+                  ['payment_state', 'in', ['not_paid', 'partial']],
+                  ['invoice_origin', 'like', 'ONLINE_']]
+        if company_id:
+            domain.append(['company_id', '=', int(company_id)])
+        open_invs = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'account.move',
+                                           'search_read', [domain],
+                                           {'fields': ['name', 'invoice_origin', 'amount_residual']})
+        open_by_ref = {}
+        for m in open_invs:
+            for ref in (m.get('invoice_origin') or '').split(','):
+                open_by_ref.setdefault(ref.strip(), []).append(m)
+
+        for o in orders:
+            name = o['name']
+            year = (o.get('createdAt') or '????')[:4]
+            summary['by_year'][year] = summary['by_year'].get(year, 0) + 1
+            owed = open_by_ref.get(f"ONLINE_{name}")
+            if owed:
+                summary['skipped_open_in_odoo'].append(
+                    f"{name}: " + ', '.join(f"{m['name']} ${m['amount_residual']:.2f} owed" for m in owed))
+                continue
+            if not apply_changes:
+                summary['would_mark_paid'] += 1
+                continue
+            try:
+                data = _gql(MARK_PAID_MUTATION, {'input': {'id': o['id']}})
+                errs = (data.get('orderMarkAsPaid') or {}).get('userErrors') or []
+                if errs:
+                    summary['errors'].append(f"{name}: " + '; '.join(e.get('message', '') for e in errs))
+                    continue
+                summary['marked_paid'] += 1
+            except Exception as e:
+                summary['errors'].append(f"{name}: {e}")
+
+        log_event(ENTITY, 'Warning' if summary['errors'] else 'Info',
+                  f"[{mode}] Historic backfill before {created_before}: {len(orders)} unpaid found, "
+                  f"marked paid {summary['marked_paid'] or summary['would_mark_paid']}, "
+                  f"skipped (open in Odoo) {len(summary['skipped_open_in_odoo'])}, "
+                  f"errors {len(summary['errors'])}", shop_url=shop_url)
+        return summary
