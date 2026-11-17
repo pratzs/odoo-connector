@@ -1,5 +1,5 @@
 """The paid/not-paid rule for marking Shopify orders paid from Odoo."""
-from services.payments import odoo_order_is_paid, shopify_name_from_ref, _dates_close
+from services.payments import odoo_order_is_paid, shopify_name_from_ref, _dates_close, _so_shopify_name
 
 SO = {'state': 'done', 'delivery_status': 'full'}
 DONE = [{'qty_to_invoice': 0.0, 'display_type': False}]
@@ -76,3 +76,8 @@ def test_shopify_name_from_ref_shapes():
 def test_dates_close():
     assert _dates_close('2025-12-07 10:00:00', '2025-12-07T01:00:00Z')
     assert not _dates_close('2024-01-01 00:00:00', '2025-12-07T01:00:00Z')
+
+
+def test_so_name_wins_over_overwritten_ref():
+    assert _so_shopify_name({'name': 'ONLINE_#4296', 'client_order_ref': 'Missy Email 29th May'}) == '#4296'
+    assert _so_shopify_name({'name': 'S01234', 'client_order_ref': '#2968'}) == '#2968'

@@ -122,6 +122,18 @@ def shopify_name_from_ref(ref):
     return first if re.fullmatch(r'#\d+', first) else None
 
 
+def _so_shopify_name(so):
+    """The connector names the Odoo order 'ONLINE_#n' as well as setting the
+    ref; the name survives when someone overwrites the ref with a note
+    ('Missy Email 29th May')."""
+    name = so.get('name') or ''
+    if name.startswith('ONLINE_#'):
+        n = shopify_name_from_ref(name)
+        if n:
+            return n
+    return shopify_name_from_ref(so.get('client_order_ref'))
+
+
 def _dates_close(so_date, shopify_created, days=30):
     try:
         a = datetime.strptime(str(so_date)[:10], '%Y-%m-%d')
@@ -149,8 +161,10 @@ def match_odoo_sale_orders(odoo, company_id, shopify_orders):
         chunk = names[i:i + 500]
         refs = [f"ONLINE_{n}" for n in chunk] + chunk
         found += odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'sale.order', 'search_read',
-                                        [base + [['client_order_ref', 'in', refs]]], {'fields': fields})
-    seen = {shopify_name_from_ref(so['client_order_ref']) for so in found}
+                                        [base + ['|', ['client_order_ref', 'in', refs],
+                                                 ['name', 'in', [f"ONLINE_{n}" for n in chunk]]]],
+                                        {'fields': fields})
+    seen = {_so_shopify_name(so) for so in found}
     missing = [n for n in names if n not in seen]
     for i in range(0, len(missing), 100):
         chunk = missing[i:i + 100]
@@ -161,10 +175,11 @@ def match_odoo_sale_orders(odoo, company_id, shopify_orders):
 
     out = {}
     for so in found:
-        name = shopify_name_from_ref(so.get('client_order_ref'))
+        name = _so_shopify_name(so)
         if name not in created:
             continue
-        if not (so.get('client_order_ref') or '').startswith('ONLINE_') and                 not _dates_close(so.get('date_order'), created[name]):
+        trusted = (so.get('name') or '').startswith('ONLINE_') or             (so.get('client_order_ref') or '').startswith('ONLINE_')
+        if not trusted and not _dates_close(so.get('date_order'), created[name]):
             continue
         prev = out.get(name)
         # If a ref exists twice, prefer the confirmed one.
