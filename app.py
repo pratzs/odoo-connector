@@ -806,14 +806,20 @@ def run_self_heal(shop_url):
         perform_self_heal(shop_url, apply_changes=True)
 
 
-def run_exclusion_archive(shop_url):
-    """Archive Shopify products matching the exclusion rules right now, so a
-    new rule takes effect on save instead of at the next product sync.
-    Logs every outcome: this job runs on the shared worker, so a silent exit
-    is indistinguishable from it never having run."""
+def run_exclusion_archive(shop_url, old_rules=None):
+    """Apply the exclusion rules right now, so a change takes effect on save
+    instead of at the next product sync: archive products a rule now matches,
+    and (when old_rules is given) bring back products a removed rule released.
+    One run per shop at a time (Redis lock), so two quick saves apply in order.
+    Logs every outcome: a silent exit is indistinguishable from never running."""
     from services.products import (_archive_excluded_products_in_shopify,
-                                   get_exclusion_rules)
+                                   restore_released_products, get_exclusion_rules)
     with app.app_context():
+        lock = conn.lock(f"exclusion_apply:{shop_url}", timeout=900, blocking_timeout=900)
+        if not lock.acquire():
+            log_event('Product Sync', 'Warning',
+                      'Exclusion archive: another run is still going, gave up after 15 minutes.', shop_url=shop_url)
+            return
         try:
             rules = get_exclusion_rules(shop_url)
             log_event('Product Sync', 'Info',
@@ -824,11 +830,30 @@ def run_exclusion_archive(shop_url):
                           'Exclusion archive: could not connect to Odoo.', shop_url=shop_url)
                 return
             n = _archive_excluded_products_in_shopify(shop_url, odoo, rules)
+            restored = restore_released_products(shop_url, odoo, old_rules or [], rules) if old_rules else 0
             log_event('Product Sync', 'Info',
-                      f"Exclusion archive finished: archived {n} Shopify product(s).",
+                      f"Exclusion archive finished: archived {n} Shopify product(s)"
+                      + (f", restored {restored}" if restored else "") + ".",
                       shop_url=shop_url)
         except Exception as e:
             log_event('Product Sync', 'Error', f"Exclusion archive failed: {e}", shop_url=shop_url)
+        finally:
+            try:
+                lock.release()
+            except Exception:
+                pass
+
+
+def start_exclusion_apply(shop_url, old_rules):
+    """Run the exclusion change at once in this (web) process, so it never waits
+    behind long jobs on the single shared worker. Falls back to the fast lane."""
+    try:
+        threading.Thread(target=run_exclusion_archive, args=(shop_url, old_rules),
+                         daemon=True, name=f"exclusion-{shop_url}").start()
+    except Exception as e:
+        log_event('Settings', 'Warning', f'Exclusion apply thread failed ({e}); queued on the fast lane.',
+                  shop_url=shop_url)
+        q_critical.enqueue(run_exclusion_archive, shop_url, old_rules, job_timeout=900)
 
 
 def _update_sync_health(shop_url, entity, success, error=None):
@@ -2925,9 +2950,15 @@ def save_settings():
                      raw = str(data[b_key]).lower()
                      data[b_key] = raw in ['true', 'on', '1', 'yes']
 
+        # Rules as they were before this save, so removed rules can release products at once.
+        old_exclusion_rules = []
+        if 'prod_exclusion_rules' in data:
+            from services.products import get_exclusion_rules
+            old_exclusion_rules = get_exclusion_rules(shop_url)
+
         for key, value in data.items():
             if key in ignore_fields: continue
-            
+
             # Save as JSON string
             val_str = json.dumps(value) 
             
@@ -2943,9 +2974,9 @@ def save_settings():
         # New/changed exclusion rules take effect immediately, not at the next sync.
         if 'prod_exclusion_rules' in data:
             try:
-                q_default.enqueue(run_exclusion_archive, shop_url, job_timeout=900)
+                start_exclusion_apply(shop_url, old_exclusion_rules)
             except Exception as e:
-                log_event('Settings', 'Warning', f'Could not queue exclusion archive: {e}', shop_url=shop_url)
+                log_event('Settings', 'Warning', f'Could not start exclusion archive: {e}', shop_url=shop_url)
         
         # --- FIXED RESPONSE LOGIC ---
         # 1. If the REQUEST was JSON (Dashboard), return JSON

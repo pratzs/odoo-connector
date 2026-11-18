@@ -226,3 +226,25 @@ def test_safety_cap_refuses_a_runaway_rule(archive_env):
     n, fake, _ = run_archive(archive_env, {1001: 'active', 1002: 'active', 1003: 'active'}, matching=[1, 2])
     assert n == 0 and fake.saved == []
     assert any('safety limit' in str(l) for l in archive_env.logs)
+
+
+# --- Removing a rule brings its products back at once (build_released_domain) ---
+from services.products import build_released_domain
+
+SKU_A = {'field': 'sku', 'op': 'eq', 'value': 'R0193'}
+SKU_B = {'field': 'sku', 'op': 'eq', 'value': 'R0194'}
+
+
+def test_removed_rule_releases_only_its_products():
+    dom = build_released_domain([SKU_A, SKU_B], [SKU_B])
+    # matched by an old rule, and NOT matched by any new rule
+    assert dom == ['|', ['default_code', '=ilike', 'R0193'], ['default_code', '=ilike', 'R0194'],
+                   '!', ['default_code', '=ilike', 'R0194']]
+
+
+def test_no_old_rules_releases_nothing():
+    assert build_released_domain([], [SKU_A]) == []
+
+
+def test_all_rules_removed_releases_everything_the_old_rules_held():
+    assert build_released_domain([SKU_A], []) == [['default_code', '=ilike', 'R0193']]

@@ -1209,6 +1209,60 @@ def _archive_excluded_products_in_shopify(shop_url, odoo, rules):
     return archived
 
 
+def build_released_domain(old_rules, new_rules):
+    """Odoo domain terms for products the OLD rules excluded that the NEW rules no longer exclude
+    (a rule was removed or loosened). [] when nothing can have been released."""
+    old_match = build_exclusion_match_domain(old_rules)
+    if not old_match:
+        return []
+    return old_match + build_exclusion_domain(new_rules)
+
+
+def restore_released_products(shop_url, odoo, old_rules, new_rules):
+    """
+    When a rule is removed, bring the products it was holding back onto the storefront now instead
+    of at the next product sync. Only products already in Shopify (mapped in ProductMap) and still
+    sellable in Odoo are touched; each goes through the normal product sync, which turns an archived
+    product back to active (and respects the clearance draft). Same safety cap as the archive.
+    """
+    released = build_released_domain(old_rules, new_rules)
+    if not released:
+        return 0
+    company_id = get_shop_company_id(shop_url)
+    if not company_id:
+        return 0
+    mapped = {
+        m.odoo_product_id for m in ProductMap.query.filter(
+            ProductMap.shop_url == shop_url,
+            ProductMap.odoo_product_id > 0,
+            ProductMap.shopify_variant_id != None,
+            ProductMap.shopify_variant_id.notin_(['0', '']))
+    }
+    if not mapped:
+        return 0
+    try:
+        ids = odoo.models.execute_kw(
+            odoo.db, odoo.uid, odoo.password, 'product.product', 'search',
+            [[['id', 'in', list(mapped)], ['active', '=', True], ['sale_ok', '=', True],
+              '|', ['company_id', '=', int(company_id)], ['company_id', '=', False]] + released])
+    except Exception as e:
+        log_event('Product Sync', 'Warning', f"Exclusion restore check failed: {e}", shop_url=shop_url)
+        return 0
+    if not ids:
+        return 0
+    if len(ids) > EXCLUSION_ARCHIVE_MAX:
+        log_event('Product Sync', 'Warning',
+            f"Removing exclusion rules releases {len(ids)} products — more than the safety limit of "
+            f"{EXCLUSION_ARCHIVE_MAX}, so none were restored now; the next product sync brings them back.",
+            shop_url=shop_url)
+        return 0
+    for i in range(0, len(ids), 50):
+        sync_product_batch_task(shop_url, ids[i:i + 50], 'Exclusion rule removed')
+    log_event('Product Sync', 'Info',
+        f"Exclusion rule removed: re-synced {len(ids)} product(s) back to the storefront.", shop_url=shop_url)
+    return len(ids)
+
+
 # =====================================================
 # 5. HELPERS & UTILITIES
 # =====================================================
