@@ -306,14 +306,12 @@ def sync_odoo_payments(shop_url, apply_changes=True, limit=None,
 
             outstanding = float(((order.get('totalOutstandingSet') or {}).get('shopMoney') or {}).get('amount') or 0)
             inv_names = ', '.join(m['name'] for m in invoices if m.get('move_type') == 'out_invoice')
-            note = f"{name} ({so['name']}, {inv_names}): Shopify outstanding ${outstanding:.2f}, Odoo paid ${odoo_paid:.2f}"
-            # Short deliveries and price edits in Odoo leave the Shopify total
-            # different from what was invoiced. Odoo is the ledger, so the order
-            # is still marked paid; the difference is logged so it can be seen.
-            mismatch = abs(outstanding - odoo_paid) > 1.00
-            if mismatch:
+            note = f"{name} ({so['name']}, {inv_names})"
+            # Short or over payment against the Shopify total is not this job's
+            # concern (Pratham, 18 Nov 2026): paid in Odoo = mark paid, nothing
+            # flagged. The count stays in the summary for reference only.
+            if abs(outstanding - odoo_paid) > 1.00:
                 summary['amount_mismatch'] += 1
-                note += " [amounts differ]"
             summary['paid_orders'].append(note)
 
             if not apply_changes:
@@ -332,7 +330,7 @@ def sync_odoo_payments(shop_url, apply_changes=True, limit=None,
                               shop_url=shop_url)
                     continue
                 summary['marked_paid'] += 1
-                log_event(ENTITY, 'Warning' if mismatch else 'Success',
+                log_event(ENTITY, 'Success',
                           f"Marked paid: {note}", shop_url=shop_url)
             except Exception as e:
                 summary['errors'] += 1
