@@ -407,6 +407,16 @@ class OdooClient:
                 
         return totals
 
+    # (url, db, model) -> set of field names. Field lists only change when an
+    # Odoo module is installed or removed, so one read per worker process is enough.
+    _fields_cache = {}
+
+    def has_field(self, model, field):
+        key = (self.url, self.db, model)
+        if key not in OdooClient._fields_cache:
+            OdooClient._fields_cache[key] = set(self.execute(model, 'fields_get', attributes=['type']).keys())
+        return field in OdooClient._fields_cache[key]
+
     def create_sale_order(self, order_vals, context=None):
         kwargs = {}
         if context: kwargs['context'] = context

@@ -310,7 +310,17 @@ def process_order_data(data, odoo_client, shop_url):
                 'order_line': lines, 'user_id': sales_rep_id, 'state': 'draft', 'note': note_text
             }
             if company_id: vals['company_id'] = int(company_id)
-            
+
+            # Online orders carry the price the customer paid in Shopify, so lock it.
+            # 'lock_price' comes from the Enabling NZ exchange-rate module; confirming an
+            # order never sets it, and staff were clicking Lock Price by hand. Only sent
+            # when the field exists, so an Odoo without that module is unaffected.
+            try:
+                if odoo.has_field('sale.order', 'lock_price'):
+                    vals['lock_price'] = True
+            except Exception as e:
+                log_event('Order', 'Warning', f"{client_ref}: could not check lock_price field ({e}); order created without price lock", shop_url=shop_url)
+
             sync_tax_included = get_config('order_sync_tax', False, shop_url=shop_url)
             odoo.create_sale_order(vals, context={'manual_price': True, 'tax_included': sync_tax_included})
             
