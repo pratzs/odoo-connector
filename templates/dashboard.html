@@ -463,6 +463,38 @@
                 </div>
             </div>
 
+            <div class="card p-4" id="stockVisCard">
+                <div class="section-header">🙈 Hide from storefront</div>
+                <div class="text-muted mb-3" style="font-size: 13px;">Takes products off the online store without deleting or archiving them. Their details, photos and collections stay as they are, and they come back on their own. Each switch saves and applies straight away.</div>
+
+                <div class="form-check form-switch mb-2">
+                    <input class="form-check-input" type="checkbox" id="svSoldOut" onchange="saveStockVis()">
+                    <label class="form-check-label fw-semibold" for="svSoldOut">Hide products that are sold out</label>
+                    <div class="text-muted" style="font-size: 12px;">When a product has no stock left to sell, it is hidden. It shows again as soon as stock comes back (on the next stock update). Products set to "Continue selling when out of stock" in Shopify are never hidden.</div>
+                </div>
+                <div class="form-check form-switch mb-3">
+                    <input class="form-check-input" type="checkbox" id="svNotReceived" onchange="saveStockVis()">
+                    <label class="form-check-label fw-semibold" for="svNotReceived">Hold back new products until their first stock arrives</label>
+                    <div class="text-muted" style="font-size: 12px;">A new product that has never had stock received into the warehouse in Odoo stays hidden. It shows automatically once it has been received and has stock.</div>
+                </div>
+
+                <div class="d-flex flex-wrap gap-2 mb-2">
+                    <button type="button" class="btn btn-sm btn-outline-secondary" id="btnSvPreview" onclick="stockVisAction('preview')">Preview (changes nothing)</button>
+                    <button type="button" class="btn btn-sm btn-secondary" id="btnSvApply" onclick="stockVisAction('apply')">Apply now</button>
+                </div>
+                <div class="text-muted mb-2" style="font-size: 12px;">Only products this setting hid are ever shown again; anything you hid yourself is left alone. If you publish a hidden product yourself, it is left visible. At most <span id="svCap">100</span> products are hidden per run; any more follow on the next run.</div>
+                <div id="svPreview" class="alert alert-secondary p-2 border-0" style="display:none; font-size: 12px; background-color: #f1f2f3;"></div>
+                <div id="svLastRun" class="text-muted mb-2" style="font-size: 12px;"></div>
+
+                <label class="form-label-sm mb-1">Hidden by this setting right now (<span id="svCount">0</span>)</label>
+                <div style="max-height: 260px; overflow-y: auto;">
+                    <table class="table table-sm mb-0" style="font-size: 12px;">
+                        <thead><tr><th>SKU</th><th>Product</th><th>Why</th><th>Since (UTC)</th></tr></thead>
+                        <tbody id="svHiddenBody"><tr><td colspan="4" class="text-muted">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+
             <div class="row">
                 <div class="col-md-6">
                     <div class="card p-4 h-100">
@@ -1497,6 +1529,61 @@ function collectExclusionRules() {
         value: r.querySelector('.rule-value').value.trim()
     })).filter(r => r.value !== '');
 }
+
+// --- Hide from storefront (sold out / not yet received) ---
+function _svEsc(t) { const d = document.createElement('div'); d.textContent = t == null ? '' : String(t); return d.innerHTML; }
+function loadStockVis() {
+    return fetch(`/api/stock_visibility/status?shop=${CURRENT_SHOP_URL}`)
+    .then(r => r.json())
+    .then(d => {
+        document.getElementById('svSoldOut').checked = !!(d.settings && d.settings.sold_out);
+        document.getElementById('svNotReceived').checked = !!(d.settings && d.settings.not_received);
+        document.getElementById('svCap').textContent = d.cap || 100;
+        const rows = d.hidden || [];
+        document.getElementById('svCount').textContent = rows.length;
+        document.getElementById('svHiddenBody').innerHTML = rows.length
+            ? rows.map(i => `<tr><td>${_svEsc(i.sku)}</td><td>${_svEsc(i.title)}</td><td>${_svEsc(i.reason)}</td><td>${_svEsc(i.since)}</td></tr>`).join('')
+            : '<tr><td colspan="4" class="text-muted">Nothing is hidden by this setting.</td></tr>';
+        const lr = d.last_run;
+        let last = lr ? `Last run ${_svEsc(lr.at)} UTC (${_svEsc(lr.source)}): hid ${lr.hidden}, showed ${lr.shown} again${lr.capped ? `, ${lr.capped} more waiting for the next run` : ''}${lr.failed ? `, ${lr.failed} failed (see Live Logs)` : ''}.` : '';
+        if (lr && lr.refused) last += ` <span class="text-danger">${_svEsc(lr.refused)}</span>`;
+        if (d.staff_shown && d.staff_shown.length) last += ` ${d.staff_shown.length} product(s) you showed again by hand are being left visible.`;
+        document.getElementById('svLastRun').innerHTML = last;
+        const p = d.preview, box = document.getElementById('svPreview');
+        if (p) {
+            const ex = list => (list || []).map(e => _svEsc(e.sku + ' ' + e.title)).join('; ');
+            box.innerHTML = `<strong>Preview ${_svEsc(p.at)} UTC</strong> (of ${p.active_checked} active products):<br>` +
+                `Sold out: <strong>${p.sold_out}</strong>${p.sold_out ? ' &mdash; e.g. ' + ex(p.sold_out_examples) : ''}<br>` +
+                `Not yet received: <strong>${p.not_received}</strong>${p.not_received ? ' &mdash; e.g. ' + ex(p.not_received_examples) : ''}` +
+                (p.refused ? `<br><span class="text-danger">${_svEsc(p.refused)}</span>` : '');
+            box.style.display = '';
+        }
+        return d;
+    })
+    .catch(e => console.error('stock visibility status', e));
+}
+function saveStockVis() {
+    const body = { sold_out: document.getElementById('svSoldOut').checked,
+                   not_received: document.getElementById('svNotReceived').checked };
+    fetch(`/api/stock_visibility/settings?shop=${CURRENT_SHOP_URL}`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) })
+    .then(r => r.json())
+    .then(d => { showToast(d.success ? '✅ Saved. Applying now...' : ('Save failed: ' + (d.message || ''))); _svPoll(); })
+    .catch(e => showToast('Save failed: ' + e.message));
+}
+function stockVisAction(kind) {
+    fetch(`/api/stock_visibility/${kind}?shop=${CURRENT_SHOP_URL}`, { method: 'POST' })
+    .then(r => r.json())
+    .then(d => { showToast(d.message || 'Started'); _svPoll(); })
+    .catch(e => showToast('Failed: ' + e.message));
+}
+let _svTimer = null;
+function _svPoll() {
+    let n = 0;
+    if (_svTimer) clearInterval(_svTimer);
+    _svTimer = setInterval(() => { loadStockVis(); if (++n >= 24) clearInterval(_svTimer); }, 5000);
+}
+document.addEventListener('DOMContentLoaded', () => { if (document.getElementById('stockVisCard')) loadStockVis(); });
 
 function saveSettings() {
     const companyId = document.getElementById('companySelect').value;

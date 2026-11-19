@@ -945,6 +945,38 @@ def _run_inventory_sync_locked(shop_url, force_clearance=False):
             except Exception as e:
                 log_event('Clearance', 'Error', f"Clearance sync failed: {e}", shop_url=shop_url)
 
+        # Hide-from-storefront (sold out / not yet received), after stock and the
+        # clearance pass have settled. Runs while a shop still has products this
+        # rule hid, even with both switches off, so switching off releases them.
+        try:
+            from services.stock_visibility import run_stock_visibility
+            run_stock_visibility(shop_url, source='inventory sync')
+        except Exception as e:
+            log_event('Storefront', 'Error', f"Hide-from-storefront failed: {e}", shop_url=shop_url)
+
+
+def run_stock_visibility_now(shop_url, dry_run=False, source='apply now'):
+    """Dashboard 'Apply now' / 'Preview' and switch changes."""
+    with app.app_context():
+        try:
+            from services.stock_visibility import run_stock_visibility
+            run_stock_visibility(shop_url, dry_run=dry_run, source=source)
+        except Exception as e:
+            log_event('Storefront', 'Error', f"Hide-from-storefront {'preview' if dry_run else 'run'} failed: {e}",
+                      shop_url=shop_url)
+
+
+def start_stock_visibility(shop_url, dry_run=False, source='apply now'):
+    """Same pattern as start_exclusion_apply: run at once in a web-process
+    thread (the single RQ worker may be busy for minutes), queue as fallback."""
+    try:
+        threading.Thread(target=run_stock_visibility_now, args=(shop_url, dry_run, source),
+                         daemon=True, name=f"stockvis-{shop_url}").start()
+    except Exception as e:
+        log_event('Storefront', 'Warning', f'Hide-from-storefront thread failed ({e}); queued instead.',
+                  shop_url=shop_url)
+        q_critical.enqueue(run_stock_visibility_now, shop_url, dry_run, source, job_timeout=900)
+
 
 def run_fulfillment_sync(shop_url):
     _run_with_health('fulfillment', shop_url, sync_odoo_fulfillments)
@@ -1246,6 +1278,23 @@ def shopify_webhook():
     # are answered 200 straight away. They used to count toward the rate limit
     # below, so an inventory burst got 429s (Shopify Dev Dashboard "Webhook
     # failures") and could crowd real order webhooks out of the same minute.
+    # Stock moved on one item (a sale took the last unit, or stock came back):
+    # re-check that one product for the hide-from-storefront rule. Only when the
+    # shop has the rule on; skipped while our own inventory sync is pushing
+    # levels (its end-of-run pass covers those); one job per item per minute.
+    if topic == 'inventory_levels/update':
+        try:
+            item_id = data.get('inventory_item_id')
+            if (item_id and not conn.exists(f"inv_sync_{shop_url}")
+                    and (get_config('hide_sold_out_enabled', False, shop_url=shop_url) in (True, 'true')
+                         or get_config('hide_not_received_enabled', False, shop_url=shop_url) in (True, 'true'))
+                    and conn.set(f"stockvis_wh:{shop_url}:{item_id}", 1, nx=True, ex=60)):
+                from services.stock_visibility import check_one_inventory_item
+                q_critical.enqueue(check_one_inventory_item, shop_url, item_id, job_timeout=120)
+        except Exception as e:
+            print(f"stock visibility webhook skipped: {e}")
+        return "Inventory noted", 200
+
     if topic not in HANDLED_WEBHOOK_TOPICS:
         return "Topic ignored", 200
 
@@ -4137,6 +4186,10 @@ def api_publication_repair():
         return jsonify({'error': 'audit failed', 'detail': payload}), 500
 
     targets = [u for u in payload['items'] if include_zero or (u['inventory'] or 0) > 0]
+    # Never re-publish what the hide-from-storefront rule is holding back on purpose.
+    from services.stock_visibility import hidden_product_ids
+    _held = hidden_product_ids(shop_url)
+    targets = [u for u in targets if str(u['product_id']) not in _held]
     if only_skus:
         targets = [u for u in targets if u['sku'] in only_skus]
     targets = targets[:limit]
@@ -4595,6 +4648,64 @@ def api_refresh_metafields():
         return jsonify({'success': True, 'message': f'Metafield refresh queued (Job ID: {job.id[:8]}...). Check Live Logs for progress.'})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
+
+
+# ==========================================
+#  HIDE FROM STOREFRONT (sold out / not yet received)
+# ==========================================
+@app.route('/api/stock_visibility/status', methods=['GET'])
+@require_shopify_session
+def api_stock_visibility_status():
+    shop_url = request.args.get('shop')
+    from services.stock_visibility import (get_settings, get_hidden, REASON_LABELS,
+                                           LAST_RUN_KEY, PREVIEW_KEY, MAX_HIDE_PER_RUN)
+    hidden = get_hidden(shop_url)
+    items = [{'product_id': pid, 'sku': e.get('sku'), 'title': e.get('title'),
+              'reason': REASON_LABELS.get(e.get('reason'), e.get('reason')), 'since': e.get('since')}
+             for pid, e in hidden.items() if not e.get('staff_override')]
+    items.sort(key=lambda i: (i['reason'] or '', (i['title'] or '').lower()))
+    overrides = [{'product_id': pid, 'sku': e.get('sku'), 'title': e.get('title')}
+                 for pid, e in hidden.items() if e.get('staff_override')]
+    return jsonify({'settings': get_settings(shop_url), 'hidden': items, 'staff_shown': overrides,
+                    'last_run': get_config(LAST_RUN_KEY, None, shop_url=shop_url),
+                    'preview': get_config(PREVIEW_KEY, None, shop_url=shop_url),
+                    'cap': MAX_HIDE_PER_RUN})
+
+
+@app.route('/api/stock_visibility/settings', methods=['POST'])
+@require_shopify_session
+def api_stock_visibility_settings():
+    """Save the two switches and apply at once (switching off shows this rule's products again)."""
+    shop_url = request.args.get('shop')
+    body = request.get_json(silent=True) or {}
+    from services.stock_visibility import CFG_SOLD_OUT, CFG_NOT_RECEIVED, get_settings
+    before = get_settings(shop_url)
+    sold_out, not_received = bool(body.get('sold_out')), bool(body.get('not_received'))
+    set_config(CFG_SOLD_OUT, sold_out, shop_url=shop_url)
+    set_config(CFG_NOT_RECEIVED, not_received, shop_url=shop_url)
+    log_event('Settings', 'Info',
+              f"Hide from storefront: sold out {'ON' if sold_out else 'OFF'}, "
+              f"not yet received {'ON' if not_received else 'OFF'}.", shop_url=shop_url)
+    if before != {'sold_out': sold_out, 'not_received': not_received}:
+        start_stock_visibility(shop_url, source='switch changed')
+    return jsonify({'success': True})
+
+
+@app.route('/api/stock_visibility/apply', methods=['POST'])
+@require_shopify_session
+def api_stock_visibility_apply():
+    shop_url = request.args.get('shop')
+    start_stock_visibility(shop_url, source='apply now')
+    return jsonify({'success': True, 'message': 'Started. The list updates in a minute or two.'})
+
+
+@app.route('/api/stock_visibility/preview', methods=['POST'])
+@require_shopify_session
+def api_stock_visibility_preview():
+    """Dry run: counts what each rule would hide right now. Changes nothing."""
+    shop_url = request.args.get('shop')
+    start_stock_visibility(shop_url, dry_run=True, source='preview')
+    return jsonify({'success': True, 'message': 'Preview started. Nothing is changed.'})
 
 
 # ==========================================

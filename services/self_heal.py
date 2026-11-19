@@ -398,6 +398,11 @@ def perform_self_heal(shop_url, apply_changes=True):
     try:
         unpublished = _active_unpublished_products()
         targets = [u for u in unpublished if (u['inventory'] or 0) > 0]
+        # Products the hide-from-storefront rule is holding back are not lost
+        # publications; that rule shows them again itself (services/stock_visibility.py).
+        from services.stock_visibility import hidden_product_ids
+        _held = hidden_product_ids(shop_url)
+        targets = [u for u in targets if str(u['id']) not in _held]
         for t in targets:
             if not apply_changes:
                 report['republished'].append(t['sku'] or t['id'])
@@ -422,6 +427,9 @@ def perform_self_heal(shop_url, apply_changes=True):
     # --- 1b. Active but missing from Point of Sale -----------------------
     try:
         no_pos = _active_not_on_pos()
+        from services.stock_visibility import hidden_product_ids
+        _held = hidden_product_ids(shop_url)
+        no_pos = [t for t in no_pos if str(t['id']) not in _held]
         fixed, bad = [], []
         for t in no_pos:
             if not apply_changes:

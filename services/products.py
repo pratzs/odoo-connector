@@ -360,6 +360,14 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
             'exclusion_rules':     _clean_exclusion_rules(_raw.get('prod_exclusion_rules', [])),
             'currency': currency
         }
+        # Products the hide-from-storefront rule is holding back (services/stock_visibility.py):
+        # the sync must not nudge their publication, and new products may be held at creation.
+        try:
+            from services.stock_visibility import hidden_product_ids, get_settings as _sv_settings
+            cfg['stock_hidden_ids'] = hidden_product_ids(shop_url)
+            cfg['hold_not_received'] = _sv_settings(shop_url)['not_received']
+        except Exception:
+            cfg['stock_hidden_ids'], cfg['hold_not_received'] = set(), False
 
         # --- A. PREFETCH ODOO DATA ---
         fields = ['default_code', 'name', 'list_price', 'standard_price', 'active',
@@ -755,7 +763,9 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     # Sales channels: an ACTIVE product must be on Online Store AND Point of
     # Sale. 'web' is Online Store only; 'global' is both. A draft is left
     # alone so it is never published by accident.
-    if sp.status == 'active' and getattr(sp, 'published_scope', None) != 'global':
+    # Products the hide-from-storefront rule is holding back are left alone.
+    if (sp.status == 'active' and getattr(sp, 'published_scope', None) != 'global'
+            and str(getattr(sp, 'id', '') or '') not in cfg.get('stock_hidden_ids', ())):
         sp.published_scope = 'global'
 
     # 1. Save the core Shopify Product first
@@ -922,6 +932,17 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     except Exception as e:
         db.session.rollback()
         print(f"Final mapping error for {sku}: {e}")
+
+    # "Hold back new products until first stock is received": a product just
+    # created as active, whose Odoo record has never had stock come in, is taken
+    # straight off the Online Store (services/stock_visibility.py). Done after
+    # the variant save above, which re-sends the whole product incl. published_at.
+    if action_log == "created" and sp.status == 'active' and cfg.get('hold_not_received'):
+        try:
+            from services.stock_visibility import hold_new_product
+            hold_new_product(shop_url, odoo, sp.id, p['id'], sku, p.get('name') or sku)
+        except Exception as e:
+            log_event('Storefront', 'Warning', f"Could not hold back new product {sku}: {e}", shop_url=shop_url)
     # Image Sync
     if cfg['images'] and p.get('image_1920'):
         try:
