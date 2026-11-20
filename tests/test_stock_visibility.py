@@ -179,3 +179,27 @@ def test_settings_default_off_and_hidden_ids_skip_overrides(app_ctx):
     assert get_settings(shop)['sold_out'] is True
     set_config(HIDDEN_KEY, {'1': entry(), '2': entry(staff_override=True)}, shop_url=shop)
     assert hidden_product_ids(shop) == {'1'}
+
+
+# --- internal products (expense items) never go to Shopify ---
+
+class _FakeOdoo:
+    def __init__(self, has):
+        self._has = has
+
+    def has_field(self, model, field):
+        return self._has and model == 'product.product' and field == 'can_be_expensed'
+
+
+def test_expense_items_are_kept_out_of_sync_searches():
+    from services.products import internal_product_terms
+    assert internal_product_terms(_FakeOdoo(True)) == [['can_be_expensed', '=', False]]
+    # Odoo without the Expenses app: no extra filter, nothing breaks
+    assert internal_product_terms(_FakeOdoo(False)) == []
+    assert internal_product_terms(None) == []
+
+
+def test_expense_item_is_skipped_by_product_sync():
+    from services.products import process_product_data
+    p = {'id': 1, 'active': True, 'default_code': 'Meal Expenses', 'can_be_expensed': True}
+    assert process_product_data(p, None, 'x.myshopify.com', {}, {}, {}, {}, {}, {}) == "skipped"

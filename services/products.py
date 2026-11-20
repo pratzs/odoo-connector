@@ -95,6 +95,23 @@ def get_exclusion_match(p, rules, tag_names):
     return None
 
 
+# --- Internal products never go to Shopify ---
+# Service-type products are already kept out by the type filter on every search.
+# Expense items (Odoo "Can be Expensed", e.g. Meal Expenses, Software License &
+# Subscriptions) can be consumables marked "Can be Sold", so they slipped through
+# and appeared on the storefront. They are now kept out on every shop, always.
+def has_expense_field(odoo):
+    try:
+        return bool(odoo) and odoo.has_field('product.product', 'can_be_expensed')
+    except Exception:
+        return False
+
+
+def internal_product_terms(odoo):
+    """Odoo domain terms that keep expense items out of every product sync search."""
+    return [['can_be_expensed', '=', False]] if has_expense_field(odoo) else []
+
+
 def find_variant_in_cache(sku, shopify_product_cache):
     clean_sku = str(sku).strip()
     return shopify_product_cache.get(clean_sku)
@@ -201,7 +218,7 @@ def sync_products_master(shop_url):
             '|',
             ['company_id', '=', int(company_id)],
             ['company_id', '=', False]
-        ] + build_exclusion_domain(get_exclusion_rules(shop_url))
+        ] + build_exclusion_domain(get_exclusion_rules(shop_url)) + internal_product_terms(odoo)
 
         try:
             product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search', [domain])
@@ -264,7 +281,7 @@ def sync_all_products_absolute_master(shop_url):
             '|',
             ['company_id', '=', int(company_id)],
             ['company_id', '=', False]
-        ] + build_exclusion_domain(get_exclusion_rules(shop_url))
+        ] + build_exclusion_domain(get_exclusion_rules(shop_url)) + internal_product_terms(odoo)
 
         try:
             product_ids = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search', [domain])
@@ -378,6 +395,8 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
             fields.append('categ_id')
         if cfg['meta_pack_size']:
             fields.append('uom_po_id')
+        if has_expense_field(odoo):
+            fields.append('can_be_expensed')
 
         try:
             products = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'read', [batch_ids], {'fields': fields})
@@ -544,6 +563,7 @@ def process_product_data(p, odoo, shop_url, cfg, uom_map, categ_map, tag_map, db
     from app import db
     
     if not p.get('active'): return "skipped"
+    if p.get('can_be_expensed'): return "skipped"  # expense items never go to Shopify
     sku = str(p.get('default_code') or '').strip()
     if not sku: return "skipped"
 
@@ -1682,7 +1702,7 @@ def sync_missing_new_products(shop_url):
             '|',
             ['company_id', '=', int(company_id)],
             ['company_id', '=', False]
-        ] + build_exclusion_domain(get_exclusion_rules(shop_url))
+        ] + build_exclusion_domain(get_exclusion_rules(shop_url)) + internal_product_terms(odoo)
 
         try:
             odoo_products = odoo.models.execute_kw(
@@ -1751,7 +1771,7 @@ def queue_new_products_fast(shop_url, limit=100):
         ['active', '=', True],
         ['default_code', '!=', False],
         '|', ['company_id', '=', int(company_id)], ['company_id', '=', False],
-    ] + build_exclusion_domain(get_exclusion_rules(shop_url))
+    ] + build_exclusion_domain(get_exclusion_rules(shop_url)) + internal_product_terms(odoo)
     try:
         odoo_ids = odoo.models.execute_kw(
             odoo.db, odoo.uid, odoo.password, 'product.product', 'search',
