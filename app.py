@@ -956,7 +956,7 @@ def _run_inventory_sync_locked(shop_url, force_clearance=False):
 
 
 def run_stock_visibility_now(shop_url, dry_run=False, source='apply now'):
-    """Dashboard 'Apply now' / 'Preview' and switch changes."""
+    """Dashboard 'Run now' / 'Check first' and switch changes."""
     with app.app_context():
         try:
             from services.stock_visibility import run_stock_visibility
@@ -4696,7 +4696,7 @@ def api_stock_visibility_settings():
 def api_stock_visibility_apply():
     shop_url = request.args.get('shop')
     start_stock_visibility(shop_url, source='apply now')
-    return jsonify({'success': True, 'message': 'Started. The list updates in a minute or two.'})
+    return jsonify({'success': True, 'message': 'Running now. The list updates in a minute or two.'})
 
 
 @app.route('/api/stock_visibility/preview', methods=['POST'])
@@ -4705,7 +4705,7 @@ def api_stock_visibility_preview():
     """Dry run: counts what each rule would hide right now. Changes nothing."""
     shop_url = request.args.get('shop')
     start_stock_visibility(shop_url, dry_run=True, source='preview')
-    return jsonify({'success': True, 'message': 'Preview started. Nothing is changed.'})
+    return jsonify({'success': True, 'message': 'Checking now. Nothing will change. Results show in a minute or two.'})
 
 
 # ==========================================

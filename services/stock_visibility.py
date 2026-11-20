@@ -67,7 +67,7 @@ SOLD_OUT = 'sold_out'
 NOT_RECEIVED = 'not_received'
 REASON_LABELS = {
     SOLD_OUT: 'Sold out',
-    NOT_RECEIVED: 'Not yet received',
+    NOT_RECEIVED: 'Not received yet',
 }
 
 _PRODUCT_FIELDS = """
@@ -213,8 +213,8 @@ def plan_changes(products, hidden, never_received, settings, clearance_suffix='-
     unsellable = sum(1 for p in active if not p['sellable'])
     refused = None
     if len(active) >= SANITY_MIN_PRODUCTS and unsellable > SANITY_SHARE * len(active) and hide:
-        refused = (f"{unsellable} of {len(active)} active products read as unsellable, which looks like "
-                   f"broken stock data rather than a real sell-out. Nothing was hidden.")
+        refused = (f"Stopped: {unsellable} of {len(active)} products show as out of stock, which looks like "
+                   f"a stock data problem, not a real sell-out. Nothing was hidden.")
         hide = []
 
     hide.sort(key=lambda p: (p['reason'] != NOT_RECEIVED, p['title'].lower()))
@@ -393,7 +393,7 @@ def _apply(shop_url, plan, hidden):
             hidden.pop(p['id'], None)
             shown_n += 1
             log_event('Storefront', 'Info',
-                      f"Showing {p['skus'][0] if p['skus'] else p['id']} on the storefront again: it can be sold.",
+                      f"Brought back {p['skus'][0] if p['skus'] else p['id']}: it can be sold again.",
                       shop_url=shop_url)
         except Exception as e:
             failed.append(f"show {p['id']}: {e}")
@@ -404,8 +404,7 @@ def _apply(shop_url, plan, hidden):
                                'reason': p['reason'], 'since': now}
             hidden_n += 1
             log_event('Storefront', 'Info',
-                      f"Hid {p['skus'][0] if p['skus'] else p['id']} from the storefront: "
-                      f"{REASON_LABELS[p['reason']].lower()}.", shop_url=shop_url)
+                      f"Hid {p['skus'][0] if p['skus'] else p['id']}: {REASON_LABELS[p['reason']].lower()}.", shop_url=shop_url)
         except Exception as e:
             failed.append(f"hide {p['id']}: {e}")
     _save_hidden(shop_url, hidden)
@@ -441,8 +440,8 @@ def run_stock_visibility(shop_url, dry_run=False, source='sync'):
         hidden_n, shown_n, failed = _apply(shop_url, plan, hidden)
         if plan['capped']:
             log_event('Storefront', 'Warning',
-                      f"Hide-from-storefront: safety limit of {MAX_HIDE_PER_RUN} per run reached; "
-                      f"{plan['capped']} more will be hidden on the next run(s).", shop_url=shop_url)
+                      f"Hide from storefront: hit the limit of {MAX_HIDE_PER_RUN} for one run. "
+                      f"{plan['capped']} more will be hidden on the next run.", shop_url=shop_url)
         if failed:
             log_event('Storefront', 'Warning',
                       f"Hide-from-storefront: {len(failed)} change(s) failed: {failed[:5]}", shop_url=shop_url)
@@ -453,8 +452,8 @@ def run_stock_visibility(shop_url, dry_run=False, source='sync'):
         set_config(LAST_RUN_KEY, summary, shop_url=shop_url)
         if hidden_n or shown_n or plan['refused']:
             log_event('Storefront', 'Success' if not failed else 'Warning',
-                      f"Hide-from-storefront ({source}): hid {hidden_n}, showed {shown_n} again, "
-                      f"{summary['now_hidden']} now hidden by this rule.", shop_url=shop_url)
+                      f"Hide from storefront ({source}): hid {hidden_n}, brought back {shown_n}. "
+                      f"{summary['now_hidden']} hidden right now.", shop_url=shop_url)
         return summary
     finally:
         try:
@@ -483,8 +482,8 @@ def _store_preview(shop_url, products, hidden, never):
     }
     set_config(PREVIEW_KEY, preview, shop_url=shop_url)
     log_event('Storefront', 'Info',
-              f"Hide-from-storefront preview: {preview['sold_out']} sold out, "
-              f"{preview['not_received']} not yet received, of {preview['active_checked']} active products.",
+              f"Hide from storefront check: would hide {preview['sold_out']} sold out and "
+              f"{preview['not_received']} not received yet (of {preview['active_checked']} products).",
               shop_url=shop_url)
     return preview
 
@@ -543,7 +542,7 @@ def hold_new_product(shop_url, odoo, shopify_product_id, odoo_product_id, sku, t
                                            'since': datetime.utcnow().strftime('%Y-%m-%d %H:%M')}
         _save_hidden(shop_url, hidden)
         log_event('Storefront', 'Info',
-                  f"New product {sku} kept off the storefront: not yet received.", shop_url=shop_url)
+                  f"Hid new product {sku}: not received yet.", shop_url=shop_url)
         return True
     finally:
         try:
