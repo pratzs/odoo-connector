@@ -190,6 +190,27 @@ def bisecting_read(odoo, model, ids, fields, shop_url, label, chunk_size=250, en
 
     return results, failed
 
+CATCH_UP_LIMIT = 200  # most never-synced products added to one nightly run
+
+
+def pick_unsynced(candidates, mapped_odoo_ids, mapped_skus, limit=CATCH_UP_LIMIT):
+    """Odoo products that should be on Shopify but have never been synced.
+
+    candidates: [{'id', 'default_code'}] for every active, sellable product the
+    shop takes. A product is picked when neither its Odoo id nor its SKU is in
+    ProductMap. A SKU already linked to another Odoo record (expo copies,
+    duplicates) is left to the existing SKU-claim logic, so nothing is listed twice.
+    Products with no SKU are skipped, the same as the batch sync does.
+    Returns (ids to sync now, total found)."""
+    picked = []
+    for c in candidates:
+        sku = str(c.get('default_code') or '').strip()
+        if not sku or c['id'] in mapped_odoo_ids or sku in mapped_skus:
+            continue
+        picked.append(c['id'])
+    return picked[:limit], len(picked)
+
+
 # =====================================================
 # 1. THE DISPATCHER
 # =====================================================
@@ -225,6 +246,34 @@ def sync_products_master(shop_url):
         except Exception as e:
             log_event('Product Sync', 'Error', f"Search Failed: {e}", shop_url=shop_url)
             return
+
+        # Catch-up: the search above only sees products edited in the last 2 days,
+        # so a product whose sync failed once (Odoo error, worker restart, a batch
+        # dropped) would never be tried again. Every run also picks up any active
+        # product the shop should have that has never been linked to Shopify, and
+        # puts those first so they are not stuck behind routine updates.
+        try:
+            # Same filters as the search above, without the 2-day edit window.
+            full_domain = [
+                ['sale_ok', '=', True],
+                ['type', 'in', ['product', 'consu']],
+                ['active', '=', True],
+                '|',
+                ['company_id', '=', int(company_id)],
+                ['company_id', '=', False]
+            ] + build_exclusion_domain(get_exclusion_rules(shop_url)) + internal_product_terms(odoo)
+            candidates = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'search_read',
+                                                [full_domain], {'fields': ['default_code']})
+            rows = ProductMap.query.with_entities(ProductMap.odoo_product_id, ProductMap.sku).filter_by(shop_url=shop_url).all()
+            catch_up, found = pick_unsynced(candidates, {r[0] for r in rows}, {(r[1] or '').strip() for r in rows})
+            if catch_up:
+                seen = set(catch_up)
+                product_ids = catch_up + [i for i in product_ids if i not in seen]
+                log_event('Product Sync', 'Info',
+                    f"Catch-up: {found} active Odoo product(s) not on Shopify yet, syncing {len(catch_up)} first.",
+                    shop_url=shop_url)
+        except Exception as e:
+            log_event('Product Sync', 'Warning', f"Catch-up check failed: {e}", shop_url=shop_url)
 
         # Archive in Shopify any products archived in Odoo since the last sync,
         # and release their ProductMap rows — BEFORE queuing new-product batches,
@@ -326,7 +375,12 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
     from app import app
     with app.app_context():
         odoo = get_odoo_connection(shop_url)
-        if not odoo or not setup_shopify_session(shop_url): return
+        if not odoo or not setup_shopify_session(shop_url):
+            log_event('Product Sync', 'Error',
+                f"{batch_name}: skipped {len(batch_ids)} product(s), could not connect to "
+                f"{'Odoo' if not odoo else 'Shopify'}. The nightly catch-up will retry any new ones.",
+                shop_url=shop_url)
+            return
         
         # Cache currency in Redis for 1 hour — avoids 1 API call per batch
         from utils import conn as redis_conn

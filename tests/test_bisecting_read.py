@@ -44,3 +44,21 @@ def test_only_the_unreadable_product_is_skipped_and_logged():
     assert len(recs) == 49
     assert log.call_args[0][0] == 'Product Sync'
     assert '17' in log.call_args[0][2]
+
+
+def test_catch_up_picks_only_products_never_on_shopify():
+    cands = [
+        {'id': 1, 'default_code': 'C0630'},           # never synced -> pick
+        {'id': 2, 'default_code': 'A0001'},           # already linked by id
+        {'id': 3, 'default_code': 'C116'},            # SKU already on Shopify via another record
+        {'id': 4, 'default_code': False},             # no SKU
+        {'id': 5, 'default_code': ' C0631 '},         # whitespace still counts as new
+    ]
+    ids, found = P.pick_unsynced(cands, mapped_odoo_ids={2, 99}, mapped_skus={'A0001', 'C116'})
+    assert ids == [1, 5] and found == 2
+
+
+def test_catch_up_is_capped_per_run():
+    cands = [{'id': i, 'default_code': f'X{i}'} for i in range(10)]
+    ids, found = P.pick_unsynced(cands, set(), set(), limit=4)
+    assert ids == [0, 1, 2, 3] and found == 10
