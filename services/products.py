@@ -152,7 +152,7 @@ def extract_pack_size(uom_name):
     match = re.match(r'ctnx(\d+)', name, re.IGNORECASE)
     return int(match.group(1)) if match else 1
 
-def bisecting_read(odoo, model, ids, fields, shop_url, label, chunk_size=250):
+def bisecting_read(odoo, model, ids, fields, shop_url, label, chunk_size=250, entity='Metafield Refresh'):
     """
     Reads records in chunks; if a chunk's read call errors (e.g. Odoo's XML-RPC
     'cannot marshal NewId objects' bug on certain products), bisects that chunk down
@@ -184,7 +184,7 @@ def bisecting_read(odoo, model, ids, fields, shop_url, label, chunk_size=250):
     if failed:
         shown = failed[:20]
         suffix = f" (+{len(failed) - 20} more)" if len(failed) > 20 else ""
-        log_event('Metafield Refresh', 'Warning',
+        log_event(entity, 'Warning',
             f"{label}: skipped {len(failed)} product(s) that error on read — Odoo IDs: {shown}{suffix}",
             shop_url=shop_url)
 
@@ -398,10 +398,19 @@ def sync_product_batch_task(shop_url, batch_ids, batch_name):
         if has_expense_field(odoo):
             fields.append('can_be_expensed')
 
-        try:
-            products = odoo.models.execute_kw(odoo.db, odoo.uid, odoo.password, 'product.product', 'read', [batch_ids], {'fields': fields})
-        except Exception as e:
-            print(f"Odoo Batch Read Error: {e}")
+        # Read in small chunks. Product images in Odoo can be 1-2 MB each, and a
+        # single read of 50 products with images can pass ~29 MB, at which point
+        # Odoo cuts the reply off ("Response ended prematurely"). That used to drop
+        # all 50 products with no log line, so new products in that batch never
+        # reached Shopify (C0630/C0631, Nov 2026). bisecting_read splits any chunk
+        # that still fails and logs the exact products it could not read.
+        products, failed_ids = bisecting_read(odoo, 'product.product', list(batch_ids), fields,
+                                              shop_url, f"Product Sync {batch_name}",
+                                              chunk_size=10, entity='Product Sync')
+        if not products:
+            if failed_ids:
+                log_event('Product Sync', 'Error',
+                    f"{batch_name}: could not read any of {len(failed_ids)} product(s) from Odoo.", shop_url=shop_url)
             return
 
         # Bulk fetch Categories, Tags & UOMs
